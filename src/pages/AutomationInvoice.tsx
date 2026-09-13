@@ -58,6 +58,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
+import { useSubscription } from "@/contexts/SubscriptionContext";
 
 // Indian States for GST
 const INDIAN_STATES = [
@@ -184,6 +185,7 @@ interface InventoryStockItem {
 }
 
 const AutomationInvoice = () => {
+  const { user } = useSubscription();
   const navigate = useNavigate();
   const location = useLocation();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -211,7 +213,11 @@ const AutomationInvoice = () => {
     let next = 1;
     if (saved) {
       try {
-        const invoices = JSON.parse(saved) as InvoiceData[];
+        const rawInvoices = JSON.parse(saved) as InvoiceData[];
+        const invoices = rawInvoices.filter(inv => {
+          if ((inv as any).userId && user?.id && String((inv as any).userId) !== String(user.id)) return false;
+          return true;
+        });
         const matchingNos = invoices
           .filter(inv => inv.type === type && inv.invoiceNo && inv.invoiceNo.startsWith(`${prefix}-`))
           .map(inv => {
@@ -785,7 +791,12 @@ const AutomationInvoice = () => {
       const saved = localStorage.getItem('savedInvoices');
       if (saved) {
         try {
-          mergedInvoices = JSON.parse(saved).filter((inv: any) => inv.type !== 'purchase');
+          const parsed = JSON.parse(saved);
+          mergedInvoices = parsed.filter((inv: any) => {
+            if (inv.type === 'purchase') return false;
+            if (inv.userId && user?.id && String(inv.userId) !== String(user.id)) return false;
+            return true;
+          });
         } catch (e) {
           console.error(e);
         }
@@ -1449,6 +1460,7 @@ const AutomationInvoice = () => {
       const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
       const invoiceToSave = {
         ...currentInvoice,
+        userId: user?.id,
         status: statusValue,
         dueReminderDate,
         ocrJson: buildGstPortalJson({ ...currentInvoice, dueReminderDate }),

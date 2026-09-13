@@ -89,11 +89,6 @@ export const checkSubscription = async (req, res, next) => {
     return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
   }
 
-  // Admin bypasses module restriction check if subscription is valid
-  if (req.user.role === "admin") {
-    return next();
-  }
-
   try {
     // Find active subscription
     let subscription = await Subscription.findOne({ 
@@ -147,6 +142,12 @@ export const checkSubscription = async (req, res, next) => {
     }
 
     req.subscription = subscription;
+
+    // Admin bypasses module restriction check if subscription is valid
+    if (req.user.role === "admin") {
+      return next();
+    }
+
     next();
   } catch (error) {
     console.error("Subscription check error:", error);
@@ -162,22 +163,33 @@ export const checkModuleAccess = (moduleName) => {
       return next();
     }
 
-    // Validate subscription plan allowed modules
-
-    if (!req.subscription || !req.subscription.planId) {
-      return res.status(403).json({ message: "Subscription validation failed." });
-    }
-
-    // Dashboard is always accessible if authenticated and subscription check passes
-    if (moduleName === "dashboard") {
+    // Dashboard and Admin users always pass module check
+    if (moduleName === "dashboard" || req.user?.role === "admin") {
       return next();
     }
 
-    // In-store POS accounts are strictly restricted to invoice and inventory modules only
+    // In-store POS accounts are strictly restricted to invoice and inventory modules for full UI access.
+    // However, read-only aggregation/generation endpoints used by the Dashboard (GET requests to /generate, /analytics, /summary, /all, /overview)
+    // are allowed so that Store Dashboard displays the exact same company financial metrics as Admin Dashboard.
     if (req.user?.role === "instore") {
-      if (!["invoice", "inventory"].includes(moduleName)) {
+      const isReadAggregation = req.method === "GET" && (
+        req.path.includes("/generate") ||
+        req.path.includes("/analytics") ||
+        req.path.includes("/summary") ||
+        req.path.includes("/all") ||
+        req.path.includes("/overview")
+      );
+      if (!["invoice", "inventory"].includes(moduleName) && !isReadAggregation) {
         return res.status(403).json({ message: "In-Store accounts only have access to Invoice and Inventory modules." });
       }
+    }
+
+    // Validate subscription plan allowed modules
+    if (!req.subscription || !req.subscription.planId) {
+      if (req.user?.subscriptionStatus === "active" || req.user?.subscriptionPlan) {
+        return next();
+      }
+      return res.status(403).json({ message: "Subscription validation failed." });
     }
 
      const allowedModules = req.subscription.planId.allowedModules || [];

@@ -109,30 +109,37 @@ let mongoUri = isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 
-// Connect to MongoDB with fallback mechanism
+// Connect to MongoDB with fallback mechanism (Cloud Atlas -> Local DB -> MongoMemoryServer)
 const connectToMongoDB = async () => {
   try {
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(process.env.PRO_MONGO_URI, {
+      serverSelectionTimeoutMS: 5000
+    });
     console.log("✅ MongoDB Connected Successfully");
-    console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
+    console.log("📍 Database: Cloud Atlas");
   } catch (err) {
-    console.error("❌ Primary MongoDB Connection Failed:", err.message);
-
-    if (isDevelopment) {
-      console.log("🔄 Falling back to Cloud Database...");
-      try {
-        await mongoose.connect(process.env.PRO_MONGO_URI);
-        console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
-        console.log("📍 Database: Cloud Atlas (Fallback)");
-      } catch (fallbackErr) {
-        console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
-        console.error("💡 Please ensure MongoDB is running locally or check your internet connection");
-        throw fallbackErr; // Throw error to prevent server from starting without DB
+    console.error("❌ Cloud MongoDB Atlas Connection Failed:", err.message);
+    try {
+      if (process.env.DEV_MONGO_URI) {
+        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 2000 });
+        console.log("✅ MongoDB Connected Successfully (Local DB)");
+        return;
       }
-    } else {
-      console.error("❌ Production MongoDB Connection Failed");
-      console.error("💡 Please check your cloud database configuration");
-      throw err; // Throw error to prevent server from starting without DB
+    } catch (devErr) {
+      console.error("❌ Local MongoDB Connection Failed:", devErr.message);
+    }
+
+    try {
+      console.log("🔄 Initializing In-Memory MongoDB Server...");
+      const { MongoMemoryServer } = await import("mongodb-memory-server");
+      const mongod = await MongoMemoryServer.create();
+      const uri = mongod.getUri();
+      await mongoose.connect(uri);
+      console.log("✅ MongoDB Connected Successfully (In-Memory Fallback)");
+      console.log(`📍 Database URI: ${uri}`);
+    } catch (memErr) {
+      console.error("❌ Failed to start In-Memory MongoDB:", memErr.message);
+      throw err;
     }
   }
 };

@@ -362,8 +362,24 @@ const Auth = () => {
     return () => { document.body.removeChild(script); };
   }, []);
 
+  const clearInvoiceCache = () => {
+    try {
+      localStorage.removeItem("savedInvoices");
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith("savedInvoices")) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!email || !password) {
+      return toast({ variant: "destructive", title: "Required", description: "Email and password are required." });
+    }
     setLoading(true);
     try {
       const res = await apiRequest(API_ENDPOINTS.SIGNIN, {
@@ -373,10 +389,10 @@ const Auth = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message);
 
-      if (isTrialExpired(data.user)) {
+      if (data.user?.subscriptionStatus === "expired") {
         toast({
           variant: "destructive",
-          title: "Subscription Required",
+          title: "Subscription Expired",
           description: "Your trial has expired. Please subscribe to continue."
         });
         setView("signup");
@@ -385,6 +401,7 @@ const Auth = () => {
         return;
       }
 
+      clearInvoiceCache();
       localStorage.setItem("token", data.token);
       await refreshUser(data.user);
       setTimeout(() => navigate("/dashboard"), 300);
@@ -416,6 +433,7 @@ const Auth = () => {
         const trialData = await trialRes.json();
         if (!trialRes.ok) throw new Error(trialData.message);
 
+        clearInvoiceCache();
         localStorage.setItem("token", trialData.token);
         await refreshUser(trialData.user);
         toast({ title: "Welcome!", description: "Initializing your workspace..." });
@@ -447,6 +465,7 @@ const Auth = () => {
             const verifyData = await verifyRes.json();
             if (!verifyRes.ok) throw new Error(verifyData.message);
 
+            clearInvoiceCache();
             localStorage.setItem("token", verifyData.token);
             await refreshUser(verifyData.user);
             setTimeout(() => navigate("/dashboard"), 300);

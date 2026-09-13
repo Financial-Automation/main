@@ -375,11 +375,23 @@ const Dashboard = () => {
           if (parsed && parsed.invoices) backendInvoices = parsed.invoices;
         }
 
-        // Merge backend invoices and localStorage invoices to guarantee local work is visible
+        // Merge backend invoices and localStorage invoices prioritizing backend server data
         const localInvoices: any[] = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
         const invoiceMap = new Map();
-        [...localInvoices, ...backendInvoices].forEach(inv => {
-          const key = inv.invoiceNo || inv.invoiceNumber || inv._id || inv.id;
+        // First add backendInvoices (canonical source from DB)
+        backendInvoices.forEach(inv => {
+          const key = inv.invoiceNumber || inv.invoiceNo || inv._id || inv.id;
+          if (key) {
+            invoiceMap.set(key, inv);
+          }
+        });
+        // Then add any local-only invoices strictly belonging to current logged-in user
+        const currentUserId = user?.id || contextUser?.id;
+        localInvoices.forEach(inv => {
+          const key = inv.invoiceNumber || inv.invoiceNo || inv._id || inv.id;
+          if (inv.userId && currentUserId && String(inv.userId) !== String(currentUserId)) {
+            return;
+          }
           if (key && !invoiceMap.has(key)) {
             invoiceMap.set(key, inv);
           }
@@ -715,6 +727,16 @@ const Dashboard = () => {
 
   const handleSignOut = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("savedInvoices");
+    try {
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith("savedInvoices")) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) {
+      console.error(e);
+    }
     refreshUser(null);
     navigate("/auth");
   };
