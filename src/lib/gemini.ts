@@ -10,11 +10,7 @@ export interface ChatMessage {
 const toNumber = (value: unknown) => Number(value) || 0;
 
 const runCallGemini = async (chatMessages: ChatMessage[]): Promise<string> => {
-  const apiKey = "AIzaSyDnmZ6XIvnOkyXYzbxhEsSAc8DkPd-5iL0";
-  const model = "gemini-1.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-
-  // Fetch live database context in background for full access
+  // Fetch live database context in background for fallback access
   let dbContext = "No database context loaded.";
   let bookkeepingEntries: any[] = [];
   let invoicesList: any[] = [];

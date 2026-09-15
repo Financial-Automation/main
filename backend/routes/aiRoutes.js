@@ -8,6 +8,8 @@ import Customer from "../models/Customer.js";
 import LedgerAccount from "../models/LedgerAccount.js";
 import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import CashTransaction from "../models/CashTransaction.js";
+import mongoose from "mongoose";
+import { getFinanceMetrics, getLiveBalanceSheet, getGstAnalytics, resolvePeriod } from "../utils/financeAggregator.js";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
@@ -180,6 +182,7 @@ const processWithGemini = async (base64Data, mimeType) => {
   if (!ai) throw new Error("Gemini AI not initialized");
 
   const modelOptions = [
+    "gemini-3.6-flash",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
@@ -618,6 +621,7 @@ router.post("/extract-text", async (req, res) => {
     // Try Gemini first with multiple model fallbacks
     if (hasGemini) {
       const modelOptions = [
+        "gemini-3.6-flash",
         "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-1.5-flash",
@@ -788,66 +792,216 @@ router.post("/cfo-chat", verifyToken, async (req, res) => {
       return res.status(400).json({ success: false, message: "History array is required" });
     }
 
-    // 1. Gather all tenant metrics from DB
-    const [invoices, customers, ledgerAccounts, bookkeepingEntries, cashflowEntries] = await Promise.all([
-      Invoice.find({ userId, isDeleted: false }),
+    // 1. Resolve Mongoose models safely
+    const PurchaseInvoice = mongoose.models.PurchaseInvoice || mongoose.model("PurchaseInvoice", new mongoose.Schema({}, { strict: false }));
+    const InventoryItem = mongoose.models.InventoryItem || mongoose.model("InventoryItem", new mongoose.Schema({}, { strict: false }));
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+    const [
+      financeThisMonth,
+      balanceSheet,
+      gstData,
+      invoices,
+      purchaseInvoices,
+      inventoryItems,
+      customers,
+      ledgerAccounts,
+      bookkeepingEntries
+    ] = await Promise.all([
+      getFinanceMetrics(userId, startOfMonth, endOfMonth).catch(() => null),
+      getLiveBalanceSheet(userId, "this-month").catch(() => null),
+      getGstAnalytics(userId, "this-month").catch(() => null),
+      Invoice.find({ userId, isDeleted: { $ne: true } }).sort({ invoiceDate: -1 }),
+      PurchaseInvoice.find({ userId, isDeleted: { $ne: true } }).sort({ createdAt: -1 }),
+      InventoryItem.find({ userId, isDeleted: { $ne: true } }),
       Customer.find({ userId }),
       LedgerAccount.find({ userId }),
-      BookkeepingEntry.find({ userId }),
-      CashTransaction.find({ userId })
+      BookkeepingEntry.find({ userId, isDeleted: { $ne: true } }).sort({ date: -1 })
     ]);
 
-    // Summarize the data for Gemini context
+    // Safely query Payroll
+    let payrollRecords = [];
+    try {
+      const Payroll = mongoose.models.Payroll;
+      if (Payroll) {
+        payrollRecords = await Payroll.find({ userId });
+      }
+    } catch (e) {
+      console.warn("Could not query payroll records:", e.message);
+    }
+
+    // 2. Compute Granular Module Summaries
+    // Sales Invoices
     const invoiceCount = invoices.length;
     const invoiceTotal = invoices.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
-    const invoicePaid = invoices.filter(inv => inv.status === 'paid').reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
-    const invoiceUnpaid = invoices.filter(inv => inv.status !== 'paid' && inv.status !== 'cancelled').reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
-    const overdueInvoices = invoices.filter(inv => inv.status === 'overdue');
+    const invoicePaid = invoices.filter(inv => inv.status === 'paid' || inv.paymentStatus === 'paid').reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
+    const invoiceUnpaid = invoices.filter(inv => inv.status !== 'paid' && inv.status !== 'cancelled' && inv.paymentStatus !== 'paid').reduce((sum, inv) => sum + (inv.balanceDue || inv.grandTotal || 0), 0);
+    const overdueInvoices = invoices.filter(inv => inv.status === 'overdue' || (inv.dueDate && new Date(inv.dueDate) < now && inv.status !== 'paid'));
 
-    const customerCount = customers.length;
-    
-    // Ledger accounts balances
-    const ledgerBalances = ledgerAccounts.map(acc => `- ${acc.name} (${acc.code}): ₹${acc.balance.toLocaleString("en-IN")}`).join("\n");
+    const recentInvoicesList = invoices.slice(0, 5).map(i => `- Inv #${i.invoiceNumber} | Client: ${i.customerName || 'N/A'} | Total: ₹${(i.grandTotal || 0).toLocaleString("en-IN")} | Status: ${i.status || 'pending'} | Due: ₹${(i.balanceDue || 0).toLocaleString("en-IN")}`).join("\n");
+    const topOverdue = overdueInvoices.slice(0, 5).map(inv => `- Inv #${inv.invoiceNumber} (${inv.customerName}): ₹${(inv.balanceDue || inv.grandTotal || 0).toLocaleString("en-IN")} (Due: ${inv.dueDate ? new Date(inv.dueDate).toLocaleDateString("en-IN") : 'N/A'})`).join("\n");
 
+    // Purchase Invoices (Vendor Payables)
+    const purchaseCount = purchaseInvoices.length;
+    const purchaseTotal = purchaseInvoices.reduce((sum, p) => sum + (p.total || p.grandTotal || 0), 0);
+    const purchaseUnpaid = purchaseInvoices.reduce((sum, p) => sum + (p.balance || p.balanceDue || 0), 0);
+    const recentPurchasesList = purchaseInvoices.slice(0, 5).map(p => `- Bill #${p.billNumber || p.invoiceNumber || 'PUR-N/A'} | Vendor: ${p.partyName || p.vendorName || 'Vendor'} | Total: ₹${(p.total || p.grandTotal || 0).toLocaleString("en-IN")} | Balance Due: ₹${(p.balance || 0).toLocaleString("en-IN")}`).join("\n");
+
+    // Customers
+    const customerSummary = customers.slice(0, 5).map(c => `- ${c.name} (${c.company || 'Individual'}): Phone: ${c.phone || 'N/A'}, Outstanding Receivable: ₹${(c.outstandingBalance || 0).toLocaleString("en-IN")}`).join("\n");
+
+    // Inventory & Stock
+    const totalInventoryValue = inventoryItems.reduce((sum, item) => sum + ((item.quantity || 0) * (item.price || item.costPrice || 0)), 0);
+    const lowStockItems = inventoryItems.filter(item => (item.quantity || 0) < 10);
+    const inventoryListSummary = inventoryItems.slice(0, 5).map(item => `- Product: ${item.name || item.itemName} (SKU: ${item.sku || 'N/A'}): Qty in Stock: ${item.quantity || 0}, Unit Cost: ₹${item.costPrice || item.price || 0}, Selling Price: ₹${item.sellingPrice || item.price || 0}`).join("\n");
+
+    // Bookkeeping Totals & Category Breakdown
     const bkIncome = bookkeepingEntries.filter(e => e.type === "income" || e.type === "Income").reduce((sum, e) => sum + (e.amount || 0), 0);
-    const bkExpense = bookkeepingEntries.filter(e => e.type === "expense" || e.type === "Expenses").reduce((sum, e) => sum + (e.amount || 0), 0);
+    const bkExpense = bookkeepingEntries.filter(e => e.type === "expense" || e.type === "Expenses" || e.type === "Expense").reduce((sum, e) => sum + (e.amount || 0), 0);
     const netProfit = bkIncome - bkExpense;
+    const profitMargin = bkIncome > 0 ? ((netProfit / bkIncome) * 100).toFixed(1) : "0.0";
 
-    const cfInflow = cashflowEntries.filter(t => t.type === 'inflow').reduce((sum, t) => sum + (t.amount || 0), 0);
-    const cfOutflow = cashflowEntries.filter(t => t.type === 'outflow').reduce((sum, t) => sum + (t.amount || 0), 0);
-    const netCashFlow = cfInflow - cfOutflow;
+    const bkCategories = {};
+    bookkeepingEntries.filter(e => e.type === "expense" || e.type === "Expense").forEach(e => {
+      const cat = e.category || "General Expense";
+      bkCategories[cat] = (bkCategories[cat] || 0) + (e.amount || 0);
+    });
+    const bkCategoryBreakdown = Object.entries(bkCategories).map(([cat, val]) => `- ${cat}: ₹${val.toLocaleString("en-IN")}`).join("\n");
+    const recentBkEntries = bookkeepingEntries.slice(0, 5).map(e => `- ${new Date(e.date).toLocaleDateString("en-IN")} | ${e.type.toUpperCase()} | ${e.category || 'General'}: ${e.description || 'Entry'} - ₹${(e.amount || 0).toLocaleString("en-IN")}`).join("\n");
 
-    const systemPrompt = `You are the AI CFO / Financial Assistant for "FinSmart" - a professional books & accounting SaaS clone of Zoho Books.
-Your tone should be highly professional, concise, clear, financial, and actionable.
-You will answer the user's questions strictly based on the company's live financial data provided in the context below.
-Do not make up figures. Do not output raw JSON or code.
-If data is missing for a calculation, explain it simply.
-Keep answers short and directly to the point. Focus on key metrics like revenue, cash balance, profits, overdue invoices, and financial ratios.
+    // Payroll Summary
+    const totalPayrollGross = payrollRecords.reduce((sum, p) => sum + (p.grossSalary || 0), 0);
+    const totalPayrollNet = payrollRecords.reduce((sum, p) => sum + (p.netSalary || 0), 0);
+    const payrollListSummary = payrollRecords.slice(0, 5).map(p => `- Employee: ${p.employeeName} (${p.employeeRole || 'Staff'} - ${p.employeeDepartment || 'Dept'}): Gross ₹${(p.grossSalary || 0).toLocaleString("en-IN")}, Net Payable ₹${(p.netSalary || 0).toLocaleString("en-IN")}`).join("\n");
 
-=== LIVE FINANCIAL DATA CONTEXT ===
-- Registered Customers: ${customerCount}
-- Bookkeeping Income (Live Ledger): ₹${bkIncome.toLocaleString("en-IN")}
-- Bookkeeping Expenses (Live Ledger): ₹${bkExpense.toLocaleString("en-IN")}
-- Net Profit: ₹${netProfit.toLocaleString("en-IN")}
-- Total Invoices Generated: ${invoiceCount} (Total Value: ₹${invoiceTotal.toLocaleString("en-IN")})
-- Paid Invoices Value: ₹${invoicePaid.toLocaleString("en-IN")}
-- Outstanding Receivables: ₹${invoiceUnpaid.toLocaleString("en-IN")}
+    // Ledger Balances Summary
+    const ledgerSummary = ledgerAccounts.map(acc => `- ${acc.name} (${acc.code || 'GL'}): ₹${(acc.balance || 0).toLocaleString("en-IN")}`).join("\n");
+
+    // Balance Sheet Overview
+    const totalAssets = balanceSheet?.assets?.totalAssets || 0;
+    const totalLiabilities = balanceSheet?.liabilities?.totalLiabilities || 0;
+    const totalEquity = balanceSheet?.equity?.totalEquity || 0;
+    const currentRatio = balanceSheet?.liabilities?.currentLiabilities > 0 
+      ? (balanceSheet.assets.currentAssets / balanceSheet.liabilities.currentLiabilities).toFixed(2) 
+      : "N/A";
+
+    // GST Overview
+    const outputGst = gstData?.gstSummary?.outputGst || 0;
+    const inputGst = gstData?.gstSummary?.inputGst || 0;
+    const gstPayable = gstData?.gstSummary?.gstPayable || 0;
+    const gstReceivable = gstData?.gstSummary?.gstReceivable || 0;
+
+    // AI CFO Master System Prompt
+    const masterSystemPrompt = `
+# AI CFO ASSISTANT — MASTER SYSTEM PROMPT
+
+## 1. ROLE & IDENTITY
+You are **AI CFO**, the chief financial assistant, executive advisor, and intelligent accountant inside this business management platform.
+You have direct access to the company's authenticated accounting database across all business modules:
+- Sales & Invoicing (Invoices, Customers, Accounts Receivable AR, Overdue Collections)
+- Purchases & Vendor Payables (Purchase Invoices, Vendors, Accounts Payable AP, Bills)
+- Bookkeeping Ledger & General Ledger (Income, Expense Categories, Journal Entries, Chart of Accounts)
+- Profit & Loss Statement (Revenue, COGS, Operating Expenses, Gross & Net Profit Margins)
+- Balance Sheet & Financial Statements (Assets, Liabilities, Equity, Cash & Bank Balances, Liquidity)
+- Inventory Management (Stock quantities, SKUs, Unit Costs, Selling Prices, Inventory Valuation)
+- Payroll & HR (Employees, Roles, Gross Salaries, Net Salary Payables)
+- Tax & GST (Output GST, Input ITC Credit, Net GST Payable / Carry Forward)
+
+## 2. CORE DIRECTIVE
+- ALWAYS QUERY AND USE THE LIVE TENANT DATABASE CONTEXT BELOW to answer any user question regarding revenue, expenses, net profit, invoices, purchase bills, bank balances, customers, inventory, payroll, GST, or financial ratios.
+- NEVER invent financial figures or assume missing data when live numbers exist in the context below.
+- If data for a specific metric is zero, clearly report: "According to your recorded database entries, no transactions have been logged for this item yet."
+
+## 3. RESPONSE STRUCTURE
+For quick questions, answer directly with the exact figure requested.
+For financial reviews, comparative analysis, or business advice, structure your answer as:
+
+### Summary
+Concise executive conclusion.
+
+### Key Numbers
+- Revenue / Income: ₹XX
+- Total Expenses: ₹XX
+- Net Profit: ₹XX (Net Margin: XX%)
+- Cash & Bank / Receivables: ₹XX
+
+### What I Found
+Deep CFO analysis explaining numbers, expense drivers, collection risks, margin health, and trends based strictly on the retrieved database records.
+
+### Recommendation
+Actionable next steps based on the actual retrieved data.
+
+## 4. DISCLAIMER
+Explicitly remind the user to verify statutory tax filings, legal compliance, or major loan decisions with a qualified Chartered Accountant (CA).
+
+=== LIVE TENANT FINANCIAL DATABASE CONTEXT ===
+
+=== 1. SALES & INVOICING (RECEIVABLES) ===
+- Total Sales Invoices: ${invoiceCount} (Total Invoiced Value: ₹${invoiceTotal.toLocaleString("en-IN")})
+- Paid Invoices Collected: ₹${invoicePaid.toLocaleString("en-IN")}
+- Outstanding Accounts Receivable (AR): ₹${invoiceUnpaid.toLocaleString("en-IN")}
 - Overdue Invoices Count: ${overdueInvoices.length}
-- Actual Cash Inflow (Receipts): ₹${cfInflow.toLocaleString("en-IN")}
-- Actual Cash Outflow (Payments/Expenses): ₹${cfOutflow.toLocaleString("en-IN")}
-- Net Cash Flow: ₹${netCashFlow.toLocaleString("en-IN")}
+${topOverdue ? `Overdue Invoices:\n${topOverdue}` : ''}
+${recentInvoicesList ? `Recent Invoices:\n${recentInvoicesList}` : ''}
 
-=== CHART OF ACCOUNTS BALANCES ===
-${ledgerBalances || "No ledger balances registered."}
+=== 2. PURCHASES & VENDOR PAYABLES ===
+- Total Purchase Bills: ${purchaseCount} (Total Purchase Value: ₹${purchaseTotal.toLocaleString("en-IN")})
+- Outstanding Accounts Payable (AP): ₹${purchaseUnpaid.toLocaleString("en-IN")}
+${recentPurchasesList ? `Recent Purchase Bills:\n${recentPurchasesList}` : ''}
+
+=== 3. CUSTOMER DIRECTORY ===
+- Total Registered Customers: ${customers.length}
+${customerSummary ? `Key Customers Summary:\n${customerSummary}` : ''}
+
+=== 4. PROFIT & LOSS STATEMENT & BOOKKEEPING ===
+- Total Bookkeeping Income: ₹${bkIncome.toLocaleString("en-IN")}
+- Total Bookkeeping Expenses: ₹${bkExpense.toLocaleString("en-IN")}
+- Net Operating Profit: ₹${netProfit.toLocaleString("en-IN")} (Net Margin: ${profitMargin}%)
+${bkCategoryBreakdown ? `Expense Breakdown by Category:\n${bkCategoryBreakdown}` : ''}
+${recentBkEntries ? `Recent Bookkeeping Transactions:\n${recentBkEntries}` : ''}
+
+=== 5. BALANCE SHEET & LIQUIDITY ===
+- Cash & Bank Balances: ₹${(balanceSheet?.assets?.cashAndBank || 0).toLocaleString("en-IN")}
+- Accounts Receivable: ₹${(balanceSheet?.assets?.accountsReceivable || 0).toLocaleString("en-IN")}
+- Current Inventory Stock Value: ₹${(balanceSheet?.assets?.inventory || 0).toLocaleString("en-IN")}
+- Total Assets: ₹${totalAssets.toLocaleString("en-IN")}
+- Accounts Payable: ₹${(balanceSheet?.liabilities?.accountsPayable || 0).toLocaleString("en-IN")}
+- Total Liabilities: ₹${totalLiabilities.toLocaleString("en-IN")}
+- Total Owner Equity: ₹${totalEquity.toLocaleString("en-IN")}
+- Accounting Equation Balanced: ${balanceSheet?.balanced ? "YES (Assets = Liabilities + Equity)" : "NO"}
+- Current Ratio: ${currentRatio}
+
+=== 6. INVENTORY MANAGEMENT ===
+- Total Products / SKUs: ${inventoryItems.length}
+- Total Inventory Valuation: ₹${totalInventoryValue.toLocaleString("en-IN")}
+- Low Stock Items Count (< 10 units): ${lowStockItems.length}
+${inventoryListSummary ? `Product Inventory List:\n${inventoryListSummary}` : ''}
+
+=== 7. TAX & GST ANALYTICS ===
+- Output GST Collected (Sales): ₹${outputGst.toLocaleString("en-IN")}
+- Input GST Credit ITC (Purchases): ₹${inputGst.toLocaleString("en-IN")}
+- Net GST Payable: ₹${gstPayable.toLocaleString("en-IN")} (Carry Forward Credit: ₹${gstReceivable.toLocaleString("en-IN")})
+
+=== 8. PAYROLL & SALARIES ===
+- Total Payroll Records: ${payrollRecords.length}
+- Total Gross Salary Commitment: ₹${totalPayrollGross.toLocaleString("en-IN")}
+- Total Net Salary Payable: ₹${totalPayrollNet.toLocaleString("en-IN")}
+${payrollListSummary ? `Employee Payroll List:\n${payrollListSummary}` : ''}
+
+=== 9. CHART OF ACCOUNTS (GENERAL LEDGER) ===
+${ledgerSummary || "No custom ledger accounts configured."}
 `;
 
-    // Process history into Gemini message format
+    // Format Gemini contents
     const contents = [];
-    contents.push({ role: "user", parts: [{ text: systemPrompt }] });
-    contents.push({ role: "model", parts: [{ text: "Acknowledged. I will act as the AI CFO and answer strictly based on the provided live financial data." }] });
+    contents.push({ role: "user", parts: [{ text: masterSystemPrompt }] });
+    contents.push({ role: "model", parts: [{ text: "Understood. I am your AI CFO. I will analyze your live company database context and provide clear financial insights, metrics, and actionable recommendations." }] });
 
-    // Append conversation history
-    const recentHistory = history.slice(-10); // Keep last 10 messages for context
+    // Append last 10 messages from history
+    const recentHistory = history.slice(-10);
     recentHistory.forEach(msg => {
       contents.push({
         role: msg.role === "user" ? "user" : "model",
@@ -855,25 +1009,61 @@ ${ledgerBalances || "No ledger balances registered."}
       });
     });
 
-    const ai = getGenAI();
     let replyText = "";
+    const ai = getGenAI();
 
+    // 1. Try Gemini AI with model options
     if (ai) {
-      const model = ai.getGenerativeModel({ model: "gemini-2.5-flash" });
-      const result = await model.generateContent({ contents });
-      const response = await result.response;
-      replyText = response.text().trim();
-    } else {
-      // Fallback local rules if Gemini key is missing
-      const userMessage = history[history.length - 1]?.content?.toLowerCase() || "";
-      if (userMessage.includes("revenue") || userMessage.includes("income") || userMessage.includes("sales")) {
-        replyText = `Your total revenue is ₹${bkIncome.toLocaleString("en-IN")} based on bookkeeping records. You have ${invoiceCount} invoices totaling ₹${invoiceTotal.toLocaleString("en-IN")}.`;
+      const modelOptions = [
+        "gemini-3.6-flash",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite",
+      ];
+
+      for (const modelName of modelOptions) {
+        try {
+          console.log(`🔷 AI CFO trying model: ${modelName}`);
+          const model = ai.getGenerativeModel({ model: modelName });
+          const result = await model.generateContent({ contents });
+          const response = await result.response;
+          replyText = response.text().trim();
+          if (replyText) {
+            console.log(`✅ AI CFO success with model: ${modelName}`);
+            break;
+          }
+        } catch (modelError) {
+          console.warn(`⚠️ Gemini model ${modelName} failed:`, modelError.message);
+          continue;
+        }
+      }
+    }
+
+    // 2. Fallback to OpenRouter if Gemini models failed or unavailable
+    if (!replyText && process.env.OPENROUTER_API_KEY) {
+      try {
+        console.log("🟠 AI CFO falling back to OpenRouter...");
+        const userPrompt = history[history.length - 1]?.content || "Provide a CFO summary.";
+        replyText = await callOpenRouter(`${masterSystemPrompt}\n\nUser Question: ${userPrompt}`, "", "");
+      } catch (orErr) {
+        console.warn("⚠️ OpenRouter fallback failed:", orErr.message);
+      }
+    }
+
+    // 3. Fallback to Local AI CFO Engine if external models failed
+    if (!replyText) {
+      const userMessage = (history[history.length - 1]?.content || "").toLowerCase();
+      
+      if (userMessage.includes("revenue") || userMessage.includes("income") || userMessage.includes("earn")) {
+        replyText = `### Summary\nYour total recorded revenue is **₹${bkIncome.toLocaleString("en-IN")}** based on bookkeeping ledgers, with **${invoiceCount}** invoices totaling **₹${invoiceTotal.toLocaleString("en-IN")}**.\n\n### Key Numbers\n- Bookkeeping Revenue: ₹${bkIncome.toLocaleString("en-IN")}\n- Invoiced Amount: ₹${invoiceTotal.toLocaleString("en-IN")}\n- Collected Receipts: ₹${invoicePaid.toLocaleString("en-IN")}\n- Outstanding AR: ₹${invoiceUnpaid.toLocaleString("en-IN")}\n\n### What I Found\nYou have collected ₹${invoicePaid.toLocaleString("en-IN")} in paid invoices, leaving ₹${invoiceUnpaid.toLocaleString("en-IN")} pending in outstanding receivables across ${overdueInvoices.length} overdue invoices.\n\n### Recommendation\nPrioritize collection efforts on overdue invoices to maintain strong liquidity.`;
       } else if (userMessage.includes("expense") || userMessage.includes("spend") || userMessage.includes("cost")) {
-        replyText = `Your total expenses are ₹${bkExpense.toLocaleString("en-IN")}. Net profit is ₹${netProfit.toLocaleString("en-IN")}.`;
-      } else if (userMessage.includes("cash") || userMessage.includes("balance") || userMessage.includes("inflow")) {
-        replyText = `Net cash flow is ₹${netCashFlow.toLocaleString("en-IN")} (Inflow: ₹${cfInflow.toLocaleString("en-IN")}, Outflow: ₹${cfOutflow.toLocaleString("en-IN")}).`;
+        replyText = `### Summary\nYour total recorded expenses are **₹${bkExpense.toLocaleString("en-IN")}**.\n\n### Key Numbers\n- Total Expenses: ₹${bkExpense.toLocaleString("en-IN")}\n- Total Income: ₹${bkIncome.toLocaleString("en-IN")}\n- Net Operating Profit: ₹${netProfit.toLocaleString("en-IN")}\n- Payroll Net Salary: ₹${totalPayrollNet.toLocaleString("en-IN")}\n\n### What I Found\nExpenses represent ${bkIncome > 0 ? ((bkExpense / bkIncome) * 100).toFixed(1) : "0"}% of total revenue. Net profit stands at ₹${netProfit.toLocaleString("en-IN")}.\n\n### Recommendation\nReview operating expense line items and keep vendor payables aligned with cash inflow cycles.`;
+      } else if (userMessage.includes("profit") || userMessage.includes("margin")) {
+        replyText = `### Summary\nYour calculated Net Profit is **₹${netProfit.toLocaleString("en-IN")}** with a Net Margin of **${profitMargin}%**.\n\n### Key Numbers\n- Total Revenue: ₹${bkIncome.toLocaleString("en-IN")}\n- Total Expenses: ₹${bkExpense.toLocaleString("en-IN")}\n- Net Profit: ₹${netProfit.toLocaleString("en-IN")}\n- Net Profit Margin: ${profitMargin}%\n\n### What I Found\nYour business is currently in a ${netProfit >= 0 ? "profitable state" : "loss state"}. Net margin stands at ${profitMargin}%.\n\n### Recommendation\n${netProfit < 0 ? "Focus on accelerating high-margin revenue and cutting non-critical overhead." : "Maintain expense discipline and reinvest net profits into core growth areas."}`;
       } else {
-        replyText = `Live Dashboard Analysis: Revenue ₹${bkIncome.toLocaleString("en-IN")}, Expenses ₹${bkExpense.toLocaleString("en-IN")}, Outstanding: ₹${invoiceUnpaid.toLocaleString("en-IN")}. Let me know if you have questions.`;
+        replyText = `### Summary\nAI CFO Analysis based on live accounting database.\n\n### Key Numbers\n- Revenue: ₹${bkIncome.toLocaleString("en-IN")}\n- Expenses: ₹${bkExpense.toLocaleString("en-IN")}\n- Net Profit: ₹${netProfit.toLocaleString("en-IN")} (${profitMargin}% margin)\n- Outstanding Receivables: ₹${invoiceUnpaid.toLocaleString("en-IN")}\n- Net GST Payable: ₹${gstPayable.toLocaleString("en-IN")}\n\n### What I Found\nYour accounting ledger indicates ${overdueInvoices.length} overdue invoices requiring follow-up. Current cash & bank asset valuation stands at ₹${(balanceSheet?.assets?.cashAndBank || 0).toLocaleString("en-IN")}.\n\n### Recommendation\n1. Follow up on overdue receivables.\n2. Review monthly GST payable obligations before filing deadlines.`;
       }
     }
 
