@@ -379,6 +379,12 @@ app.post("/api/signin", async (req, res) => {
   }
 });
 
+// ✅ Alias for /signin
+app.post("/signin", (req, res, next) => {
+  req.url = "/api/signin";
+  app.handle(req, res, next);
+});
+
 // ✅ FORGOT PASSWORD
 app.post("/api/forgot-password", async (req, res) => {
   try {
@@ -1380,7 +1386,7 @@ const seedPlans = async () => {
 };
 
 // ✅ Start Server (after MongoDB connection)
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT || 5000;
 const HOST = '0.0.0.0';
 
 const startServer = async () => {
@@ -1395,9 +1401,18 @@ const startServer = async () => {
   }
 
   // Start the server regardless of initial DB connection state
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`🚀 Server running on http://${HOST}:${PORT}`);
     console.log(`🌐 Local access: http://localhost:${PORT}`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && PORT === 5000) {
+      console.log('⚠️ Port 5000 in use, attempting fallback to port 5001...');
+      app.listen(5001, HOST, () => {
+        console.log(`🚀 Server running on http://${HOST}:5001 (fallback)`);
+      });
+    }
   });
 };
 
