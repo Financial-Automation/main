@@ -52,6 +52,7 @@ interface PurchaseInvoiceData {
     total: number;
     paid: number;
     balance: number;
+    templateSnapshot?: any;
     createdAt: string;
 }
 
@@ -85,6 +86,18 @@ const PublicPurchaseInvoiceView = () => {
         if (id) fetchInvoice();
     }, [id]);
 
+    useEffect(() => {
+        if (invoice && !loading) {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('print') === 'true' || params.get('download') === 'true') {
+                const timer = setTimeout(() => {
+                    window.print();
+                }, 600);
+                return () => clearTimeout(timer);
+            }
+        }
+    }, [invoice, loading]);
+
     if (loading) {
         return (
             <div className="min-h-screen bg-slate-950 flex items-center justify-center">
@@ -115,8 +128,32 @@ const PublicPurchaseInvoiceView = () => {
     }
 
     const invoiceSize = invoice.invoiceSize || "A4";
-    const invoiceFormat = invoice.invoiceFormat || "Supermarket";
-    const invoicePaperClass = invoiceSize === "A5" ? "max-w-[720px]" : "max-w-5xl";
+    const invoicePaperClass = invoiceSize === "A5" ? "max-w-[720px]" : "max-w-4xl";
+
+    // Safe fallback template configuration
+    const initialConfig = {
+        header: { showLogo: true, logoPosition: "left" as const, logoSize: "medium" as const, logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
+        seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
+        customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
+        invoiceInfo: {
+            showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
+            labels: { invoiceNumber: "Bill No.", invoiceDate: "Bill Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
+        },
+        items: {
+            columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
+            labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+        },
+        tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
+        payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
+        footer: { show: true, text: "" },
+        design: { primaryColor: "#d97706", secondaryColor: "#f8fafc", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#cbd5e1", fontFamily: "Inter", fontSize: 12, borderStyle: "light" as const }
+    };
+
+    const config = invoice.templateSnapshot || initialConfig;
+    const header = config.header || initialConfig.header;
+    const design = config.design || initialConfig.design;
+    const primaryColor = design.primaryColor || "#d97706";
+    const fontFamily = design.fontFamily || "Inter";
 
     return (
         <>
@@ -131,14 +168,6 @@ const PublicPurchaseInvoiceView = () => {
                 }
                 #purchase-invoice-print * {
                     color: #0f172a !important;
-                    background-color: transparent !important;
-                    background-image: none !important;
-                }
-                #purchase-invoice-print .text-amber-350,
-                #purchase-invoice-print .text-slate-350,
-                #purchase-invoice-print .text-amber-400,
-                #purchase-invoice-print .text-amber-300 {
-                    color: #d97706 !important;
                 }
                 #purchase-invoice-print th {
                     background-color: #f8fafc !important;
@@ -149,32 +178,14 @@ const PublicPurchaseInvoiceView = () => {
                     border-bottom: 1px solid #f1f5f9 !important;
                 }
                 #purchase-invoice-print .text-white {
-                    color: #0f172a !important;
-                }
-                #purchase-invoice-print .border-amber-400\/30,
-                #purchase-invoice-print .border-white\/10 {
-                    border-color: #cbd5e1 !important;
-                }
-                #purchase-invoice-print .bg-amber-400\/10 {
-                    background-color: #fef3c7 !important;
-                }
-                #purchase-invoice-print .bg-black\/20,
-                #purchase-invoice-print .bg-white\/5 {
-                    background-color: #f8fafc !important;
-                }
-                #purchase-invoice-print .text-slate-400,
-                #purchase-invoice-print .text-slate-300 {
-                    color: #4b5563 !important;
-                }
-                #purchase-invoice-print .bg-gradient-to-r {
-                    background: transparent !important;
+                    color: white !important;
                 }
 
                 @media print {
                     .no-print {
                         display: none !important;
                     }
-                    body, html, .min-h-screen, .relative.z-10, .max-w-5xl, .max-w-\[720px\] {
+                    body, html, .min-h-screen, .relative.z-10 {
                         background: white !important;
                         color: #0f172a !important;
                         box-shadow: none !important;
@@ -195,26 +206,18 @@ const PublicPurchaseInvoiceView = () => {
                         top: 0 !important;
                         page-break-inside: avoid;
                     }
-                    #purchase-invoice-print * {
-                        color: #0f172a !important;
-                        background-color: transparent !important;
-                        background-image: none !important;
-                    }
                     @page {
                         size: ${invoiceSize};
                         margin: 8mm;
                     }
                     #purchase-invoice-print td, #purchase-invoice-print th {
-                        padding-top: 5px !important;
-                        padding-bottom: 5px !important;
-                    }
-                    #purchase-invoice-print h2, #purchase-invoice-print h1, #purchase-invoice-print p {
-                        margin-top: 1px !important;
-                        margin-bottom: 1px !important;
+                        padding-top: 4px !important;
+                        padding-bottom: 4px !important;
                     }
                 }
             `}</style>
-            <div className="min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500/30">
+
+            <div className="min-h-screen bg-slate-950 text-slate-100 selection:bg-amber-500/30" style={{ fontFamily }}>
                 {/* Background Effects */}
                 <div className="fixed inset-0 overflow-hidden pointer-events-none no-print">
                     <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-amber-600/10 blur-[120px] rounded-full translate-x-1/2 -translate-y-1/2" />
@@ -229,7 +232,7 @@ const PublicPurchaseInvoiceView = () => {
                                 <FileText className="h-6 w-6 text-amber-400" />
                             </div>
                             <div>
-                                <h1 className="text-2xl font-bold text-white">Purchase Invoice</h1>
+                                <h1 className="text-2xl font-bold text-white">Purchase Invoice Official Copy</h1>
                                 <p className="text-slate-400 text-sm">#{invoice.billNo}</p>
                             </div>
                         </div>
@@ -245,156 +248,170 @@ const PublicPurchaseInvoiceView = () => {
                         </div>
                     </div>
 
-                    {/* Invoice Card */}
-                    <div id="purchase-invoice-print" className="backdrop-blur-2xl bg-white/[0.04] border border-white/10 rounded-[28px] shadow-2xl overflow-hidden">
-                        {/* Header Section */}
-                        <div className="p-8 lg:p-10 border-b border-white/10 bg-gradient-to-r from-amber-600/30 via-orange-500/20 to-rose-500/10">
-                            <div className="mb-8 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                    {/* Styled Purchase Invoice Card matching Invoice Module Layout */}
+                    <div id="purchase-invoice-print" className="bg-white border border-slate-300 rounded-[12px] shadow-md overflow-hidden text-slate-950 p-8 lg:p-12 space-y-6">
+                        
+                        {/* Header Banner using Primary Theme Color */}
+                        <div className="p-8 -mx-8 -mt-8 rounded-t-[11px] mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4 text-white" style={{ backgroundColor: primaryColor }}>
+                            <div className="flex items-center gap-4">
+                                {header.showLogo && header.logoUrl && (
+                                    <img src={header.logoUrl} alt="Logo" className="h-10 w-auto object-contain rounded-md" />
+                                )}
                                 <div>
-                                    <p className="text-xs font-bold uppercase tracking-[0.28em] text-amber-300">{invoiceFormat}</p>
-                                    <h2 className="mt-2 text-4xl font-black tracking-tight text-white">Tax Invoice</h2>
-                                    <p className="mt-2 text-sm text-slate-400">Inventory Management - Purchase Invoice</p>
+                                    <p className="text-xs font-bold uppercase tracking-[0.24em] opacity-80">Tax Invoice / Purchase Bill</p>
+                                    <h2 className="mt-1 text-2xl lg:text-3xl font-black text-white">{invoice.supplierName}</h2>
+                                    <p className="mt-1 text-sm opacity-90 font-medium">
+                                        {[
+                                            invoice.phone ? `Ph: ${invoice.phone}` : '',
+                                            invoice.gstin ? `GSTIN: ${invoice.gstin}` : '',
+                                            invoice.stateOfSupply ? `State: ${invoice.stateOfSupply}` : ''
+                                        ].filter(Boolean).join("  |  ")}
+                                    </p>
                                 </div>
-                                <div className="rounded-2xl border border-amber-400/30 bg-amber-400/10 px-5 py-4 text-right">
-                                    <p className="text-xs font-bold uppercase tracking-widest text-amber-300">Bill No</p>
-                                    <p className="text-xl font-black text-white">{invoice.billNo}</p>
-                                    <p className="mt-1 text-sm text-slate-300">{invoice.billDate}</p>
+                            </div>
+                            <div className="md:text-right">
+                                <p className="text-sm opacity-80 font-medium">Bill No.</p>
+                                <p className="text-2xl font-black text-white">#{invoice.billNo}</p>
+                                <p className="mt-2 inline-flex rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-bold uppercase tracking-widest text-white border border-white/20">
+                                    {invoice.customerType || "B2C"} | {invoiceSize}
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Details Section: Supplier (From) & Customer (Bill To) */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 border-b border-slate-200 pb-6">
+                            <div className="space-y-4">
+                                <div>
+                                    <h2 className="text-xs font-bold uppercase tracking-wider mb-2 border-l-2 pl-2" style={{ color: primaryColor, borderColor: primaryColor }}>Supplier (Vendor)</h2>
+                                    <div className="space-y-0.5 text-sm">
+                                        <p className="font-bold text-slate-950">{invoice.supplierName}</p>
+                                        {invoice.phone && <p className="text-slate-650">Ph: {invoice.phone}</p>}
+                                        {invoice.gstin && <p className="text-slate-650">GSTIN: {invoice.gstin}</p>}
+                                        <p className="text-slate-650">State of Supply: {invoice.stateOfSupply}</p>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <h2 className="text-xs font-bold uppercase tracking-wider mb-2 border-l-2 pl-2" style={{ color: primaryColor, borderColor: primaryColor }}>Bill To (Customer)</h2>
+                                    <div className="space-y-0.5 text-sm">
+                                        <p className="font-bold text-slate-950">{invoice.customerName || "Walk-in Customer"}</p>
+                                        <p className="text-slate-650">Type: {invoice.customerType || "B2C"}</p>
+                                        {invoice.customerPhone && <p className="text-slate-650">Phone: {invoice.customerPhone}</p>}
+                                        {invoice.customerGstin && <p className="text-slate-650">GSTIN: {invoice.customerGstin}</p>}
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                <div className="space-y-6">
-                                    <div>
-                                        <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-400 mb-4">Supplier</h2>
-                                        <div className="space-y-1">
-                                            <p className="text-xl font-bold text-white">{invoice.supplierName}</p>
-                                            {invoice.phone && <p className="text-slate-400">Phone: {invoice.phone}</p>}
-                                            {invoice.gstin && <p className="text-slate-400">GSTIN: {invoice.gstin}</p>}
-                                        </div>
-                                    </div>
+                            <div className="space-y-2 md:text-right flex flex-col md:items-end text-sm">
+                                <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3 w-48 text-left md:text-right">
+                                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Bill Date</h2>
+                                    <p className="text-slate-950 font-bold">{invoice.billDate}</p>
                                 </div>
-
-                                <div className="space-y-6">
-                                    <div>
-                                        <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-400 mb-4">Bill To</h2>
-                                        <div className="space-y-1">
-                                            <p className="text-xl font-bold text-white">{invoice.customerName || "Walk-in Customer"}</p>
-                                            <p className="text-slate-400">Type: {invoice.customerType || "B2C"}</p>
-                                            {invoice.customerPhone && <p className="text-slate-400">Phone: {invoice.customerPhone}</p>}
-                                            {invoice.customerType === "B2B" && invoice.customerGstin && (
-                                                <p className="text-slate-400">GSTIN: {invoice.customerGstin}</p>
-                                            )}
-                                        </div>
-                                    </div>
+                                <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3 w-48 text-left md:text-right">
+                                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Payment Method</h2>
+                                    <p className="text-slate-950 font-bold">{invoice.paymentMethod || "Cash"}</p>
                                 </div>
-
-                                <div className="space-y-6 md:text-right flex flex-col md:items-end">
-                                    <div className="grid grid-cols-2 gap-4 md:w-full">
-                                        <div>
-                                            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Payment</h2>
-                                            <p className="text-white font-medium">{invoice.paymentMethod || "Cash"}</p>
-                                        </div>
-                                        <div>
-                                            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Size</h2>
-                                            <p className="text-white font-medium">{invoiceSize}</p>
-                                        </div>
-                                        <div className="col-span-2">
-                                            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">State of Supply</h2>
-                                            <p className="text-white font-medium">{invoice.stateOfSupply}</p>
-                                        </div>
-                                    </div>
+                                <div className="text-xs text-slate-500">
+                                    <span className="font-semibold">Business State:</span> {invoice.businessState || "Tamil Nadu"}
                                 </div>
                             </div>
                         </div>
 
                         {/* Items Table */}
-                        <div className="p-8 lg:p-12">
-                            <div className="w-full overflow-x-auto">
-                                <table className="w-full border-collapse">
-                                    <thead>
-                                        <tr className="border-b border-white/10 text-left bg-white/5">
-                                            <th className="py-4 px-3 text-xs font-bold uppercase tracking-wider text-amber-400">Item</th>
-                                            <th className="py-4 px-3 text-xs font-bold uppercase tracking-wider text-amber-400 text-center">Qty</th>
-                                            <th className="py-4 px-3 text-xs font-bold uppercase tracking-wider text-amber-400 text-center">Unit</th>
-                                            <th className="py-4 px-3 text-xs font-bold uppercase tracking-wider text-amber-400 text-right">Price/Unit</th>
-                                            <th className="py-4 px-3 text-xs font-bold uppercase tracking-wider text-amber-400 text-right">Tax</th>
-                                            <th className="py-4 px-3 text-xs font-bold uppercase tracking-wider text-amber-400 text-right">Amount</th>
+                        <div className="w-full overflow-x-auto">
+                            <table className="w-full border-collapse">
+                                <thead>
+                                    <tr className="border-b-2 border-slate-200 text-left bg-slate-50">
+                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650">Item</th>
+                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-center">Qty</th>
+                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-center">Unit</th>
+                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-right">Price/Unit</th>
+                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-right">Tax</th>
+                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-right">Amount</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {invoice.items.map((item, idx) => (
+                                        <tr key={idx} className="text-sm">
+                                            <td className="py-4 px-2">
+                                                <p className="text-slate-950 font-semibold">{item.itemName}</p>
+                                                {item.hsnCode && <p className="text-slate-400 text-xs mt-0.5">{item.codeType || "HSN"}: {item.hsnCode}</p>}
+                                            </td>
+                                            <td className="py-4 px-2 text-center text-slate-700">{item.quantity}</td>
+                                            <td className="py-4 px-2 text-center text-slate-700">{item.unit || "Pcs"}</td>
+                                            <td className="py-4 px-2 text-right text-slate-700">₹{item.pricePerUnit.toFixed(2)}</td>
+                                            <td className="py-4 px-2 text-right text-slate-700">{item.taxPercent}%</td>
+                                            <td className="py-4 px-2 text-right text-slate-950 font-bold">₹{item.amount.toFixed(2)}</td>
                                         </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-white/5">
-                                        {invoice.items.map((item, idx) => (
-                                            <tr key={idx} className="group">
-                                                <td className="py-6 pr-4">
-                                                    <p className="text-white font-semibold transition-colors group-hover:text-amber-400">{item.itemName}</p>
-                                                    {item.hsnCode && <p className="text-slate-500 text-xs mt-1">{item.codeType || "HSN"}: {item.hsnCode}</p>}
-                                                </td>
-                                                <td className="py-6 text-center text-slate-300 font-medium">{item.quantity}</td>
-                                                <td className="py-6 text-center text-slate-300 font-medium">{item.unit}</td>
-                                                <td className="py-6 text-right text-slate-300 font-medium">₹{item.pricePerUnit.toFixed(2)}</td>
-                                                <td className="py-6 text-right text-slate-300 font-medium">{item.taxPercent}%</td>
-                                                <td className="py-6 text-right text-white font-bold">₹{item.amount.toFixed(2)}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        {/* Totals Summary */}
+                        <div className="flex flex-col md:flex-row justify-between items-start gap-8 pt-6 border-t border-slate-200">
+                            <div className="text-xs text-slate-500 max-w-md space-y-2">
+                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                                    <p className="font-bold text-slate-700 mb-1 uppercase tracking-wider text-[11px]">Payment Summary</p>
+                                    <p className="text-emerald-700 font-semibold text-sm">Amount Paid: ₹{invoice.paid.toFixed(2)}</p>
+                                    {invoice.balance > 0 && (
+                                        <p className="text-rose-700 font-semibold text-sm mt-1">Balance Due: ₹{invoice.balance.toFixed(2)}</p>
+                                    )}
+                                </div>
                             </div>
 
-                            {/* Totals Section */}
-                            <div className="mt-12 flex flex-col md:flex-row justify-between items-start gap-12 pt-12 border-t border-white/10">
-                                <div className="max-w-xs">
-                                    <h2 className="text-sm font-semibold uppercase tracking-wider text-amber-400 mb-4">Payment Summary</h2>
-                                    <div className="space-y-3">
-                                        <div className="flex items-center gap-3 p-4 bg-white/5 rounded-2xl border border-white/10">
-                                            <div>
-                                                <p className="text-xs text-slate-500 uppercase">Paid</p>
-                                                <p className="text-emerald-400 font-bold text-lg">₹{invoice.paid.toFixed(2)}</p>
-                                            </div>
-                                        </div>
-                                        {invoice.balance > 0 && (
-                                            <div className="flex items-center gap-3 p-4 bg-white/5 rounded-2xl border border-red-500/20">
-                                                <div>
-                                                    <p className="text-xs text-slate-500 uppercase">Balance Due</p>
-                                                    <p className="text-red-400 font-bold text-lg">₹{invoice.balance.toFixed(2)}</p>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
+                            <div className="w-full md:w-72 space-y-2.5 text-sm">
+                                <div className="flex justify-between text-slate-600">
+                                    <span>Subtotal</span>
+                                    <span>₹{invoice.subtotal.toFixed(2)}</span>
                                 </div>
 
-                                <div className="w-full md:w-80 space-y-4">
-                                    <div className="flex justify-between items-center text-slate-400">
-                                        <span>Subtotal</span>
-                                        <span className="text-white font-medium">₹{invoice.subtotal.toFixed(2)}</span>
+                                {invoice.totalSgst > 0 && (
+                                    <div className="flex justify-between text-slate-500 text-xs">
+                                        <span>SGST</span>
+                                        <span>₹{invoice.totalSgst.toFixed(2)}</span>
                                     </div>
-                                    {/* GST Breakdown */}
-                                    {(invoice.totalSgst > 0 || invoice.totalCgst > 0) ? (
-                                        <>
-                                            <div className="flex justify-between items-center text-slate-400 text-sm">
-                                                <span>SGST</span>
-                                                <span className="text-white font-medium">₹{invoice.totalSgst.toFixed(2)}</span>
-                                            </div>
-                                            <div className="flex justify-between items-center text-slate-400 text-sm">
-                                                <span>CGST</span>
-                                                <span className="text-white font-medium">₹{invoice.totalCgst.toFixed(2)}</span>
-                                            </div>
-                                        </>
-                                    ) : invoice.totalIgst > 0 ? (
-                                        <div className="flex justify-between items-center text-slate-400 text-sm">
-                                            <span>IGST</span>
-                                            <span className="text-white font-medium">₹{invoice.totalIgst.toFixed(2)}</span>
-                                        </div>
-                                    ) : null}
-                                    <div className="flex justify-between items-center text-slate-400 pb-4 border-b border-white/5">
+                                )}
+                                {invoice.totalCgst > 0 && (
+                                    <div className="flex justify-between text-slate-500 text-xs">
+                                        <span>CGST</span>
+                                        <span>₹{invoice.totalCgst.toFixed(2)}</span>
+                                    </div>
+                                )}
+                                {invoice.totalIgst > 0 && (
+                                    <div className="flex justify-between text-slate-500 text-xs">
+                                        <span>IGST</span>
+                                        <span>₹{invoice.totalIgst.toFixed(2)}</span>
+                                    </div>
+                                )}
+
+                                {invoice.totalTax > 0 && (
+                                    <div className="flex justify-between text-slate-600">
                                         <span>Total Tax</span>
-                                        <span className="text-white font-medium">₹{invoice.totalTax.toFixed(2)}</span>
+                                        <span>₹{invoice.totalTax.toFixed(2)}</span>
                                     </div>
-                                    <div className="flex justify-between items-center pt-2">
-                                        <span className="text-lg font-bold text-white">Grand Total</span>
-                                        <span className="text-3xl font-black text-white bg-gradient-to-r from-amber-500 to-orange-600 px-6 py-2.5 rounded-2xl shadow-lg transition-transform hover:scale-105">
-                                            ₹{invoice.total.toFixed(2)}
-                                        </span>
-                                    </div>
+                                )}
+
+                                <div className="flex justify-between items-center pt-3 pb-3 px-4 rounded-xl shadow-md text-white" style={{ backgroundColor: primaryColor }}>
+                                    <span className="text-base font-bold">Grand Total</span>
+                                    <span className="text-2xl font-black">
+                                        ₹{invoice.total.toFixed(2)}
+                                    </span>
                                 </div>
+
+                                {invoice.paid > 0 && (
+                                    <div className="flex justify-between text-slate-600 text-xs pt-2">
+                                        <span>Paid</span>
+                                        <span className="text-emerald-600 font-bold">₹{invoice.paid.toFixed(2)}</span>
+                                    </div>
+                                )}
+
+                                {invoice.balance > 0 && (
+                                    <div className="flex justify-between text-slate-600 text-xs pt-1">
+                                        <span>Balance Due</span>
+                                        <span className="text-rose-600 font-bold">₹{invoice.balance.toFixed(2)}</span>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Authorised Signature & Banking Details */}
@@ -414,13 +431,13 @@ const PublicPurchaseInvoiceView = () => {
                             </div>
                         </div>
 
-                        {/* Footer */}
-                        <div className="px-8 lg:px-12 py-8 bg-black/20 border-t border-white/5 text-center">
-                            <p className="text-slate-500 text-sm">
+                        {/* Footer Info */}
+                        <div className="px-8 py-8 bg-slate-50 border-t border-slate-200 text-center rounded-b-[11px]">
+                            <p className="text-slate-500 text-xs">
                                 This is a digitally generated purchase invoice.
                             </p>
-                            <p className="text-amber-500/60 text-[11px] mt-2 tracking-widest font-bold uppercase">
-                                Shree Andal AI Software Solutions (OPC) Pvt Ltd
+                            <p className="text-slate-400 text-[10px] mt-2 tracking-widest font-bold uppercase">
+                                Shree Andal AI Software Solutions (OPC) Pvt Ltd • Powered by FinSmart ✨
                             </p>
                         </div>
                     </div>

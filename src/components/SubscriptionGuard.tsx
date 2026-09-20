@@ -27,7 +27,10 @@ export const SubscriptionGuard: React.FC<SubscriptionGuardProps> = ({ children, 
   }
 
   if (!hasAccess(module)) {
-    // If authenticated but no access, redirect to dashboard and tell it to trigger the upgrade modal for this module
+    // If authenticated but no access, redirect to dashboard
+    if (user?.role === "instore") {
+      return <Navigate to="/dashboard" replace />;
+    }
     return <Navigate to="/dashboard" state={{ triggerUpgradeModal: module }} replace />;
   }
 

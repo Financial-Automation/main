@@ -38,6 +38,7 @@ import scannedDocRoutes from "./routes/scannedDocRoutes.js";
 import civilEngineeringRoutes from "./routes/civilEngineeringRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
+import purchaseInvoiceTemplateRoutes from "./routes/purchaseInvoiceTemplateRoutes.js";
 import leadRoutes from "./routes/leadRoutes.js";
 
 import { MongoMemoryServer } from "mongodb-memory-server";
@@ -112,6 +113,7 @@ let mongoUri = (isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONG
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 
+<<<<<<< HEAD
 let mongoMemoryServer = null;
 
 // Connect to MongoDB with fallback mechanism
@@ -133,6 +135,39 @@ const connectToMongoDB = async () => {
     } catch (memErr) {
       console.error("❌ In-Memory MongoDB Connection Failed:", memErr.message);
       throw memErr;
+=======
+// Connect to MongoDB with fallback mechanism (Cloud Atlas -> Local DB -> MongoMemoryServer)
+const connectToMongoDB = async () => {
+  try {
+    await mongoose.connect(process.env.PRO_MONGO_URI, {
+      serverSelectionTimeoutMS: 5000
+    });
+    console.log("✅ MongoDB Connected Successfully");
+    console.log("📍 Database: Cloud Atlas");
+  } catch (err) {
+    console.error("❌ Cloud MongoDB Atlas Connection Failed:", err.message);
+    try {
+      if (process.env.DEV_MONGO_URI) {
+        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 2000 });
+        console.log("✅ MongoDB Connected Successfully (Local DB)");
+        return;
+      }
+    } catch (devErr) {
+      console.error("❌ Local MongoDB Connection Failed:", devErr.message);
+    }
+
+    try {
+      console.log("🔄 Initializing In-Memory MongoDB Server...");
+      const { MongoMemoryServer } = await import("mongodb-memory-server");
+      const mongod = await MongoMemoryServer.create();
+      const uri = mongod.getUri();
+      await mongoose.connect(uri);
+      console.log("✅ MongoDB Connected Successfully (In-Memory Fallback)");
+      console.log(`📍 Database URI: ${uri}`);
+    } catch (memErr) {
+      console.error("❌ Failed to start In-Memory MongoDB:", memErr.message);
+      throw err;
+>>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
     }
   }
 };
@@ -287,13 +322,14 @@ app.post("/api/signup-trial", async (req, res) => {
 // ✅ LOGIN (Sign In)
 app.post("/api/signin", async (req, res) => {
   try {
-    const { email, password, role = "admin" } = req.body;
+    const { email, password, role } = req.body;
 
     if (!email || !password)
       return res.status(400).json({ message: "Email and password are required" });
 
     let user = await User.findOne({ email });
 
+<<<<<<< HEAD
     if (!user) {
       // Auto-create account for seamless localhost/dev access
       console.log(`👤 Auto-registering new localhost user: ${email}`);
@@ -336,6 +372,30 @@ app.post("/api/signin", async (req, res) => {
     }
 
     const token = jwt.sign({ id: user._id, role }, JWT_SECRET, { expiresIn: "7d" });
+=======
+    let validPass = false;
+    let authenticatedRole = "admin";
+
+    // 1. First check if password matches Admin Password
+    const isAdminPass = await bcrypt.compare(password, user.password);
+    if (isAdminPass) {
+      validPass = true;
+      authenticatedRole = "admin";
+    } else if (user.storePassword) {
+      // 2. Next check if password matches Store Password
+      const isStorePass = await bcrypt.compare(password, user.storePassword);
+      if (isStorePass) {
+        validPass = true;
+        authenticatedRole = "instore";
+      }
+    }
+
+    if (!validPass) {
+      return res.status(400).json({ message: "Invalid email or password" });
+    }
+
+    const token = jwt.sign({ id: user._id, role: authenticatedRole }, process.env.JWT_SECRET, { expiresIn: "7d" });
+>>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
 
     res.json({
       message: "Login successful",
@@ -343,6 +403,7 @@ app.post("/api/signin", async (req, res) => {
       user: {
         id: user._id,
         email: user.email,
+<<<<<<< HEAD
         name: user.name || user.email.split("@")[0],
         role: role || user.role || "admin",
         subscriptionStatus: user.subscriptionStatus || "active",
@@ -351,6 +412,16 @@ app.post("/api/signin", async (req, res) => {
         subscriptionStartDate: user.subscriptionStartDate || new Date(),
         subscriptionEndDate: user.subscriptionEndDate || new Date(Date.now() + 30 * 86400000),
         trialEndDate: user.trialEndDate || new Date(Date.now() + 30 * 86400000),
+=======
+        name: user.name,
+        role: authenticatedRole,
+        subscriptionStatus: user.subscriptionStatus,
+        subscriptionPlan: user.subscriptionPlan,
+        subscriptionAmount: user.subscriptionAmount,
+        subscriptionStartDate: user.subscriptionStartDate,
+        subscriptionEndDate: user.subscriptionEndDate,
+        trialEndDate: user.trialEndDate,
+>>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
       },
     });
   } catch (error) {
@@ -474,7 +545,7 @@ app.get("/api/user", verifyToken, async (req, res) => {
       email: user.email,
       name: user.name,
       id: user._id,
-      role: user.role || "admin",
+      role: req.user?.role || user.role || "admin",
       subscriptionStatus: user.subscriptionStatus,
       subscriptionPlan: user.subscriptionPlan,
       subscriptionAmount: user.subscriptionAmount,
@@ -1290,13 +1361,14 @@ app.use("/api/scanned-docs", authenticateUser, checkSubscription, checkModuleAcc
 app.use("/api/civil-engineering", authenticateUser, checkSubscription, checkModuleAccess("civil-engineering"), civilEngineeringRoutes);
 app.use("/api/customers", authenticateUser, checkSubscription, checkModuleAccess("invoice"), customerRoutes);
 app.use("/api/invoice-templates", authenticateUser, checkSubscription, checkModuleAccess("invoice"), invoiceTemplateRoutes);
+app.use("/api/purchase-templates", authenticateUser, checkSubscription, checkModuleAccess("invoice"), purchaseInvoiceTemplateRoutes);
 app.use("/api/leads", leadRoutes);
 
 const seedPlans = async () => {
   const plans = [
     { 
       name: "Sandbox", 
-      allowedModules: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "payroll", "bank-reconciliation", "fraud-detection", "civil-engineering", "export"],
+      allowedModules: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "export"],
       invoiceLimit: 50,
       transactionLimit: 100,
       seatLimit: 1,

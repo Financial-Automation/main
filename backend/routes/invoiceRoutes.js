@@ -98,8 +98,8 @@ const invoiceSchema = new mongoose.Schema({
   // Payment Details
   paymentMethod: {
     type: String,
-    enum: ['cash', 'credit', 'credit_card', 'bank_transfer', 'upi', 'gpay', 'netbanking', 'cheque', 'paypal', 'stripe', 'other'],
-    default: 'bank_transfer'
+    enum: ['cash', 'credit', 'card', 'credit_card', 'bank_transfer', 'upi', 'gpay', 'netbanking', 'cheque', 'paypal', 'stripe', 'other'],
+    default: 'cash'
   },
   paymentStatus: {
     type: String,
@@ -157,11 +157,34 @@ const invoiceSchema = new mongoose.Schema({
 
 const Invoice = mongoose.model("Invoice", invoiceSchema);
 
+const getInvoiceIdFilter = (idParam) => {
+  if (mongoose.Types.ObjectId.isValid(idParam)) {
+    return { _id: idParam };
+  }
+  return { invoiceNumber: idParam };
+};
+
+const getUserFilter = (req) => {
+  if (!req || !req.user) return {};
+  const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
+  if (!userIdStr || userIdStr === "000000000000000000000000") return {};
+  const userIdObj = mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
+  return userIdObj ? {
+    $or: [
+      { userId: userIdObj },
+      { userId: userIdStr },
+      { createdBy: userIdStr }
+    ]
+  } : {
+    createdBy: userIdStr
+  };
+};
+
 // ✅ 0. Public Invoice View (no auth required — for WhatsApp/email sharing links)
 router.get("/public/:id", async (req, res) => {
   try {
     const invoice = await Invoice.findOne({
-      _id: req.params.id,
+      ...getInvoiceIdFilter(req.params.id),
       isDeleted: false
     });
 
@@ -430,20 +453,12 @@ router.get("/search", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 3. Get Single Invoice by ID
-router.get("/:id", async (req, res) => {
+router.get("/:id", verifyTokenOptional, async (req, res) => {
   try {
-    const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-    const userIdObj = new mongoose.Types.ObjectId(userIdStr);
-    const userFilter = {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    };
+    const userFilter = getUserFilter(req);
 
     const invoice = await Invoice.findOne({
-      _id: req.params.id,
+      ...getInvoiceIdFilter(req.params.id),
       isDeleted: false,
       ...userFilter
     });
@@ -465,17 +480,9 @@ router.get("/:id", async (req, res) => {
 });
 
 // ✅ 4. Get Invoice by Invoice Number
-router.get("/number/:invoiceNumber", async (req, res) => {
+router.get("/number/:invoiceNumber", verifyTokenOptional, async (req, res) => {
   try {
-    const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-    const userIdObj = new mongoose.Types.ObjectId(userIdStr);
-    const userFilter = {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    };
+    const userFilter = getUserFilter(req);
 
     const invoice = await Invoice.findOne({
       invoiceNumber: req.params.invoiceNumber,
@@ -500,22 +507,14 @@ router.get("/number/:invoiceNumber", async (req, res) => {
 });
 
 // ✅ 5. Update Invoice
-router.put("/:id", async (req, res) => {
+router.put("/:id", verifyTokenOptional, async (req, res) => {
   try {
     const updateData = req.body;
-    const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-    const userIdObj = new mongoose.Types.ObjectId(userIdStr);
-    const userFilter = {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    };
+    const userFilter = getUserFilter(req);
 
     // Recalculate balance due if payment is updated
     if (updateData.amountPaid !== undefined) {
-      const currentInvoice = await Invoice.findOne({ _id: req.params.id, isDeleted: false, ...userFilter });
+      const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
       if (currentInvoice) {
         updateData.balanceDue = currentInvoice.grandTotal - updateData.amountPaid;
 
@@ -533,7 +532,7 @@ router.put("/:id", async (req, res) => {
     updateData.updatedAt = new Date();
 
     const updatedInvoice = await Invoice.findOneAndUpdate(
-      { _id: req.params.id, isDeleted: false, ...userFilter },
+      { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
       updateData,
       { new: true, runValidators: true }
     );
@@ -579,20 +578,12 @@ router.put("/:id", async (req, res) => {
 });
 
 // ✅ 6. Delete Invoice (Soft Delete)
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", verifyTokenOptional, async (req, res) => {
   try {
-    const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-    const userIdObj = new mongoose.Types.ObjectId(userIdStr);
-    const userFilter = {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    };
+    const userFilter = getUserFilter(req);
 
     const deletedInvoice = await Invoice.findOneAndUpdate(
-      { _id: req.params.id, ...userFilter },
+      { ...getInvoiceIdFilter(req.params.id), ...userFilter },
       {
         isDeleted: true,
         status: 'cancelled',
@@ -629,18 +620,10 @@ router.delete("/:id", async (req, res) => {
 });
 
 // ✅ 7. Update Invoice Status
-router.patch("/:id/status", async (req, res) => {
+router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
   try {
     const { status } = req.body;
-    const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-    const userIdObj = new mongoose.Types.ObjectId(userIdStr);
-    const userFilter = {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    };
+    const userFilter = getUserFilter(req);
 
     const validStatuses = ['draft', 'sent', 'viewed', 'paid', 'overdue', 'cancelled'];
     if (!validStatuses.includes(status)) {
@@ -650,7 +633,7 @@ router.patch("/:id/status", async (req, res) => {
     }
 
     const updatedInvoice = await Invoice.findOneAndUpdate(
-      { _id: req.params.id, isDeleted: false, ...userFilter },
+      { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
       {
         status,
         updatedAt: new Date()
@@ -678,58 +661,46 @@ router.patch("/:id/status", async (req, res) => {
 });
 
 // ✅ 8. Update Payment Status
-router.patch("/:id/payment", async (req, res) => {
+router.all("/:id/payment", async (req, res) => {
+  if (req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'PUT') {
+    return res.status(405).json({ message: "Method not allowed" });
+  }
   try {
-    const { paymentStatus, amountPaid, paymentMethod, paymentDate } = req.body;
-    const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-    const userIdObj = new mongoose.Types.ObjectId(userIdStr);
-    const userFilter = {
+    const { amount, amountPaid, paymentMethod, paymentDate, paymentStatus } = req.body;
+    const payAmt = parseFloat(amount || amountPaid || 0);
+
+    const userIdStr = req.user?._id ? req.user._id.toString() : req.user?.id;
+    const userIdObj = userIdStr && mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
+    const userFilter = userIdObj ? {
       $or: [
         { userId: userIdObj },
         { userId: userIdStr },
         { createdBy: userIdStr }
       ]
-    };
+    } : {};
 
-    const validPaymentStatuses = ['pending', 'partial', 'paid', 'overdue', 'cancelled'];
-    if (!validPaymentStatuses.includes(paymentStatus)) {
-      return res.status(400).json({
-        message: "Invalid payment status"
-      });
+    const invoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
+    if (!invoice) {
+      return res.status(404).json({ message: "Invoice not found" });
     }
 
-    const updateData = {
-      paymentStatus,
-      updatedAt: new Date()
-    };
+    const newAmountPaid = (invoice.amountPaid || 0) + payAmt;
+    const newBalanceDue = Math.max(0, invoice.grandTotal - newAmountPaid);
+    const newStatus = newBalanceDue <= 0 ? 'paid' : newAmountPaid > 0 ? 'partial' : 'pending';
 
-    if (amountPaid !== undefined) updateData.amountPaid = amountPaid;
-    if (paymentMethod) updateData.paymentMethod = paymentMethod;
-    if (paymentDate) updateData.paymentDate = paymentDate;
+    invoice.amountPaid = newAmountPaid;
+    invoice.balanceDue = newBalanceDue;
+    invoice.paymentStatus = paymentStatus || newStatus;
+    invoice.status = newStatus;
+    if (paymentMethod) invoice.paymentMethod = paymentMethod;
+    if (paymentDate) invoice.paymentDate = new Date(paymentDate);
+    invoice.updatedAt = new Date();
 
-    // Recalculate balance due
-    if (amountPaid !== undefined) {
-      const currentInvoice = await Invoice.findOne({ _id: req.params.id, isDeleted: false, ...userFilter });
-      if (currentInvoice) {
-        updateData.balanceDue = currentInvoice.grandTotal - amountPaid;
-      }
-    }
-
-    const updatedInvoice = await Invoice.findOneAndUpdate(
-      { _id: req.params.id, isDeleted: false, ...userFilter },
-      updateData,
-      { new: true }
-    );
-
-    if (!updatedInvoice) {
-      return res.status(404).json({
-        message: "Invoice not found"
-      });
-    }
+    await invoice.save();
 
     res.json({
       message: "Payment status updated successfully!",
-      invoice: updatedInvoice
+      invoice
     });
   } catch (error) {
     console.error("Error updating payment status:", error);

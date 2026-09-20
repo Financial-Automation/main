@@ -29,6 +29,8 @@ import PublicInvoiceView from "./pages/PublicInvoiceView";
 import PublicPurchaseInvoiceView from "./pages/PublicPurchaseInvoiceView";
 import InvoiceTemplates from "./pages/InvoiceTemplates";
 import InvoiceTemplateEditor from "./pages/InvoiceTemplateEditor";
+import PurchaseInvoiceTemplates from "./pages/PurchaseInvoiceTemplates";
+import PurchaseInvoiceTemplateEditor from "./pages/PurchaseInvoiceTemplateEditor";
 import ResetPassword from "./pages/ResetPassword";
 import ServerIssues from "./pages/ServerIssues";
 import AiAccountingExplained from "./pages/AiAccountingExplained";
@@ -109,6 +111,10 @@ const App = () => {
             <Route path="/invoice/templates/create" element={isMaintenanceMode ? <ServerIssues /> : <InvoiceTemplateEditor />} />
             <Route path="/invoice-templates" element={isMaintenanceMode ? <ServerIssues /> : <InvoiceTemplates />} />
             <Route path="/invoice-templates/create" element={isMaintenanceMode ? <ServerIssues /> : <InvoiceTemplateEditor />} />
+            <Route path="/inventory/purchase-templates" element={isMaintenanceMode ? <ServerIssues /> : <PurchaseInvoiceTemplates />} />
+            <Route path="/inventory/purchase-templates/create" element={isMaintenanceMode ? <ServerIssues /> : <PurchaseInvoiceTemplateEditor />} />
+            <Route path="/purchase-templates" element={isMaintenanceMode ? <ServerIssues /> : <PurchaseInvoiceTemplates />} />
+            <Route path="/purchase-templates/create" element={isMaintenanceMode ? <ServerIssues /> : <PurchaseInvoiceTemplateEditor />} />
             <Route path="/invoice/view/:id" element={<PublicInvoiceView />} />
             <Route path="/purchase-invoice/view/:id" element={<PublicPurchaseInvoiceView />} />
             <Route path="/reset-password" element={<ResetPassword />} />

@@ -35,10 +35,10 @@ const SubscriptionContext = createContext<SubscriptionContextType | undefined>(u
 
 // Syncing permitted modules list per plan
 export const planModules: Record<string, string[]> = {
-  trial: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "payroll", "bank-reconciliation", "fraud-detection", "civil-engineering", "export"], // Sandbox (Full Access)
+  trial: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "export"], // Sandbox Trial (Bank, Payroll, Civil, Fraud locked)
   basic: ["dashboard", "invoice", "inventory", "export"],
   basic_annual: ["dashboard", "invoice", "inventory", "export"],
-  monthly: ["dashboard", "invoice", "inventory", "export"],
+  monthly: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "payroll", "bank-reconciliation", "fraud-detection", "civil-engineering", "export"],
   intermediate: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "export"],
   intermediate_annual: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "export"],
   annual: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "export"],
@@ -111,11 +111,8 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
     // dashboard is always accessible to authenticated users
     if (moduleName === "dashboard") return true;
 
-    // Admin has full access to all business modules
-    if (user.role === "admin") return true;
-
-    // In-store POS accounts are hard-restricted to Invoice and Inventory only (unless on active Sandbox Trial)
-    if (user.role === "instore" && user.subscriptionPlan !== "trial") {
+    // In-store POS accounts are strictly restricted to Invoice and Inventory modules only
+    if (user.role === "instore") {
       return ["invoice", "inventory"].includes(moduleName);
     }
 
@@ -137,6 +134,10 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
   };
 
   const openUpgradeModal = (moduleName: string) => {
+    if (user?.role === "instore") {
+      // Store POS accounts cannot upgrade subscriptions
+      return;
+    }
     setShowUpgradeModalFor(moduleName);
   };
 

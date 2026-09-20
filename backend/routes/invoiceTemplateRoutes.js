@@ -23,10 +23,105 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-// GET /api/invoice-templates - Get all templates for the user
+// GET /api/invoice-templates - Get all templates for the user (auto-seed system defaults if empty)
 router.get("/", verifyToken, async (req, res) => {
   try {
-    const templates = await InvoiceTemplate.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    let templates = await InvoiceTemplate.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    
+    if (templates.length === 0) {
+      const defaultTemplates = [
+        {
+          userId: req.user.id,
+          name: "Modern Indigo",
+          description: "Sleek modern layout with indigo header banner and clean typography.",
+          status: "active",
+          isDefault: true,
+          config: {
+            header: { showLogo: true, logoPosition: "left", logoSize: "medium", logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
+            seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
+            customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
+            invoiceInfo: {
+              showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
+              labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
+            },
+            items: {
+              columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
+              labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+            },
+            tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
+            payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
+            signature: { show: false, name: "", designation: "", imageUrl: "" },
+            footer: { show: true, text: "Thank you for your business!" },
+            design: { primaryColor: "#4f46e5", secondaryColor: "#f8fafc", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#cbd5e1", fontFamily: "Inter", fontSize: 12, borderStyle: "light" }
+          }
+        },
+        {
+          userId: req.user.id,
+          name: "Amber Gold Premium",
+          description: "Warm gold and amber accents suitable for retail and commercial bills.",
+          status: "active",
+          isDefault: false,
+          config: {
+            header: { showLogo: true, logoPosition: "left", logoSize: "medium", logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
+            seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
+            customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
+            invoiceInfo: {
+              showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
+              labels: { invoiceNumber: "Bill No.", invoiceDate: "Bill Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
+            },
+            items: {
+              columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
+              labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+            },
+            tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
+            payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
+            signature: { show: false, name: "", designation: "", imageUrl: "" },
+            footer: { show: true, text: "Thank you for your business!" },
+            design: { primaryColor: "#d97706", secondaryColor: "#fffbeb", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#fde68a", fontFamily: "Inter", fontSize: 12, borderStyle: "light" }
+          }
+        },
+        {
+          userId: req.user.id,
+          name: "Emerald Corporate",
+          description: "Professional emerald green theme suitable for B2B & corporate billing.",
+          status: "active",
+          isDefault: false,
+          config: {
+            header: { showLogo: true, logoPosition: "left", logoSize: "medium", logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
+            seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
+            customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
+            invoiceInfo: {
+              showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
+              labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
+            },
+            items: {
+              columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
+              labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+            },
+            tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
+            payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
+            signature: { show: false, name: "", designation: "", imageUrl: "" },
+            footer: { show: true, text: "Thank you for your business!" },
+            design: { primaryColor: "#059669", secondaryColor: "#ecfdf5", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#a7f3d0", fontFamily: "Inter", fontSize: 12, borderStyle: "light" }
+          }
+        }
+      ];
+
+      for (const t of defaultTemplates) {
+        const created = new InvoiceTemplate(t);
+        await created.save();
+
+        const ver = new InvoiceTemplateVersion({
+          templateId: created._id,
+          versionNumber: 1,
+          config: created.config
+        });
+        await ver.save();
+      }
+
+      templates = await InvoiceTemplate.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    }
+
     res.json({ success: true, data: templates });
   } catch (error) {
     res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: error.message } });

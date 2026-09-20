@@ -12,7 +12,9 @@ import {
   ShieldCheck,
   Building2,
   Zap,
-  Hexagon
+  Hexagon,
+  Eye,
+  EyeOff
 } from "lucide-react";
 import { VoiceButton } from "@/components/ui/VoiceButton";
 import { API_ENDPOINTS, apiRequest } from "@/lib/api";
@@ -330,7 +332,9 @@ const Auth = () => {
   const [password, setPassword] = useState("");
   const [storePassword, setStorePassword] = useState("");
   const [name, setName] = useState("");
-  const [loginRole, setLoginRole] = useState<"admin" | "instore">("admin");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [showStorePassword, setShowStorePassword] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -358,21 +362,37 @@ const Auth = () => {
     return () => { document.body.removeChild(script); };
   }, []);
 
+  const clearInvoiceCache = () => {
+    try {
+      localStorage.removeItem("savedInvoices");
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith("savedInvoices")) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!email || !password) {
+      return toast({ variant: "destructive", title: "Required", description: "Email and password are required." });
+    }
     setLoading(true);
     try {
       const res = await apiRequest(API_ENDPOINTS.SIGNIN, {
         method: "POST",
-        body: JSON.stringify({ email, password, role: loginRole }),
+        body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message);
 
-      if (isTrialExpired(data.user)) {
+      if (data.user?.subscriptionStatus === "expired") {
         toast({
           variant: "destructive",
-          title: "Subscription Required",
+          title: "Subscription Expired",
           description: "Your trial has expired. Please subscribe to continue."
         });
         setView("signup");
@@ -381,6 +401,7 @@ const Auth = () => {
         return;
       }
 
+      clearInvoiceCache();
       localStorage.setItem("token", data.token);
       await refreshUser(data.user);
       setTimeout(() => navigate("/dashboard"), 300);
@@ -412,6 +433,7 @@ const Auth = () => {
         const trialData = await trialRes.json();
         if (!trialRes.ok) throw new Error(trialData.message);
 
+        clearInvoiceCache();
         localStorage.setItem("token", trialData.token);
         await refreshUser(trialData.user);
         toast({ title: "Welcome!", description: "Initializing your workspace..." });
@@ -443,6 +465,7 @@ const Auth = () => {
             const verifyData = await verifyRes.json();
             if (!verifyRes.ok) throw new Error(verifyData.message);
 
+            clearInvoiceCache();
             localStorage.setItem("token", verifyData.token);
             await refreshUser(verifyData.user);
             setTimeout(() => navigate("/dashboard"), 300);
@@ -617,17 +640,6 @@ const Auth = () => {
                         </div>
                         <form onSubmit={handleSignIn} className="space-y-5">
                           <div>
-                            <label className="block text-[13px] font-bold text-[#333] mb-2 uppercase tracking-wide">Portal Access</label>
-                            <div className="grid grid-cols-2 gap-3 bg-[#f8fafc] p-1.5 rounded-[12px] border border-[#e2e8f0]">
-                              <button type="button" onClick={() => setLoginRole("admin")} className={`p-2.5 rounded-[8px] text-center transition-all ${loginRole === "admin" ? "bg-white text-[#0f172a] font-bold shadow-sm" : "text-[#64748b] font-medium hover:text-[#0f172a]"}`}>
-                                <div className="text-[13px]">Admin Portal</div>
-                              </button>
-                              <button type="button" onClick={() => setLoginRole("instore")} className={`p-2.5 rounded-[8px] text-center transition-all ${loginRole === "instore" ? "bg-white text-[#0f172a] font-bold shadow-sm" : "text-[#64748b] font-medium hover:text-[#0f172a]"}`}>
-                                <div className="text-[13px]">In-Store POS</div>
-                              </button>
-                            </div>
-                          </div>
-                          <div>
                             <label className="block text-[13px] font-bold text-[#333] mb-2 uppercase tracking-wide">Work Email</label>
                             <div className="relative flex items-center">
                               <Mail className="absolute left-3.5 w-[18px] h-[18px] text-[#94a3b8]" />
@@ -642,7 +654,15 @@ const Auth = () => {
                             </div>
                             <div className="relative flex items-center">
                               <Lock className="absolute left-3.5 w-[18px] h-[18px] text-[#94a3b8]" />
-                              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full h-12 pl-10 pr-4 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="••••••••" required />
+                              <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="••••••••" required />
+                              <button
+                                type="button"
+                                onClick={() => setShowPassword(!showPassword)}
+                                className="absolute right-3.5 text-[#94a3b8] hover:text-[#0f172a] transition-colors focus:outline-none"
+                                tabIndex={-1}
+                              >
+                                {showPassword ? <EyeOff className="w-[18px] h-[18px]" /> : <Eye className="w-[18px] h-[18px]" />}
+                              </button>
                             </div>
                           </div>
                           <button type="submit" disabled={loading} className="w-full h-12 mt-6 bg-[#0f172a] hover:bg-[#1e293b] text-white font-semibold text-[15px] rounded-[10px] transition-colors flex items-center justify-center gap-2 shadow-sm">
@@ -673,14 +693,30 @@ const Auth = () => {
                             <label className="block text-[13px] font-bold text-[#333] mb-2 uppercase tracking-wide">Set Admin Password</label>
                             <div className="relative flex items-center">
                               <Lock className="absolute left-3.5 w-[18px] h-[18px] text-[#94a3b8]" />
-                              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full h-12 pl-10 pr-4 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="Create admin password" required />
+                              <input type={showAdminPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="Create admin password" required />
+                              <button
+                                type="button"
+                                onClick={() => setShowAdminPassword(!showAdminPassword)}
+                                className="absolute right-3.5 text-[#94a3b8] hover:text-[#0f172a] transition-colors focus:outline-none"
+                                tabIndex={-1}
+                              >
+                                {showAdminPassword ? <EyeOff className="w-[18px] h-[18px]" /> : <Eye className="w-[18px] h-[18px]" />}
+                              </button>
                             </div>
                           </div>
                           <div>
                             <label className="block text-[13px] font-bold text-[#333] mb-2 uppercase tracking-wide">Set Store Password</label>
                             <div className="relative flex items-center">
                               <Lock className="absolute left-3.5 w-[18px] h-[18px] text-[#94a3b8]" />
-                              <input type="password" value={storePassword} onChange={(e) => setStorePassword(e.target.value)} className="w-full h-12 pl-10 pr-4 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="Create store password" required />
+                              <input type={showStorePassword ? "text" : "password"} value={storePassword} onChange={(e) => setStorePassword(e.target.value)} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="Create store password" required />
+                              <button
+                                type="button"
+                                onClick={() => setShowStorePassword(!showStorePassword)}
+                                className="absolute right-3.5 text-[#94a3b8] hover:text-[#0f172a] transition-colors focus:outline-none"
+                                tabIndex={-1}
+                              >
+                                {showStorePassword ? <EyeOff className="w-[18px] h-[18px]" /> : <Eye className="w-[18px] h-[18px]" />}
+                              </button>
                             </div>
                           </div>
                           <button type="submit" disabled={loading || paymentLoading} className="w-full h-12 mt-6 bg-[#0f172a] hover:bg-[#1e293b] text-white font-semibold text-[15px] rounded-[10px] transition-colors flex items-center justify-center gap-2 shadow-sm">

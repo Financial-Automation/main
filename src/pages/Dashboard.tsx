@@ -222,17 +222,19 @@ const Dashboard = () => {
             {moduleTitle} Locked
           </h4>
           <p className="text-[11px] text-slate-400 max-w-[200px] mb-2.5 leading-snug">
-            Not included in your current subscription.
+            {user?.role === "instore" ? "Restricted for Store accounts." : "Not included in your current subscription."}
           </p>
-          <button 
-            onClick={(e) => {
-              e.stopPropagation();
-              openUpgradeModal(moduleName);
-            }}
-            className="px-3 py-1.5 bg-[#006aff] hover:bg-[#005cdb] text-white text-[11px] font-bold rounded shadow-sm transition-colors flex items-center gap-1 cursor-pointer select-none"
-          >
-            <Sparkles className="w-3 h-3" /> Upgrade Plan
-          </button>
+          {user?.role !== "instore" && (
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                openUpgradeModal(moduleName);
+              }}
+              className="px-3 py-1.5 bg-[#006aff] hover:bg-[#005cdb] text-white text-[11px] font-bold rounded shadow-sm transition-colors flex items-center gap-1 cursor-pointer select-none"
+            >
+              <Sparkles className="w-3 h-3" /> Upgrade Plan
+            </button>
+          )}
         </div>
       </div>
     );
@@ -366,11 +368,35 @@ const Dashboard = () => {
           return response?.ok ? response.json() : null;
         };
 
-        const invoicesRes = await apiRequest(`${API_ENDPOINTS.INVOICE}/all?limit=100`).catch(() => null);
+        let backendInvoices: any[] = [];
+        const invoicesRes = await apiRequest(`${API_ENDPOINTS.INVOICE}/all?limit=500`).catch(() => null);
         if (invoicesRes && invoicesRes.ok) {
           const parsed = await invoicesRes.json();
-          if (parsed && parsed.invoices) setAllInvoices(parsed.invoices);
+          if (parsed && parsed.invoices) backendInvoices = parsed.invoices;
         }
+
+        // Merge backend invoices and localStorage invoices prioritizing backend server data
+        const localInvoices: any[] = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
+        const invoiceMap = new Map();
+        // First add backendInvoices (canonical source from DB)
+        backendInvoices.forEach(inv => {
+          const key = inv.invoiceNumber || inv.invoiceNo || inv._id || inv.id;
+          if (key) {
+            invoiceMap.set(key, inv);
+          }
+        });
+        // Then add any local-only invoices strictly belonging to current logged-in user
+        const currentUserId = user?.id || contextUser?.id;
+        localInvoices.forEach(inv => {
+          const key = inv.invoiceNumber || inv.invoiceNo || inv._id || inv.id;
+          if (inv.userId && currentUserId && String(inv.userId) !== String(currentUserId)) {
+            return;
+          }
+          if (key && !invoiceMap.has(key)) {
+            invoiceMap.set(key, inv);
+          }
+        });
+        setAllInvoices(Array.from(invoiceMap.values()));
 
         const purchasesRes = await apiRequest(`${API_BASE_URL}/purchase-invoice/all`).catch(() => null);
         if (purchasesRes && purchasesRes.ok) {
@@ -429,64 +455,84 @@ const Dashboard = () => {
 
   // Update calculations whenever period or raw data changes
   useEffect(() => {
-    const filteredInvoices = allInvoices.filter(inv => !inv.isDeleted && inv.status !== 'cancelled' && isDateInPeriod(inv.invoiceDate, selectedPeriod));
+    const filteredInvoices = allInvoices.filter(inv => !inv.isDeleted && inv.status !== 'cancelled' && isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod));
     const filteredPurchases = allPurchaseInvoices.filter(inv => !inv.isDeleted && isDateInPeriod(inv.createdAt || inv.billDate, selectedPeriod));
 
-    const revenue = filteredInvoices.reduce((sum, inv) => sum + (inv.grandTotal || 0), 0);
+    // Calculate Receivables (total unpaid balance owed TO us by customers)
+    const invoiceReceivables = allInvoices.reduce((sum, inv) => {
+      if (inv.isDeleted || inv.status === 'cancelled') return sum;
+      if (!isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod)) return sum;
+      
+      const total = inv.grandTotal || inv.total || 0;
+      const paid = inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0);
+      const balance = inv.balance !== undefined ? inv.balance : Math.max(0, total - paid);
+      return sum + Math.max(0, balance);
+    }, 0);
+
+    // Calculate Payables (total unpaid balance WE owe to suppliers)
+    const purchasePayables = allPurchaseInvoices.reduce((sum, inv) => {
+      if (inv.isDeleted) return sum;
+      if (!isDateInPeriod(inv.createdAt || inv.billDate, selectedPeriod)) return sum;
+
+      const total = inv.total || 0;
+      const paid = inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0);
+      const balance = inv.balance !== undefined ? inv.balance : Math.max(0, total - paid);
+      return sum + Math.max(0, balance);
+    }, 0);
+
+    const revenue = filteredInvoices.reduce((sum, inv) => sum + (inv.grandTotal || inv.total || 0), 0);
     const purchaseExpenses = filteredPurchases.reduce((sum, inv) => sum + (inv.total || 0), 0);
 
     const selectedPeriodBookkeeping = allBookkeepingEntries.filter(entry => !entry.isDeleted && isDateInPeriod(entry.date, selectedPeriod));
     const bkIncome = selectedPeriodBookkeeping.reduce((sum, entry) => entry.type === "income" ? sum + toNumber(entry.amount) : sum, 0);
     const bkExpense = selectedPeriodBookkeeping.reduce((sum, entry) => entry.type === "expense" ? sum + toNumber(entry.amount) : sum, 0);
 
-    if (plGen && cfGen) {
-      const netProf = plGen.netProfit || 0;
-      setDashboardStats([
-        { title: "Total Receivables", amount: cfGen.cashFlow?.receivables > 0 ? formatCurrency(cfGen.cashFlow.receivables) : (bkIncome > 0 ? formatCurrency(bkIncome) : "₹0.00"), trend: "", isPositive: true, hasData: true, iconColor: "text-[#006aff]", icon: TrendingUp },
-        { title: "Total Payables", amount: cfGen.cashFlow?.payables > 0 ? formatCurrency(cfGen.cashFlow.payables) : (bkExpense > 0 ? formatCurrency(bkExpense) : "₹0.00"), trend: "", isPositive: true, hasData: true, iconColor: "text-[#f0483e]", icon: Receipt },
-        { title: "Net Profit", amount: formatCurrency(netProf), trend: "", isPositive: netProf >= 0, hasData: netProf !== 0, iconColor: "text-[#00b365]", icon: BarChart2 },
-        { title: "GST Payable", amount: (cfGen.cashFlow?.gstPayable && cfGen.cashFlow.gstPayable > 0) ? formatCurrency(cfGen.cashFlow.gstPayable) : "₹0.00", trend: "", isPositive: true, hasData: (cfGen.cashFlow?.gstPayable !== undefined && cfGen.cashFlow.gstPayable > 0), iconColor: "text-[#0288d1]", icon: Receipt },
-      ]);
+    const calcReceivables = invoiceReceivables > 0 
+      ? invoiceReceivables 
+      : ((cfGen?.cashFlow?.receivables > 0) ? cfGen.cashFlow.receivables : bkIncome);
 
-      setPlSummaryData({
-        totalRevenue: plGen.totalRevenue || 0,
-        totalExpenses: plGen.totalExpenses || 0,
-        netProfit: netProf,
-        grossProfitMargin: plGen.totalRevenue > 0 ? (((plGen.totalRevenue - (plGen.costOfMaterials || 0)) / plGen.totalRevenue) * 100) : 0,
-        netProfitMargin: plGen.profitMargin || 0
-      });
-    } else {
-      const fallbackProfit = bkIncome - bkExpense;
-      setDashboardStats([
-        { title: "Total Receivables", amount: bkIncome > 0 ? formatCurrency(bkIncome) : "₹0.00", trend: "", isPositive: true, hasData: true, iconColor: "text-[#006aff]", icon: TrendingUp },
-        { title: "Total Payables", amount: bkExpense > 0 ? formatCurrency(bkExpense) : "₹0.00", trend: "", isPositive: true, hasData: true, iconColor: "text-[#f0483e]", icon: Receipt },
-        { title: "Net Profit", amount: fallbackProfit !== 0 ? formatCurrency(fallbackProfit) : "₹0.00", trend: "", isPositive: fallbackProfit >= 0, hasData: fallbackProfit !== 0, iconColor: "text-[#00b365]", icon: BarChart2 },
-        { title: "GST Payable", amount: "₹0.00", trend: "", isPositive: true, hasData: false, iconColor: "text-[#0288d1]", icon: Receipt },
-      ]);
+    const calcPayables = purchasePayables > 0 
+      ? purchasePayables 
+      : ((cfGen?.cashFlow?.payables > 0) ? cfGen.cashFlow.payables : bkExpense);
 
-      setPlSummaryData({
-        totalRevenue: bkIncome || revenue,
-        totalExpenses: bkExpense || purchaseExpenses,
-        netProfit: fallbackProfit,
-        grossProfitMargin: revenue > 0 ? ((revenue - purchaseExpenses) / revenue) * 100 : 0,
-        netProfitMargin: revenue > 0 ? (fallbackProfit / revenue) * 100 : 0
-      });
-    }
+    const netProf = plGen?.netProfit !== undefined ? plGen.netProfit : (bkIncome - bkExpense);
 
-    const selectedPeriodInvoices = allInvoices.filter(inv => isDateInPeriod(inv.invoiceDate, selectedPeriod));
+    setDashboardStats([
+      { title: "Total Receivables", amount: formatCurrency(calcReceivables), trend: "", isPositive: true, hasData: true, iconColor: "text-[#006aff]", icon: TrendingUp },
+      { title: "Total Payables", amount: formatCurrency(calcPayables), trend: "", isPositive: true, hasData: true, iconColor: "text-[#f0483e]", icon: Receipt },
+      { title: "Net Profit", amount: formatCurrency(netProf), trend: "", isPositive: netProf >= 0, hasData: netProf !== 0, iconColor: "text-[#00b365]", icon: BarChart2 },
+      { title: "GST Payable", amount: (cfGen?.cashFlow?.gstPayable && cfGen.cashFlow.gstPayable > 0) ? formatCurrency(cfGen.cashFlow.gstPayable) : "₹0.00", trend: "", isPositive: true, hasData: (cfGen?.cashFlow?.gstPayable !== undefined && cfGen.cashFlow.gstPayable > 0), iconColor: "text-[#0288d1]", icon: Receipt },
+    ]);
+
+    setPlSummaryData({
+      totalRevenue: plGen?.totalRevenue || revenue || bkIncome,
+      totalExpenses: plGen?.totalExpenses || purchaseExpenses || bkExpense,
+      netProfit: netProf,
+      grossProfitMargin: revenue > 0 ? (((revenue - purchaseExpenses) / revenue) * 100) : 0,
+      netProfitMargin: revenue > 0 ? ((netProf / revenue) * 100) : 0
+    });
+
+    const selectedPeriodInvoices = allInvoices.filter(inv => !inv.isDeleted && isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod));
     const mappedInvoices = selectedPeriodInvoices.slice(0, 5).map((inv: any) => {
       let statusColor = "bg-[#f4f5f8] text-[#555] border border-[#ddd]";
-      const statusStr = inv.status || "draft";
+      const paidVal = inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0);
+      const totalVal = inv.grandTotal || inv.total || 0;
+      const balVal = inv.balance !== undefined ? inv.balance : Math.max(0, totalVal - paidVal);
+
+      let statusStr = inv.status || "draft";
+      if (balVal <= 0 && totalVal > 0) statusStr = "paid";
+      else if (inv.saleType === "credit" || balVal > 0) statusStr = "due";
+
       if (statusStr === "paid") statusColor = "bg-[#e6f8ef] text-[#00b365] border border-[#00b365]/30";
-      else if (statusStr === "sent" || statusStr === "viewed") statusColor = "bg-[#e8f2ff] text-[#006aff] border border-[#006aff]/30";
+      else if (statusStr === "due" || statusStr === "sent" || statusStr === "viewed") statusColor = "bg-[#fde9e8] text-[#f0483e] border border-[#f0483e]/30";
       else if (statusStr === "overdue") statusColor = "bg-[#fde9e8] text-[#f0483e] border border-[#f0483e]/30";
       else if (statusStr === "draft") statusColor = "bg-[#fff8e1] text-[#f57c00] border border-[#f57c00]/30";
 
       return {
-        id: inv.invoiceNumber || "INV-UNKNOWN",
-        company: inv.customerName || "Unknown Client",
-        amount: `₹${inv.grandTotal ? inv.grandTotal.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "0.00"}`,
-        status: statusStr.charAt(0).toUpperCase() + statusStr.slice(1),
+        id: inv.invoiceNo || inv.invoiceNumber || inv._id || "INV-UNKNOWN",
+        company: inv.partyName || inv.customerName || "Customer",
+        amount: `₹${totalVal.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`,
+        status: statusStr.toUpperCase(),
         statusColor,
         rawDate: inv.invoiceDate || inv.createdAt
       };
@@ -632,25 +678,25 @@ const Dashboard = () => {
   
   const filteredModules = useMemo(() => {
     let modules = dashboardModules;
-    if (user?.role === "instore" && user?.subscriptionPlan !== "trial") {
+    if (user?.role === "instore") {
       modules = modules.filter(m => 
         m.path === "/" || 
         m.path === "/invoice" || 
         m.path === "/inventory"
       );
     }
-    // Only users with backend role 'admin' see the 6 Analytics modules in Dashboard All Products / Module Listings
-    if (user?.role !== "admin") {
-      const analyticsPaths = [
-        "/tax-gst",
-        "/balance-sheet",
-        "/profit-loss",
-        "/cashflow",
-        "/cashflow-statement",
-        "/financial-ratios"
+
+    // In Free Trial (trial plan), completely remove the 4 advanced modules
+    if (user?.subscriptionPlan === "trial") {
+      const trialExcludedPaths = [
+        "/payroll",
+        "/bank-reconciliation",
+        "/fraud-detection",
+        "/civil-engineering"
       ];
-      modules = modules.filter(m => !analyticsPaths.includes(m.path));
+      modules = modules.filter(m => !trialExcludedPaths.includes(m.path));
     }
+
     return modules;
   }, [user]);
   
@@ -681,6 +727,16 @@ const Dashboard = () => {
 
   const handleSignOut = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("savedInvoices");
+    try {
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith("savedInvoices")) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) {
+      console.error(e);
+    }
     refreshUser(null);
     navigate("/auth");
   };
@@ -1382,21 +1438,12 @@ const Dashboard = () => {
                         <button
                           key={module.path}
                           onClick={() => isLocked ? openUpgradeModal(moduleKey) : navigate(module.path)}
-                          className={`w-full text-left px-4 py-2.5 text-[13px] flex items-center justify-between transition-colors border-b border-slate-50 last:border-0 ${
-                            isLocked 
-                              ? "bg-slate-50/50 text-[#888] cursor-pointer" 
-                              : "text-[#444] hover:bg-[#f4f5f8] hover:text-[#006aff]"
-                          }`}
+                          className="w-full text-left px-4 py-2.5 text-[13px] flex items-center justify-between transition-colors border-b border-slate-50 last:border-0 text-[#444] hover:bg-[#f4f5f8] hover:text-[#006aff]"
                         >
                           <div className="flex items-center gap-3 truncate">
-                            <Icon className={`w-4 h-4 shrink-0 ${isLocked ? 'text-slate-400' : 'text-[#777]'}`} />
+                            <Icon className="w-4 h-4 shrink-0 text-[#777]" />
                             <span className="truncate font-medium">{module.title}</span>
                           </div>
-                          {isLocked && (
-                            <span className="flex items-center gap-0.5 text-[9px] font-bold text-slate-400 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded uppercase tracking-wider scale-90">
-                              <Lock className="w-2.5 h-2.5" /> Lock
-                            </span>
-                          )}
                         </button>
                       )
                   })}
@@ -1494,21 +1541,12 @@ const Dashboard = () => {
                       setMobileSidebarOpen(false);
                     }
                   }}
-                  className={`w-full text-left px-3 py-2 text-[14px] flex items-center justify-between transition-colors rounded my-1 ${
-                    isLocked 
-                      ? "border border-dashed border-slate-200 bg-slate-50 text-slate-400 cursor-pointer" 
-                      : "text-[#444] hover:bg-[#f4f5f8] hover:text-[#006aff]"
-                  }`}
+                  className="w-full text-left px-3 py-2 text-[14px] flex items-center justify-between transition-colors rounded my-1 text-[#444] hover:bg-[#f4f5f8] hover:text-[#006aff]"
                 >
                   <div className="flex items-center gap-3 truncate">
-                    <Icon className={`w-4 h-4 shrink-0 ${isLocked ? 'text-slate-350' : 'text-[#777]'}`} />
+                    <Icon className="w-4 h-4 shrink-0 text-[#777]" />
                     <span className="truncate font-medium">{module.title}</span>
                   </div>
-                  {isLocked && (
-                    <span className="flex items-center gap-0.5 text-[9px] font-bold text-slate-400 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded uppercase tracking-wider">
-                      <Lock className="w-2.5 h-2.5" /> Lock
-                    </span>
-                  )}
                 </button>
               )
             })}
@@ -1547,7 +1585,7 @@ const Dashboard = () => {
             {dashboardStats.map((stat, i) => {
               const statModules = ["invoice", "invoice", "profit-loss", "tax-gst"];
               const moduleKey = statModules[i];
-              const isLocked = !hasAccess(moduleKey);
+              const isLocked = user?.role === "instore" ? false : !hasAccess(moduleKey);
 
               if (isLocked) {
                 return (

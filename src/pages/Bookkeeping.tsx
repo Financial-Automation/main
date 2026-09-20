@@ -782,34 +782,182 @@ const Bookkeeping = () => {
                     </TabsContent>
 
                     <TabsContent value="add">
-                        <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 transition-all duration-500">
-                            <CardHeader className="text-center">
-                                <CardTitle className="text-2xl font-semibold tracking-tight text-slate-950 flex items-center justify-center gap-2">
-                                    <Lock className="h-6 w-6 text-amber-600" />
-                                    Direct Manual Input Disabled
+                        <Card
+                            className="liquid-panel overflow-hidden rounded-[36px] border-white/55 transition-all duration-500"
+                        >
+                            <CardHeader>
+                                <CardTitle className="text-2xl font-semibold tracking-tight text-slate-950 flex items-center gap-2">
+                                    <Plus className="h-5 w-5 text-slate-800" />
+                                    Add New Entry
                                 </CardTitle>
                                 <CardDescription className="text-slate-600">
-                                    Bookkeeping receives financial entries exclusively from Inventory and Invoice modules
+                                    Record a new income or expense transaction
                                 </CardDescription>
                             </CardHeader>
-                            <CardContent className="py-8 text-center space-y-6">
-                                <div className="p-4 rounded-full bg-amber-500/10 border border-amber-500/20 inline-block">
-                                    <Info className="h-10 w-10 text-amber-600" />
+
+                            <CardContent className="space-y-6">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-3">
+                                        <Label htmlFor="description" className="text-slate-800 font-bold">
+                                            Description
+                                        </Label>
+                                        <div className="flex items-center gap-2">
+                                            <Input
+                                                id="description"
+                                                placeholder="e.g., Client Payment, Office Supplies"
+                                                value={formData.description}
+                                                onChange={(e) => handleInputChange("description", e.target.value)}
+                                                className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 placeholder:text-slate-400 focus:border-slate-300 focus:ring-0 transition-all duration-300"
+                                            />
+                                            <VoiceButton
+                                                onTranscript={(text) => handleInputChange("description", text)}
+                                                onClear={() => handleInputChange("description", "")}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        <Label htmlFor="date" className="text-slate-800 font-bold">
+                                            Date
+                                        </Label>
+                                        <Popover>
+                                            <PopoverTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    className="w-full justify-start text-left font-normal h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300 transition-all duration-300"
+                                                >
+                                                    <CalendarIcon className="mr-2 h-4 w-4 text-slate-800" />
+                                                    {selectedDate ? format(selectedDate, "PPP") : <span>Pick a date</span>}
+                                                </Button>
+                                            </PopoverTrigger>
+                                            <PopoverContent className="w-auto p-0 bg-white border border-slate-200" align="start">
+                                                <Calendar
+                                                    mode="single"
+                                                    selected={selectedDate}
+                                                    onSelect={(date) => date && setSelectedDate(date)}
+                                                    initialFocus
+                                                    className="bg-white text-slate-900"
+                                                />
+                                            </PopoverContent>
+                                        </Popover>
+                                    </div>
                                 </div>
-                                <div className="max-w-md mx-auto space-y-2">
-                                    <h4 className="text-lg font-bold text-slate-900">Automated Data Flow Architecture</h4>
-                                    <p className="text-slate-600 text-sm">
-                                        To maintain financial audit compliance, direct manual transaction entries are blocked in Bookkeeping. Create business transactions via <strong>Inventory</strong> (stock additions/sales) or <strong>Invoice</strong> (sales/purchase invoices), and Bookkeeping will automatically record them.
-                                    </p>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-3">
+                                        <Label className="text-slate-800 font-bold">Type</Label>
+                                        <div className="flex gap-2">
+                                            <Button
+                                                type="button"
+                                                variant={formData.type === "Income" ? "default" : "outline"}
+                                                onClick={() => handleInputChange("type", "Income")}
+                                                className={`flex-1 h-12 rounded-[18px] transition-all duration-300 ${formData.type === "Income"
+                                                    ? "bg-slate-950 text-white"
+                                                    : "border-slate-200 bg-white/80 text-slate-700 hover:bg-slate-100"
+                                                    }`}
+                                            >
+                                                <TrendingUp className="h-4 w-4 mr-2" />
+                                                Income
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                variant={formData.type === "Expenses" ? "default" : "outline"}
+                                                onClick={() => handleInputChange("type", "Expenses")}
+                                                className={`flex-1 h-12 rounded-[18px] transition-all duration-300 ${formData.type === "Expenses"
+                                                    ? "bg-slate-950 text-white"
+                                                    : "border-slate-200 bg-white/80 text-slate-700 hover:bg-slate-100"
+                                                    }`}
+                                            >
+                                                <TrendingDown className="h-4 w-4 mr-2" />
+                                                Expense
+                                            </Button>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex flex-col gap-2">
+                                        <Label className="text-slate-800 font-bold">Category</Label>
+                                        <Select
+                                            value={formData.category}
+                                            onValueChange={(value) => handleInputChange("category", value)}
+                                        >
+                                            <SelectTrigger className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300">
+                                                <SelectValue placeholder="Select category" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {DEFAULT_CATEGORIES.map(category => (
+                                                    <SelectItem key={category} value={category}>{category}</SelectItem>
+                                                ))}
+                                                {customCategories.map(cat => (
+                                                    <SelectItem key={cat._id} value={cat.name}>{cat.name}</SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+
+                                        {!isAddingCategory ? (
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => setIsAddingCategory(true)}
+                                                className="text-slate-900 hover:text-slate-950 hover:bg-white/60 justify-start h-8 px-2"
+                                            >
+                                                <Plus className="h-3 w-3 mr-1" />
+                                                Add New Category
+                                            </Button>
+                                        ) : (
+                                            <div className="flex gap-2">
+                                                <Input
+                                                    placeholder="Category name"
+                                                    value={newCategoryName}
+                                                    onChange={(e) => setNewCategoryName(e.target.value)}
+                                                    className="h-8 bg-white/80 border border-slate-200 text-slate-900 text-xs"
+                                                />
+                                                <Button
+                                                    size="sm"
+                                                    onClick={addCategory}
+                                                    className="h-8 bg-slate-950 hover:bg-slate-900 text-white"
+                                                >
+                                                    Add
+                                                </Button>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    onClick={() => setIsAddingCategory(false)}
+                                                    className="h-8 text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+                                                >
+                                                    Cancel
+                                                </Button>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
-                                <div className="flex flex-wrap justify-center gap-4 pt-2">
-                                    <Button onClick={() => navigate("/inventory")} className="rounded-full bg-slate-950 text-white font-semibold px-6 hover:bg-slate-800">
-                                        Go to Inventory
-                                    </Button>
-                                    <Button onClick={() => navigate("/invoice")} variant="outline" className="rounded-full font-semibold px-6">
-                                        Go to Invoices
-                                    </Button>
+
+                                <div className="space-y-3">
+                                    <Label htmlFor="amount" className="text-slate-800 font-bold">
+                                        Amount (₹)
+                                    </Label>
+                                    <div className="flex items-center gap-2">
+                                        <Input
+                                            id="amount"
+                                            type="number"
+                                            placeholder="0.00"
+                                            value={formData.amount}
+                                            onChange={(e) => handleInputChange("amount", e.target.value)}
+                                            className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 placeholder:text-slate-400 focus:border-slate-300 focus:ring-0 transition-all duration-300"
+                                        />
+                                        <VoiceButton
+                                            onTranscript={(text) => handleInputChange("amount", text)}
+                                            onClear={() => handleInputChange("amount", "")}
+                                        />
+                                    </div>
                                 </div>
+
+                                <Button
+                                    onClick={addEntry}
+                                    className="w-full h-14 rounded-full bg-slate-950 text-lg font-semibold text-white shadow-[0_20px_48px_rgba(15,23,42,0.18)] transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800"
+                                >
+                                    <Plus className="mr-2 h-5 w-5" />
+                                    Add Entry
+                                </Button>
                             </CardContent>
                         </Card>
                     </TabsContent>

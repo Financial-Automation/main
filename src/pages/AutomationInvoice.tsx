@@ -42,7 +42,8 @@ import {
   AlertCircle,
   Share2,
   Save,
-  Layout
+  Layout,
+  Edit
 } from "lucide-react";
 import { parseVoiceInvoiceText, parseInvoiceText } from "@/lib/voiceInvoiceParser";
 import { API_ENDPOINTS, API_BASE_URL } from "@/lib/api";
@@ -57,6 +58,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
+import { useSubscription } from "@/contexts/SubscriptionContext";
 
 // Indian States for GST
 const INDIAN_STATES = [
@@ -72,6 +74,9 @@ const GST_SLABS = ["0", "5", "12", "18", "28", "40"];
 const UNITS = ["Pcs", "Kg", "Ltr", "Mtr", "Box", "Dozen", "Pair", "Set", "Nos"];
 const COMPANY_NAME = "SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED";
 const COMPANY_EMAIL = "support@saaiss.in";
+const COMPANY_PHONE = "+91 98765 43210";
+const COMPANY_GSTIN = "33AAAAA0000A1Z5";
+const COMPANY_ADDRESS = "123 Main Street, Chennai, Tamil Nadu, 600001";
 
 const HSN_SAC_AUTOMATION: Record<string, { code: string; codeType: 'HSN' | 'SAC'; gstRate: number }> = {
   laptop: { code: "8471", codeType: "HSN", gstRate: 18 },
@@ -185,6 +190,7 @@ interface InventoryStockItem {
 }
 
 const AutomationInvoice = () => {
+  const { user } = useSubscription();
   const navigate = useNavigate();
   const location = useLocation();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -212,7 +218,11 @@ const AutomationInvoice = () => {
     let next = 1;
     if (saved) {
       try {
-        const invoices = JSON.parse(saved) as InvoiceData[];
+        const rawInvoices = JSON.parse(saved) as InvoiceData[];
+        const invoices = rawInvoices.filter(inv => {
+          if ((inv as any).userId && user?.id && String((inv as any).userId) !== String(user.id)) return false;
+          return true;
+        });
         const matchingNos = invoices
           .filter(inv => inv.type === type && inv.invoiceNo && inv.invoiceNo.startsWith(`${prefix}-`))
           .map(inv => {
@@ -363,7 +373,8 @@ const AutomationInvoice = () => {
     sellerAddress: '',
     customerAddress: '',
     notes: '',
-    termsAndConditions: ''
+    termsAndConditions: '',
+    status: 'draft'
   });
 
   // New item form state
@@ -508,6 +519,7 @@ const AutomationInvoice = () => {
 
   // Search state for history
   const [searchTerm, setSearchTerm] = useState("");
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'sales' | 'purchase'>('all');
 
   // Customers list and suggestions
   const [customersList, setCustomersList] = useState<any[]>([]);
@@ -528,6 +540,7 @@ const AutomationInvoice = () => {
   });
 
   // Record Manual Payment State
+  const [selectedPaymentInvoiceId, setSelectedPaymentInvoiceId] = useState<string | null>(null);
   const [isRecordPaymentOpen, setIsRecordPaymentOpen] = useState(false);
   const [paymentForm, setPaymentForm] = useState({
     amount: 0,
@@ -616,57 +629,90 @@ const AutomationInvoice = () => {
 
   // Record Manual Payment
   const handleRecordPaymentSubmit = async () => {
-    if (!lastSavedId) {
-      toast.error("Please save the invoice first before recording payments.");
-      return;
-    }
+    const targetId = selectedPaymentInvoiceId || lastSavedId;
+
     if (paymentForm.amount <= 0) {
       toast.error("Payment amount must be greater than zero.");
       return;
     }
 
-    try {
-      const token = localStorage.getItem("token");
-      const res = await fetch(`${API_BASE_URL}/invoice/${lastSavedId}/payment`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify(paymentForm)
-      });
+    let updatedInvoiceData: any = null;
 
-      if (res.ok) {
-        const data = await res.json();
-        toast.success("Payment recorded successfully!");
-        const updated = data.invoice;
-        setCurrentInvoice(prev => ({
-          ...prev,
-          paid: updated.amountPaid,
-          balance: updated.balanceDue,
-          paymentStatus: updated.paymentStatus,
-          status: updated.status
-        }));
-        setIsRecordPaymentOpen(false);
-        
-        // Refresh local history
-        const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
-        const idx = savedList.findIndex((inv: any) => inv.id === lastSavedId);
-        if (idx !== -1) {
-          savedList[idx].paid = updated.amountPaid;
-          savedList[idx].balance = updated.balanceDue;
-          savedList[idx].status = updated.status;
-          localStorage.setItem('savedInvoices', JSON.stringify(savedList));
-          setInvoiceHistory(savedList);
+    if (targetId) {
+      try {
+        const token = localStorage.getItem("token");
+        const res = await fetch(`${API_BASE_URL}/invoice/${targetId}/payment`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            amount: paymentForm.amount,
+            amountPaid: paymentForm.amount,
+            paymentMethod: paymentForm.paymentMethod,
+            paymentDate: paymentForm.paymentDate
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          updatedInvoiceData = data.invoice;
+        } else {
+          console.warn("Backend payment route warning");
         }
-      } else {
-        const err = await res.json();
-        toast.error(err.message || "Failed to record payment");
+      } catch (error) {
+        console.warn("Error submitting payment to API:", error);
       }
-    } catch (error) {
-      console.error("Error recording payment:", error);
-      toast.error("Error recording payment");
     }
+
+    // Always update localStorage & local history state
+    const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
+    const idx = savedList.findIndex((inv: any) =>
+      (targetId && (inv.id === targetId || inv._id === targetId)) ||
+      (currentInvoice.invoiceNo && inv.invoiceNo === currentInvoice.invoiceNo)
+    );
+
+    let newPaid = 0;
+    let newBalance = 0;
+    let newStatus = 'paid';
+
+    if (idx !== -1) {
+      const currentPaid = savedList[idx].paid || 0;
+      const currentTotal = savedList[idx].total || savedList[idx].grandTotal || 0;
+      newPaid = updatedInvoiceData ? (updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid) : (currentPaid + paymentForm.amount);
+      newBalance = updatedInvoiceData ? (updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance) : Math.max(0, currentTotal - newPaid);
+      newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+
+      savedList[idx].paid = newPaid;
+      savedList[idx].balance = newBalance;
+      savedList[idx].paymentStatus = newStatus;
+      savedList[idx].status = newStatus;
+
+      localStorage.setItem('savedInvoices', JSON.stringify(savedList));
+      setInvoiceHistory(savedList);
+    }
+
+    // Also update current active invoice if matching
+    if (!targetId || targetId === lastSavedId || (currentInvoice && idx !== -1)) {
+      const currentPaid = currentInvoice.paid || 0;
+      const currentTotal = currentInvoice.total || 0;
+      const finalPaid = updatedInvoiceData ? (updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid) : (currentPaid + paymentForm.amount);
+      const finalBalance = updatedInvoiceData ? (updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance) : Math.max(0, currentTotal - finalPaid);
+      const finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
+
+      setCurrentInvoice(prev => ({
+        ...prev,
+        paid: finalPaid,
+        balance: finalBalance,
+        paymentStatus: finalStatus as any,
+        status: finalStatus as any
+      }));
+    }
+
+    toast.success("Payment recorded & applied successfully!");
+    setIsRecordPaymentOpen(false);
+    setSelectedPaymentInvoiceId(null);
   };
 
   // Cancel / Reverse Invoice
@@ -755,7 +801,12 @@ const AutomationInvoice = () => {
       const saved = localStorage.getItem('savedInvoices');
       if (saved) {
         try {
-          mergedInvoices = JSON.parse(saved);
+          const parsed = JSON.parse(saved);
+          mergedInvoices = parsed.filter((inv: any) => {
+            if (inv.type === 'purchase') return false;
+            if (inv.userId && user?.id && String(inv.userId) !== String(user.id)) return false;
+            return true;
+          });
         } catch (e) {
           console.error(e);
         }
@@ -764,10 +815,7 @@ const AutomationInvoice = () => {
       // Load from backend
       try {
         const token = localStorage.getItem("token");
-        const [salesRes, purchaseRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/invoice/all?limit=100`, { headers: { "Authorization": `Bearer ${token}` } }).catch(() => null),
-          fetch(`${API_BASE_URL}/purchase-invoice/all`, { headers: { "Authorization": `Bearer ${token}` } }).catch(() => null)
-        ]);
+        const salesRes = await fetch(`${API_BASE_URL}/invoice/all?limit=100`, { headers: { "Authorization": `Bearer ${token}` } }).catch(() => null);
 
         let backendInvoices: any[] = [];
 
@@ -776,73 +824,81 @@ const AutomationInvoice = () => {
           if (salesData.invoices && Array.isArray(salesData.invoices)) {
             const mappedSales = salesData.invoices.map((inv: any) => ({
               ...inv,
-              id: inv._id,
+              id: inv._id || inv.id,
               type: 'sales',
-              saleType: inv.paymentMethod || 'cash',
-              partyName: inv.customerName || 'Customer',
-              phoneNo: inv.customerPhone || '',
+              saleType: inv.paymentMethod || inv.saleType || 'cash',
+              invoiceNo: inv.invoiceNumber || inv.invoiceNo || '',
+              invoiceDate: inv.invoiceDate || new Date().toISOString().split('T')[0],
+              dueDate: inv.dueDate || '',
+              paymentTerms: inv.paymentTerms || 'Due on Receipt',
+              orderNumber: inv.orderNumber || '',
+              salespersonName: inv.salespersonName || '',
+              currency: inv.currency || 'INR',
+              exchangeRate: inv.exchangeRate || 1,
+              partyName: inv.customerName || inv.partyName || '',
+              phoneNo: inv.customerPhone || inv.phoneNo || '',
+              customerEmail: inv.customerEmail || '',
+              customerGSTIN: inv.customerGSTIN || inv.gstin || '',
+              customerAddress: inv.customerAddress || '',
+              sellerName: inv.businessName || inv.sellerName || COMPANY_NAME,
+              sellerEmail: inv.businessEmail || inv.sellerEmail || COMPANY_EMAIL,
+              sellerPhone: inv.businessPhone || inv.sellerPhone || COMPANY_PHONE,
+              sellerGSTIN: inv.businessGSTIN || inv.sellerGSTIN || COMPANY_GSTIN,
+              sellerAddress: inv.businessAddress || inv.sellerAddress || COMPANY_ADDRESS,
+              transactionType: inv.transactionType || 'B2C',
+              invoiceSize: inv.invoiceSize || 'A4',
+              dueReminderDays: inv.dueReminderDays || 0,
+              eWayBillNo: inv.eWayBillNo || '',
+              stateOfSupply: inv.stateOfSupply || 'Tamil Nadu',
+              businessState: inv.businessState || 'Tamil Nadu',
               items: inv.items ? inv.items.map((item: any) => ({
-                itemName: item.productName || item.itemName,
-                quantity: item.quantity,
-                pricePerUnit: item.unitPrice || item.pricePerUnit,
-                amount: item.total || item.amount,
-                taxPercent: item.taxRate || item.taxPercent,
-                discountAmount: item.discount || 0,
+                id: item.id || `item-${Date.now()}-${Math.random()}`,
+                itemName: item.productName || item.itemName || '',
+                itemCode: item.codeType === 'HSN' ? (item.hsnCode || '') : (item.sacCode || item.itemCode || ''),
                 codeType: item.codeType || 'HSN',
-                hsnCode: item.hsnCode || item.sacCode || ''
+                hsnCode: item.hsnCode || item.sacCode || '',
+                quantity: Number(item.quantity) || 1,
+                unit: item.unit || 'Pcs',
+                pricePerUnit: Number(item.unitPrice ?? item.pricePerUnit ?? 0),
+                priceWithTax: Boolean(item.priceWithTax),
+                discountPercent: Number(item.discountPercent || 0),
+                discountAmount: Number(item.discount ?? item.discountAmount ?? 0),
+                taxPercent: Number(item.taxRate ?? item.taxPercent ?? 0),
+                taxAmount: Number(item.taxAmount || 0),
+                sgstRate: Number(item.sgstRate || 0),
+                sgstAmount: Number(item.sgstAmount || 0),
+                cgstRate: Number(item.cgstRate || 0),
+                cgstAmount: Number(item.cgstAmount || 0),
+                igstRate: Number(item.igstRate || 0),
+                igstAmount: Number(item.igstAmount || 0),
+                amount: Number(item.total ?? item.amount ?? 0)
               })) : [],
-              subtotal: inv.subtotal,
-              totalTax: inv.taxAmount,
-              totalSgst: inv.sgst || 0,
-              totalCgst: inv.cgst || 0,
-              totalIgst: inv.igst || 0,
-              total: inv.grandTotal || inv.total,
-              paid: inv.amountPaid || inv.paid || 0,
-              balance: inv.balanceDue || inv.balance || 0
+              shippingCharges: Number(inv.shippingCharges || 0),
+              packagingCharges: Number(inv.packagingCharges || 0),
+              freightCharges: Number(inv.freightCharges || 0),
+              adjustment: Number(inv.adjustment || 0),
+              subtotal: Number(inv.subtotal || 0),
+              totalTax: Number(inv.taxAmount ?? inv.totalTax ?? 0),
+              totalSgst: Number(inv.sgst ?? inv.totalSgst ?? 0),
+              totalCgst: Number(inv.cgst ?? inv.totalCgst ?? 0),
+              totalIgst: Number(inv.igst ?? inv.totalIgst ?? 0),
+              total: Number(inv.grandTotal ?? inv.total ?? 0),
+              paid: Number(inv.amountPaid ?? inv.paid ?? 0),
+              balance: Number(inv.balanceDue ?? inv.balance ?? 0),
+              status: inv.status || 'draft',
+              paymentStatus: inv.paymentStatus || 'pending',
+              notes: inv.notes || '',
+              termsAndConditions: inv.termsAndConditions || ''
             }));
             backendInvoices.push(...mappedSales);
           }
         }
 
-        if (purchaseRes && purchaseRes.ok) {
-          const purchaseData = await purchaseRes.json();
-          if (purchaseData.invoices && Array.isArray(purchaseData.invoices)) {
-            const mappedPurchases = purchaseData.invoices.map((inv: any) => ({
-              ...inv,
-              id: inv._id,
-              type: 'purchase',
-              invoiceNo: inv.billNo || `PUR-${inv._id.slice(-6)}`,
-              invoiceDate: inv.billDate || inv.createdAt,
-              partyName: inv.supplierName || inv.customerName || 'Supplier',
-              phoneNo: inv.phone || inv.customerPhone || '',
-              gstin: inv.gstin || inv.customerGstin || '',
-              items: inv.items ? inv.items.map((item: any) => ({
-                itemName: item.itemName,
-                quantity: item.quantity,
-                pricePerUnit: item.pricePerUnit,
-                amount: item.amount,
-                taxPercent: item.taxPercent,
-                discountAmount: item.discountAmount || 0,
-                codeType: item.codeType || 'HSN',
-                hsnCode: item.hsnCode || ''
-              })) : [],
-              subtotal: inv.subtotal,
-              totalTax: inv.totalTax,
-              totalSgst: inv.totalSgst || 0,
-              totalCgst: inv.totalCgst || 0,
-              totalIgst: inv.totalIgst || 0,
-              total: inv.total,
-              paid: inv.paid || 0,
-              balance: inv.balance || 0
-            }));
-            backendInvoices.push(...mappedPurchases);
-          }
-        }
-
         // Merge and de-duplicate by invoiceNo & id
-        const existingNos = new Set(mergedInvoices.map(inv => inv.invoiceNo));
+        const existingNos = new Set(mergedInvoices.map(inv => inv.invoiceNo).filter(Boolean));
+        const existingIds = new Set(mergedInvoices.map(inv => (inv as any).id || (inv as any)._id).filter(Boolean));
         backendInvoices.forEach((inv: any) => {
-          if (!existingNos.has(inv.invoiceNo)) {
+          if ((inv.invoiceNo && !existingNos.has(inv.invoiceNo)) && (inv.id && !existingIds.has(inv.id))) {
             mergedInvoices.push(inv);
           }
         });
@@ -869,14 +925,19 @@ const AutomationInvoice = () => {
       }
 
       const newNo = `${prefix}-${String(next).padStart(5, '0')}`;
-      setCurrentInvoice(prev => ({
-        ...prev,
-        invoiceNo: newNo
-      }));
+      setCurrentInvoice(prev => {
+        // Do not overwrite if user has started editing or loaded a draft or has lastSavedId
+        if (lastSavedId || prev.items.length > 0 || prev.partyName || prev.notes || prev.termsAndConditions) return prev;
+        return {
+          ...prev,
+          invoiceNo: prev.invoiceNo && prev.invoiceNo.startsWith(prefix) ? prev.invoiceNo : newNo
+        };
+      });
     };
 
     loadInvoices();
   }, [invoiceType]);
+
 
   // Close inventory dropdown when clicking outside
   useEffect(() => {
@@ -919,11 +980,11 @@ const AutomationInvoice = () => {
 
   // Calculate item amounts with GST breakdown
   const calculateItemAmounts = (item: Partial<InvoiceItem>, forceInterState?: boolean): Partial<InvoiceItem> => {
-    const qty = item.quantity || 0;
-    const price = item.pricePerUnit || 0;
-    const discountPct = item.discountPercent || 0;
-    const priceWithTax = item.priceWithTax || false;
-    const taxPct = priceWithTax ? (item.taxPercent || 0) : 0;
+    const qty = Number(item.quantity) || 0;
+    const price = Number(item.pricePerUnit) || 0;
+    const discountPct = Number(item.discountPercent) || 0;
+    const priceWithTax = Boolean(item.priceWithTax);
+    const taxPct = Number(item.taxPercent) || 0;
 
     let baseAmount = qty * price;
     let discountAmount = (baseAmount * discountPct) / 100;
@@ -937,19 +998,37 @@ const AutomationInvoice = () => {
     let taxAmount = 0;
     let finalAmount = afterDiscount;
 
-    if (priceWithTax && taxPct > 0) {
-      if (isInterState) {
-        igstRate = taxPct;
-        igstAmount = (afterDiscount * igstRate) / 100;
-        taxAmount = igstAmount;
+    if (taxPct > 0) {
+      if (priceWithTax) {
+        // Inclusive tax
+        const totalTaxInclusive = (afterDiscount * taxPct) / (100 + taxPct);
+        if (isInterState) {
+          igstRate = taxPct;
+          igstAmount = totalTaxInclusive;
+          taxAmount = totalTaxInclusive;
+        } else {
+          sgstRate = taxPct / 2;
+          cgstRate = taxPct / 2;
+          sgstAmount = totalTaxInclusive / 2;
+          cgstAmount = totalTaxInclusive / 2;
+          taxAmount = totalTaxInclusive;
+        }
+        finalAmount = afterDiscount;
       } else {
-        sgstRate = taxPct / 2;
-        cgstRate = taxPct / 2;
-        sgstAmount = (afterDiscount * sgstRate) / 100;
-        cgstAmount = (afterDiscount * cgstRate) / 100;
-        taxAmount = sgstAmount + cgstAmount;
+        // Exclusive tax
+        if (isInterState) {
+          igstRate = taxPct;
+          igstAmount = (afterDiscount * igstRate) / 100;
+          taxAmount = igstAmount;
+        } else {
+          sgstRate = taxPct / 2;
+          cgstRate = taxPct / 2;
+          sgstAmount = (afterDiscount * sgstRate) / 100;
+          cgstAmount = (afterDiscount * cgstRate) / 100;
+          taxAmount = sgstAmount + cgstAmount;
+        }
+        finalAmount = afterDiscount + taxAmount;
       }
-      finalAmount = afterDiscount + taxAmount;
     }
 
     return {
@@ -1050,36 +1129,10 @@ const AutomationInvoice = () => {
 
     const quantity = newItem.quantity || 1;
 
-    // If item is from inventory, check stock and reserve it
+    // If item is from inventory, check available stock
     if (newItem.inventoryItemId) {
       if (selectedInventoryMaxQty !== null && quantity > selectedInventoryMaxQty) {
         toast.error(`Insufficient stock! Only ${selectedInventoryMaxQty} available.`);
-        return;
-      }
-
-      // Reserve stock in inventory
-      try {
-        const token = localStorage.getItem("token");
-        const res = await fetch(`${API_BASE_URL}/inventory/reserve/${newItem.inventoryItemId}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({ quantity })
-        });
-
-        if (!res.ok) {
-          const data = await res.json();
-          toast.error(data.message || "Failed to reserve stock");
-          return;
-        }
-
-        // Refresh inventory to show updated stock
-        refreshInventory();
-      } catch (error) {
-        console.error("Error reserving stock:", error);
-        toast.error("Error reserving stock from inventory");
         return;
       }
     }
@@ -1108,7 +1161,7 @@ const AutomationInvoice = () => {
       igstAmount: calculatedItem.igstAmount || 0,
       isInterState: calculatedItem.isInterState || false,
       amount: calculatedItem.amount || 0,
-      stockReserved: !!newItem.inventoryItemId
+      stockReserved: false
     };
 
     const updatedItems = [...currentInvoice.items, item];
@@ -1120,13 +1173,18 @@ const AutomationInvoice = () => {
       currentInvoice.adjustment
     );
 
-    setLastSavedId(null);
-    setCurrentInvoice(prev => ({
-      ...prev,
-      items: updatedItems,
-      ...totals,
-      balance: totals.total - prev.paid
-    }));
+    setCurrentInvoice(prev => {
+      const isCredit = prev.saleType === 'credit';
+      const paidVal = isCredit ? 0 : prev.paid;
+      const balanceVal = isCredit ? totals.total : totals.total - paidVal;
+      return {
+        ...prev,
+        items: updatedItems,
+        ...totals,
+        paid: paidVal,
+        balance: balanceVal
+      };
+    });
 
     // Reset new item form
     setNewItem({
@@ -1144,7 +1202,7 @@ const AutomationInvoice = () => {
     });
     setSelectedInventoryMaxQty(null);
 
-    toast.success(newItem.inventoryItemId ? "Item added & stock reserved" : "Item added to invoice");
+    toast.success("Item added to invoice");
   };
 
   const resetItemForm = () => {
@@ -1194,35 +1252,7 @@ const AutomationInvoice = () => {
   );
 
   // Remove item from invoice
-  const removeItem = async (itemId: string) => {
-    // Find the item being removed
-    const itemToRemove = currentInvoice.items.find(i => i.id === itemId);
-
-    // If item was from inventory and stock was reserved, restore it
-    if (itemToRemove?.inventoryItemId && itemToRemove?.stockReserved) {
-      try {
-        const token = localStorage.getItem("token");
-        const res = await fetch(`${API_BASE_URL}/inventory/restore/${itemToRemove.inventoryItemId}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({ quantity: itemToRemove.quantity })
-        });
-
-        if (res.ok) {
-          toast.success(`Stock restored: ${itemToRemove.quantity} ${itemToRemove.itemName}`);
-          refreshInventory();
-        } else {
-          console.error("Failed to restore stock");
-        }
-      } catch (error) {
-        console.error("Error restoring stock:", error);
-      }
-    }
-
-    setLastSavedId(null);
+  const removeItem = (itemId: string) => {
     const updatedItems = currentInvoice.items.filter(i => i.id !== itemId);
     const totals = calculateInvoiceTotals(
       updatedItems,
@@ -1232,22 +1262,52 @@ const AutomationInvoice = () => {
       currentInvoice.adjustment
     );
 
-    setCurrentInvoice(prev => ({
-      ...prev,
-      items: updatedItems,
-      ...totals,
-      balance: totals.total - prev.paid
-    }));
+    setCurrentInvoice(prev => {
+      const isCredit = prev.saleType === 'credit';
+      const paidVal = isCredit ? 0 : prev.paid;
+      const balanceVal = isCredit ? totals.total : totals.total - paidVal;
+      return {
+        ...prev,
+        items: updatedItems,
+        ...totals,
+        paid: paidVal,
+        balance: balanceVal
+      };
+    });
   };
 
   // Update paid amount
   const updatePaidAmount = (paid: number) => {
-    setLastSavedId(null);
     setCurrentInvoice(prev => ({
       ...prev,
       paid: paid,
       balance: prev.total - paid
     }));
+  };
+
+  // Handle payment method change (Cash, UPI, Card, Credit)
+  const handlePaymentMethodChange = (mode: string) => {
+    const isCredit = mode.toLowerCase() === 'credit';
+    setCurrentInvoice(prev => {
+      const defaultPaid = isCredit ? 0 : (prev.paid > 0 ? prev.paid : prev.total);
+      const defaultBalance = isCredit ? prev.total : Math.max(0, prev.total - defaultPaid);
+
+      let newDueDate = prev.dueDate;
+      if (isCredit && (!newDueDate || !newDueDate.trim())) {
+        const d = prev.invoiceDate ? new Date(prev.invoiceDate) : new Date();
+        d.setDate(d.getDate() + 15);
+        newDueDate = d.toISOString().split('T')[0];
+      }
+
+      return {
+        ...prev,
+        saleType: mode,
+        paid: defaultPaid,
+        balance: defaultBalance,
+        paymentStatus: isCredit ? 'pending' : (defaultBalance <= 0 ? 'paid' : 'pending'),
+        dueDate: newDueDate
+      };
+    });
   };
 
   // Handle file upload for purchase bill
@@ -1266,25 +1326,35 @@ const AutomationInvoice = () => {
     }
   };
 
-  // Save invoice
-  // Save invoice
+  // Save invoice (Draft or Sent/Final)
   const saveInvoice = async (statusOverride?: 'draft' | 'sent') => {
-    if (currentInvoice.items.length === 0) {
-      toast.error("Please add at least one item to the invoice.");
-      return;
+    const isDraftSave = statusOverride === 'draft';
+
+    if (!isDraftSave && currentInvoice.items.length === 0) {
+      toast.error("Please add at least one item to finalise the invoice.");
+      return null;
     }
 
-    if (!currentInvoice.partyName?.trim()) {
-      toast.error(`Please enter ${currentInvoice.type === 'sales' ? 'customer' : 'party'} name.`);
-      return;
+    if (!currentInvoice.partyName?.trim() && currentInvoice.items.length === 0) {
+      toast.error(`Please enter ${currentInvoice.type === 'sales' ? 'customer' : 'party'} name or add an item to save draft.`);
+      return null;
     }
+
+    // Credit Payment Method: Mandatory Due Date Validation
+    if (!isDraftSave && currentInvoice.saleType?.toLowerCase() === 'credit') {
+      if (!currentInvoice.dueDate || !currentInvoice.dueDate.trim()) {
+        toast.error("Please select a valid Due Date for Credit invoice.");
+        return null;
+      }
+    }
+
 
     setIsSaving(true);
 
     try {
       const statusValue = statusOverride || (currentInvoice.balance <= 0 ? 'paid' : 'sent');
       const dueReminderDate = getDueReminderDate(currentInvoice.invoiceDate, currentInvoice.dueReminderDays);
-      // 1. Save to Backend to get a real ID for sharing
+
       const backendData = {
         invoiceNumber: currentInvoice.invoiceNo,
         invoiceDate: currentInvoice.invoiceDate,
@@ -1347,53 +1417,119 @@ const AutomationInvoice = () => {
         notes: currentInvoice.notes || '',
         termsAndConditions: currentInvoice.termsAndConditions || '',
         status: statusValue,
-        // ✅ Snapshot the currently active template design so the public view matches exactly
         templateId: selectedTemplateId || undefined,
         templateSnapshot: activeTemplateConfig
       };
 
-      let backendId = '';
+      let backendId = lastSavedId || '';
       try {
         const token = localStorage.getItem("token");
-        const response = await fetch(`${API_ENDPOINTS.INVOICE}/create`, {
-          method: 'POST',
-          headers: { 
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(backendData)
-        });
-        const result = await response.json();
+        const isUpdate = !!lastSavedId;
+
+        let response;
+        if (isUpdate) {
+          response = await fetch(`${API_ENDPOINTS.INVOICE}/${lastSavedId}`, {
+            method: 'PUT',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify(backendData)
+          });
+
+          if (!response.ok) {
+            // Fallback to create if update returned non-ok (e.g. 404)
+            response = await fetch(`${API_ENDPOINTS.INVOICE}/create`, {
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+              },
+              body: JSON.stringify(backendData)
+            });
+          }
+        } else {
+          response = await fetch(`${API_ENDPOINTS.INVOICE}/create`, {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify(backendData)
+          });
+        }
+
         if (response.ok) {
-          backendId = result.invoiceId || result.invoice?._id;
+          const result = await response.json();
+          backendId = result.invoiceId || result.invoice?._id || result._id || lastSavedId;
           setLastSavedId(backendId);
         } else {
-          toast.error(result.message || "Failed to save invoice to server. Try changing the invoice number.");
-          setIsSaving(false);
-          return null;
+          const result = await response.json();
+          console.warn("Backend save warning:", result.message);
         }
       } catch (err) {
-        console.warn("Backend save failed:", err);
-        toast.error("Failed to connect to the server. Please check your network.");
-        setIsSaving(false);
-        return null;
+        console.warn("Backend save network notice:", err);
       }
 
-      // 2. Save to localStorage
+      // 2. Save/Update in localStorage & history
       const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
       const invoiceToSave = {
         ...currentInvoice,
+        userId: user?.id,
+        status: statusValue,
         dueReminderDate,
         ocrJson: buildGstPortalJson({ ...currentInvoice, dueReminderDate }),
         savedAt: new Date().toISOString(),
-        id: backendId
+        id: backendId || lastSavedId
       };
-      savedList.unshift(invoiceToSave);
+
+      const existingIndex = savedList.findIndex((inv: any) =>
+        (backendId && (inv.id === backendId || inv._id === backendId)) ||
+        (lastSavedId && (inv.id === lastSavedId || inv._id === lastSavedId)) ||
+        (inv.invoiceNo && inv.invoiceNo === currentInvoice.invoiceNo)
+      );
+
+      if (existingIndex !== -1) {
+        savedList[existingIndex] = invoiceToSave;
+      } else {
+        savedList.unshift(invoiceToSave);
+      }
+
       localStorage.setItem('savedInvoices', JSON.stringify(savedList));
       setInvoiceHistory(savedList);
 
-      toast.success(`${currentInvoice.type === 'sales' ? 'Invoice' : 'Purchase Bill'} saved! You can now share on WhatsApp.`);
-      return backendId;
+      setCurrentInvoice(prev => ({
+        ...prev,
+        status: statusValue
+      }));
+
+      // Deduct inventory stock ONLY when saving a final/sent invoice (not draft)
+      if (statusValue !== 'draft') {
+        try {
+          const token = localStorage.getItem("token");
+          for (const item of currentInvoice.items) {
+            if (item.inventoryItemId) {
+              await fetch(`${API_BASE_URL}/inventory/reserve/${item.inventoryItemId}`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ quantity: item.quantity })
+              }).catch(err => console.warn("Failed to update inventory stock:", err));
+            }
+          }
+          refreshInventory();
+        } catch (err) {
+          console.warn("Inventory update warning:", err);
+        }
+      }
+
+      const successMessage = statusValue === 'draft' 
+        ? "Invoice saved as Draft! You can continue working on it from History." 
+        : "Invoice saved successfully!";
+      toast.success(successMessage);
+      return backendId || lastSavedId;
     } catch (error: any) {
       console.error("Save Error:", error);
       toast.error(`Error saving invoice: ${error.message}`);
@@ -1401,6 +1537,106 @@ const AutomationInvoice = () => {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  // Helper to check if an invoice is a draft
+  const isDraftInvoice = (inv: any) => {
+    if (!inv) return false;
+    const st = String(inv.status || '').toLowerCase();
+    if (st === 'sent' || st === 'paid' || st === 'viewed' || st === 'overdue' || st === 'cancelled') {
+      return false;
+    }
+    return true;
+  };
+
+  // Re-load a draft or history invoice into the form for editing
+  const editHistoryInvoice = (inv: any) => {
+    if (!inv) return;
+
+    const idToUse = inv.id || inv._id || inv.invoiceNo || null;
+    setLastSavedId(idToUse);
+    setInvoiceType(inv.type || 'sales');
+
+    const loadedItems: InvoiceItem[] = (inv.items && Array.isArray(inv.items) && inv.items.length > 0)
+      ? inv.items.map((item: any) => {
+          const rawItem: Partial<InvoiceItem> = {
+            id: item.id || `item-${Date.now()}-${Math.random()}`,
+            itemName: item.itemName || item.productName || 'Item',
+            itemCode: item.itemCode || '',
+            codeType: item.codeType || 'HSN',
+            hsnCode: item.hsnCode || item.sacCode || '',
+            quantity: Number(item.quantity) || 1,
+            unit: item.unit || 'Pcs',
+            pricePerUnit: Number(item.pricePerUnit ?? item.unitPrice ?? 0),
+            priceWithTax: Boolean(item.priceWithTax),
+            discountPercent: Number(item.discountPercent || 0),
+            taxPercent: Number(item.taxPercent ?? item.taxRate ?? 0)
+          };
+          return calculateItemAmounts(rawItem) as InvoiceItem;
+        })
+      : [];
+
+    const shipping = Number(inv.shippingCharges) || 0;
+    const packaging = Number(inv.packagingCharges) || 0;
+    const freight = Number(inv.freightCharges) || 0;
+    const adjustment = Number(inv.adjustment) || 0;
+
+    const totals = calculateInvoiceTotals(loadedItems, shipping, packaging, freight, adjustment);
+
+    const paidAmt = Number(inv.paid ?? inv.amountPaid ?? 0);
+    const balanceAmt = Math.max(0, totals.total - paidAmt);
+
+    setCurrentInvoice({
+      type: inv.type || 'sales',
+      invoiceNo: inv.invoiceNo || inv.invoiceNumber || '',
+      invoiceDate: inv.invoiceDate || new Date().toISOString().split('T')[0],
+      dueDate: inv.dueDate || '',
+      paymentTerms: inv.paymentTerms || 'Due on Receipt',
+      orderNumber: inv.orderNumber || '',
+      salespersonName: inv.salespersonName || '',
+      currency: inv.currency || 'INR',
+      exchangeRate: inv.exchangeRate || 1,
+      partyName: inv.partyName || inv.customerName || '',
+      phoneNo: inv.phoneNo || inv.customerPhone || '',
+      customerEmail: inv.customerEmail || '',
+      customerGSTIN: inv.customerGSTIN || inv.gstin || '',
+      customerAddress: inv.customerAddress || '',
+      sellerName: inv.sellerName || inv.businessName || COMPANY_NAME,
+      sellerEmail: inv.sellerEmail || inv.businessEmail || COMPANY_EMAIL,
+      sellerPhone: inv.sellerPhone || inv.businessPhone || COMPANY_PHONE,
+      sellerGSTIN: inv.sellerGSTIN || inv.businessGSTIN || COMPANY_GSTIN,
+      sellerAddress: inv.sellerAddress || inv.businessAddress || COMPANY_ADDRESS,
+      transactionType: inv.transactionType || 'B2C',
+      invoiceSize: inv.invoiceSize || 'A4',
+      dueReminderDays: inv.dueReminderDays || 0,
+      saleType: inv.saleType || inv.paymentMethod || 'cash',
+      eWayBillNo: inv.eWayBillNo || '',
+      stateOfSupply: inv.stateOfSupply || 'Tamil Nadu',
+      businessState: inv.businessState || 'Tamil Nadu',
+      items: loadedItems,
+      shippingCharges: shipping,
+      packagingCharges: packaging,
+      freightCharges: freight,
+      adjustment: adjustment,
+      subtotal: totals.subtotal,
+      totalTax: totals.totalTax,
+      totalSgst: totals.totalSgst,
+      totalCgst: totals.totalCgst,
+      totalIgst: totals.totalIgst,
+      total: totals.total,
+      paid: paidAmt,
+      balance: balanceAmt,
+      status: 'draft',
+      paymentStatus: inv.paymentStatus || 'pending',
+      notes: inv.notes || '',
+      termsAndConditions: inv.termsAndConditions || ''
+    });
+
+    setActiveTab('create');
+    setTimeout(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, 50);
+    toast.success(`Draft #${inv.invoiceNo || inv.invoiceNumber || ''} loaded! You can now edit and save.`);
   };
 
   // Save and create new
@@ -2030,6 +2266,77 @@ const AutomationInvoice = () => {
     }
   };
 
+  // Export all sales history invoices to CSV
+  const exportHistoryToCSV = () => {
+    if (!filteredHistory || filteredHistory.length === 0) {
+      toast.error("No sales invoices found in history to export.");
+      return;
+    }
+
+    const esc = (s: any) => `"${String(s || '').replace(/"/g, '""')}"`;
+
+    const headers = [
+      "Invoice No",
+      "Type",
+      "Transaction Type",
+      "Invoice Date",
+      "Customer Name",
+      "Phone No",
+      "Customer GSTIN",
+      "Payment Mode",
+      "Total Items",
+      "Items Breakdown",
+      "Subtotal (INR)",
+      "Total Tax (INR)",
+      "Grand Total (INR)",
+      "Amount Paid (INR)",
+      "Balance Due (INR)"
+    ];
+
+    let csvContent = headers.join(",") + "\n";
+
+    filteredHistory.forEach(inv => {
+      const itemsSummary = (inv.items || [])
+        .map((item: any) => `${item.itemName || 'Item'} (${item.quantity || 1} ${item.unit || 'Pcs'} @ ₹${item.pricePerUnit || 0})`)
+        .join("; ");
+
+      const totalTax = inv.totalTax || (inv.items || []).reduce((sum: number, i: any) => sum + (i.taxAmount || 0), 0);
+      const grandTotal = inv.total || 0;
+      const subtotal = inv.subtotal || (grandTotal - totalTax);
+      const paid = inv.paid || 0;
+      const balance = inv.balance ?? (grandTotal - paid);
+
+      const row = [
+        esc(inv.invoiceNo),
+        esc("Sales"),
+        esc(inv.transactionType || 'B2C'),
+        esc(inv.invoiceDate),
+        esc(inv.partyName),
+        esc(inv.phoneNo),
+        esc(inv.customerGSTIN || ''),
+        esc(inv.saleType || 'CASH'),
+        inv.items?.length || 0,
+        esc(itemsSummary),
+        subtotal.toFixed(2),
+        totalTax.toFixed(2),
+        grandTotal.toFixed(2),
+        paid.toFixed(2),
+        balance.toFixed(2)
+      ];
+
+      csvContent += row.join(",") + "\n";
+    });
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sales_invoice_history_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+    toast.success(`Exported ${filteredHistory.length} sales invoice(s) to CSV!`);
+  };
+
   // Print invoice — uses active template (colors, fonts, columns) via PDF
   const printInvoice = () => {
     if (currentInvoice.items.length === 0) {
@@ -2216,8 +2523,10 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
   // Calculate item preview
   const itemPreview = calculateItemAmounts(newItem);
 
-  // Filter invoice history
+  // Filter invoice history (Sales invoices only)
   const filteredHistory = invoiceHistory.filter(invoice => {
+    if (invoice.type === 'purchase') return false;
+
     const query = searchTerm.toLowerCase().trim();
     if (!query) return true;
     return [
@@ -2371,33 +2680,35 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Left Column - Form */}
             <div className="lg:col-span-2 space-y-6 no-print">
-              {/* Payment and Document Options */}
-              <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 p-5">
-                <Label className="text-slate-900 mb-3 block font-bold">Payment Mode</Label>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {[
-                    { type: 'cash', label: 'Cash', icon: Banknote, activeClass: 'bg-emerald-600 text-white' },
-                    { type: 'credit', label: 'Credit', icon: CreditCard, activeClass: 'bg-blue-600 text-white' },
-                    { type: 'UPI', label: 'UPI', icon: Smartphone, activeClass: 'bg-violet-600 text-white' },
-                    { type: 'netbanking', label: 'Netbanking', icon: Building2, activeClass: 'bg-indigo-600 text-white' }
-                  ].map((mode) => (
-                    <button
-                      key={mode.type}
-                      onClick={() => {
-                        setLastSavedId(null);
-                        setCurrentInvoice(prev => ({ ...prev, saleType: mode.type as any }));
-                      }}
-                      className={`py-2.5 px-4 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${currentInvoice.saleType === mode.type
-                        ? mode.activeClass
-                        : 'bg-white/80 border border-slate-200 text-slate-700 hover:bg-slate-100'
+              {/* Document Options */}
+              <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 p-5 space-y-4">
+                <div>
+                  <Label className="text-slate-900 mb-2.5 block font-bold text-sm">Payment Method</Label>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    {[
+                      { type: 'cash', label: 'Cash', icon: Banknote, activeClass: 'bg-emerald-600 text-white border-emerald-600' },
+                      { type: 'upi', label: 'UPI', icon: Smartphone, activeClass: 'bg-violet-600 text-white border-violet-600' },
+                      { type: 'card', label: 'Card', icon: CreditCard, activeClass: 'bg-blue-600 text-white border-blue-600' },
+                      { type: 'credit', label: 'Credit', icon: Wallet, activeClass: 'bg-amber-600 text-white border-amber-600' }
+                    ].map((mode) => (
+                      <button
+                        key={mode.type}
+                        type="button"
+                        onClick={() => handlePaymentMethodChange(mode.type)}
+                        className={`py-2.5 px-3 rounded-[14px] font-bold text-xs transition-all flex items-center justify-center gap-2 border shadow-sm ${
+                          (currentInvoice.saleType || 'cash').toLowerCase() === mode.type.toLowerCase()
+                            ? mode.activeClass
+                            : 'bg-white/80 border-slate-200 text-slate-700 hover:bg-slate-100'
                         }`}
-                    >
-                      <mode.icon className="h-4 w-4" />
-                      {mode.label}
-                    </button>
-                  ))}
+                      >
+                        <mode.icon className="h-4 w-4 shrink-0" />
+                        <span>{mode.label}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3">
+
+                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3 pt-2">
                   <div className="space-y-2">
                     <Label className="text-slate-800 text-sm font-semibold">Print Size</Label>
                     <Select value={currentInvoice.invoiceSize} onValueChange={(val: 'A4' | 'QUARTER_A4' | 'A6') => setCurrentInvoice(prev => ({ ...prev, invoiceSize: val }))}>
@@ -2437,12 +2748,21 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label className="text-slate-800 text-sm font-semibold">Due Date</Label>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-slate-800 text-sm font-semibold">Due Date</Label>
+                      {currentInvoice.saleType?.toLowerCase() === 'credit' && (
+                        <span className="text-[11px] text-rose-600 font-bold">* Required for Credit</span>
+                      )}
+                    </div>
                     <Input
                       type="date"
-                      value={currentInvoice.dueDate}
+                      value={currentInvoice.dueDate || ''}
                       onChange={(e) => setCurrentInvoice(prev => ({ ...prev, dueDate: e.target.value }))}
-                      className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-350"
+                      className={`h-10 rounded-[14px] bg-white/80 text-slate-900 focus:border-slate-350 ${
+                        currentInvoice.saleType?.toLowerCase() === 'credit' && (!currentInvoice.dueDate || !currentInvoice.dueDate.trim())
+                          ? 'border-rose-400 ring-2 ring-rose-200'
+                          : 'border-slate-200'
+                      }`}
                     />
                   </div>
                   <div className="space-y-2">
@@ -2656,7 +2976,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                         <Input
                           value={currentInvoice.partyName}
                           onChange={(e) => {
-                            setLastSavedId(null);
                             setCurrentInvoice(prev => ({ ...prev, partyName: e.target.value }));
                             setCustomerSearchTerm(e.target.value);
                             setIsCustomerDropdownOpen(true);
@@ -2724,13 +3043,11 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       </div>
                       <VoiceButton
                         onTranscript={(text) => {
-                          setLastSavedId(null);
                           setCurrentInvoice(prev => ({ ...prev, partyName: text }));
                           setCustomerSearchTerm(text);
                           setIsCustomerDropdownOpen(true);
                         }}
                         onClear={() => {
-                          setLastSavedId(null);
                           setCurrentInvoice(prev => ({ ...prev, partyName: '' }));
                           setCustomerSearchTerm('');
                         }}
@@ -2744,7 +3061,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       <Input
                         value={currentInvoice.phoneNo}
                         onChange={(e) => {
-                          setLastSavedId(null);
                           setCurrentInvoice(prev => ({ ...prev, phoneNo: e.target.value }));
                         }}
                         placeholder="Phone number"
@@ -2752,11 +3068,9 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       />
                       <VoiceButton
                         onTranscript={(text) => {
-                          setLastSavedId(null);
                           setCurrentInvoice(prev => ({ ...prev, phoneNo: text.replace(/\s/g, '') }));
                         }}
                         onClear={() => {
-                          setLastSavedId(null);
                           setCurrentInvoice(prev => ({ ...prev, phoneNo: '' }));
                         }}
                       />
@@ -2768,7 +3082,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <Input
                       value={currentInvoice.customerEmail || ''}
                       onChange={(e) => {
-                        setLastSavedId(null);
                         setCurrentInvoice(prev => ({ ...prev, customerEmail: e.target.value }));
                       }}
                       placeholder="customer@example.com"
@@ -2781,7 +3094,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <Input
                       value={currentInvoice.customerGSTIN || ''}
                       onChange={(e) => {
-                        setLastSavedId(null);
                         const customerGSTIN = e.target.value.toUpperCase();
                         setCurrentInvoice(prev => ({ ...prev, customerGSTIN, transactionType: classifyTransaction(prev.sellerGSTIN, customerGSTIN) }));
                       }}
@@ -2795,7 +3107,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <Input
                       value={currentInvoice.customerAddress || ''}
                       onChange={(e) => {
-                        setLastSavedId(null);
                         setCurrentInvoice(prev => ({ ...prev, customerAddress: e.target.value }));
                       }}
                       placeholder="Billing Address"
@@ -2808,7 +3119,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <Input
                       value={currentInvoice.eWayBillNo}
                       onChange={(e) => {
-                        setLastSavedId(null);
                         setCurrentInvoice(prev => ({ ...prev, eWayBillNo: e.target.value }));
                       }}
                       placeholder="E-Way bill"
@@ -2821,7 +3131,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <Input
                       value={currentInvoice.invoiceNo}
                       onChange={(e) => {
-                        setLastSavedId(null);
                         setCurrentInvoice(prev => ({ ...prev, invoiceNo: e.target.value }));
                       }}
                       className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300"
@@ -2834,7 +3143,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       type="date"
                       value={currentInvoice.invoiceDate}
                       onChange={(e) => {
-                        setLastSavedId(null);
                         setCurrentInvoice(prev => ({ ...prev, invoiceDate: e.target.value }));
                       }}
                       className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300"
@@ -3454,17 +3762,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </span>
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label className="text-slate-800 text-sm font-semibold">Paid Amount</Label>
-                    <Input
-                      type="number"
-                      value={currentInvoice.paid}
-                      onChange={(e) => updatePaidAmount(parseFloat(e.target.value) || 0)}
-                      min="0"
-                      className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 font-bold"
-                    />
-                  </div>
-
                   <div className="flex justify-between items-center py-2 border-t border-slate-200">
                     <span className="text-slate-600 font-semibold">Balance</span>
                     <span className={`text-xl font-bold ${currentInvoice.balance > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
@@ -3473,9 +3770,14 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                   </div>
 
                   {currentInvoice.balance > 0 && (
-                    <div className="flex items-center gap-2 text-rose-700 text-sm bg-rose-50 p-2.5 rounded-lg border border-rose-100">
-                      <AlertCircle className="h-4 w-4" />
-                      <span>Due: ₹{currentInvoice.balance.toFixed(2)}</span>
+                    <div className="flex items-center justify-between text-rose-700 text-sm bg-rose-50 p-2.5 rounded-lg border border-rose-100 font-medium">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="h-4 w-4" />
+                        <span>Due: ₹{currentInvoice.balance.toFixed(2)}</span>
+                      </div>
+                      <span className="text-xs font-bold uppercase tracking-wider bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full border border-rose-200">
+                        Unpaid
+                      </span>
                     </div>
                   )}
                 </div>
@@ -3517,9 +3819,9 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                   <div className="grid grid-cols-2 gap-2">
                     <Button
                       onClick={() => saveInvoice('draft')}
-                      disabled={isSaving || currentInvoice.items.length === 0}
+                      disabled={isSaving || !isDraftInvoice(currentInvoice)}
                       variant="outline"
-                      className="h-12 rounded-xl bg-white border-slate-200 text-slate-900 font-semibold"
+                      className="h-12 rounded-xl bg-white border-slate-200 text-slate-900 font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       Save Draft
                     </Button>
@@ -3533,30 +3835,19 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </Button>
                   </div>
 
-                  {lastSavedId && (
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      {currentInvoice.balance > 0 && currentInvoice.status !== 'cancelled' && (
-                        <Button
-                          onClick={() => {
-                            setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
-                            setIsRecordPaymentOpen(true);
-                          }}
-                          className="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold w-full"
-                        >
-                          <CreditCard className="h-4 w-4 mr-1.5" />
-                          Record Payment
-                        </Button>
-                      )}
-                      {currentInvoice.status !== 'cancelled' && (
-                        <Button
-                          onClick={handleCancelInvoice}
-                          variant="outline"
-                          className="h-11 rounded-xl border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 font-semibold w-full"
-                        >
-                          <X className="h-4 w-4 mr-1.5" />
-                          Cancel/Reverse
-                        </Button>
-                      )}
+                  {lastSavedId && currentInvoice.balance > 0 && currentInvoice.status !== 'cancelled' && (
+                    <div className="pt-1">
+                      <Button
+                        onClick={() => {
+                          setSelectedPaymentInvoiceId(lastSavedId);
+                          setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
+                          setIsRecordPaymentOpen(true);
+                        }}
+                        className="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold w-full"
+                      >
+                        <CreditCard className="h-4 w-4 mr-1.5" />
+                        Record Payment
+                      </Button>
                     </div>
                   )}
 
@@ -3565,9 +3856,16 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       <Printer className="h-4 w-4 mr-1.5" />
                       Print
                     </Button>
-                    <Button onClick={copyInvoiceDetails} variant="outline" className="h-10 rounded-xl bg-white/60 border-slate-200 text-slate-850 hover:bg-slate-50">
-                      <Copy className="h-4 w-4 mr-1.5" />
-                      Copy
+                    <Button
+                      onClick={() => {
+                        resetForm();
+                        toast.info("Invoice form cleared");
+                      }}
+                      variant="outline"
+                      className="h-10 rounded-xl bg-white/60 border-slate-200 text-rose-700 hover:bg-rose-50 hover:border-rose-200 font-semibold"
+                    >
+                      <Trash2 className="h-4 w-4 mr-1.5" />
+                      Clear
                     </Button>
                   </div>
 
@@ -3578,16 +3876,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <MessageCircle className="h-5 w-5" />
                     Share on WhatsApp
                   </button>
-
-                  <Button onClick={saveAndNew} disabled={isSaving || currentInvoice.items.length === 0} variant="outline" className="w-full h-10 rounded-xl bg-white/60 border-slate-200 text-slate-850 hover:bg-slate-50">
-                    <Plus className="h-4 w-4 mr-1.5" />
-                    Save & New
-                  </Button>
-
-                  <Button onClick={() => exportInvoice('csv')} variant="outline" className="w-full h-10 rounded-xl bg-white/60 border-slate-200 text-slate-850 hover:bg-slate-50">
-                    <Download className="h-4 w-4 mr-1.5" />
-                    Export CSV
-                  </Button>
                 </div>
               </Card>
             </div>
@@ -4154,19 +4442,28 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                 <div>
                   <h2 className="text-2xl font-semibold tracking-tight text-slate-950 flex items-center gap-3">
                     <Eye className="h-6 w-6 text-slate-900" />
-                    Invoice History
+                    Sales Invoice History
                   </h2>
-                  <p className="text-slate-500 mt-1">{invoiceHistory.length} invoice{invoiceHistory.length !== 1 ? 's' : ''} saved</p>
+                  <p className="text-slate-500 mt-1">{filteredHistory.length} sales invoice{filteredHistory.length !== 1 ? 's' : ''} recorded</p>
                 </div>
-                <div className="relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-500" />
-                  <input
-                    type="text"
-                    placeholder="Search invoices..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="pl-12 pr-4 py-2.5 h-11 border border-slate-200 text-slate-900 rounded-[14px] focus:ring-2 focus:ring-slate-350 focus:border-slate-350 w-full sm:w-64"
-                  />
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <div className="relative">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-500" />
+                    <input
+                      type="text"
+                      placeholder="Search sales invoices..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="pl-12 pr-4 py-2.5 h-11 border border-slate-200 text-slate-900 rounded-[14px] focus:ring-2 focus:ring-slate-350 focus:border-slate-350 w-full sm:w-64"
+                    />
+                  </div>
+                  <Button
+                    onClick={exportHistoryToCSV}
+                    className="h-11 px-4 rounded-[14px] bg-slate-950 hover:bg-slate-800 text-white font-bold flex items-center gap-2 shadow-sm transition-all"
+                  >
+                    <Download className="h-4 w-4" />
+                    Export CSV
+                  </Button>
                 </div>
               </div>
 
@@ -4181,30 +4478,103 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                         <div>
                           <div className="flex items-center gap-3 mb-2">
                             <h3 className="font-bold text-lg text-slate-900">{invoice.invoiceNo}</h3>
-                            <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-800 border border-slate-200">
-                              {invoice.type === 'sales' ? 'SALES' : 'PURCHASE'}
+                            <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
+                              invoice.type === 'sales'
+                                ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'
+                                : 'bg-amber-50 text-amber-800 border border-amber-200'
+                            }`}>
+                              {invoice.type === 'sales' ? 'SALES INVOICE' : 'PURCHASE BILL'}
                             </span>
+                            {isDraftInvoice(invoice) && (
+                              <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                                DRAFT
+                              </span>
+                            )}
                             <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-800 border border-blue-100">
                               {invoice.transactionType || 'B2C'}
                             </span>
                           </div>
                           <p className="text-slate-650 text-sm">
-                            {invoice.partyName} | {invoice.invoiceDate}
+                            {invoice.type === 'purchase' ? 'Supplier: ' : 'Customer: '}{invoice.partyName} | {invoice.invoiceDate}
                           </p>
                           <p className="text-slate-500 text-xs mt-1">
-                            {invoice.items.length} items | {invoice.saleType?.toUpperCase()} | {invoice.invoiceSize || 'A4'}
+                            {invoice.items.length} items | {invoice.saleType?.toUpperCase() || 'CASH'} | {invoice.invoiceSize || 'A4'}
                             {invoice.dueReminderDate ? ` | Reminder: ${invoice.dueReminderDate}` : ''}
                           </p>
                         </div>
-                        <div className="flex items-center justify-between md:justify-end gap-4">
-                          <div className="text-right">
-                            <p className="text-xl font-bold text-slate-950">
+                        <div className="flex items-center justify-between md:justify-end gap-3">
+                          <div className="text-right flex flex-col items-end gap-1">
+                            <p className="text-xl font-extrabold text-slate-950">
                               ₹{invoice.total.toFixed(2)}
                             </p>
-                            {invoice.balance > 0 && (
-                              <p className="text-rose-700 text-sm font-semibold">Due: ₹{invoice.balance.toFixed(2)}</p>
-                            )}
+                            <div className="flex items-center gap-1.5 text-xs font-semibold">
+                              {invoice.balance <= 0 ? (
+                                <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold">
+                                  Paid: ₹{invoice.total.toFixed(2)}
+                                </span>
+                              ) : (
+                                <>
+                                  {invoice.paid > 0 ? (
+                                    <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                      Paid: ₹{invoice.paid.toFixed(2)}
+                                    </span>
+                                  ) : (
+                                    <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-200 font-bold uppercase text-[10px]">
+                                      Unpaid
+                                    </span>
+                                  )}
+                                  <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-300 font-bold">
+                                    Due: ₹{invoice.balance.toFixed(2)}
+                                  </span>
+                                </>
+                              )}
+                            </div>
                           </div>
+                          {invoice.balance > 0 && (
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                const id = (invoice as any).id || (invoice as any)._id;
+                                setSelectedPaymentInvoiceId(id);
+                                setPaymentForm(prev => ({ ...prev, amount: invoice.balance }));
+                                setIsRecordPaymentOpen(true);
+                              }}
+                              className="rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold flex items-center gap-1.5"
+                            >
+                              <CreditCard className="h-3.5 w-3.5" />
+                              Pay
+                            </Button>
+                          )}
+                          {isDraftInvoice(invoice) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                editHistoryInvoice(invoice);
+                              }}
+                              className="rounded-full border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 font-bold flex items-center gap-1.5 shadow-sm"
+                            >
+                              <Edit className="h-3.5 w-3.5" />
+                              Continue Draft
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              const id = (invoice as any).id || (invoice as any)._id;
+                              if (invoice.type === 'purchase') {
+                                window.open(`/purchase-invoice/view/${id}`, '_blank');
+                              } else {
+                                window.open(`/invoice/view/${id}`, '_blank');
+                              }
+                            }}
+                            className="rounded-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                          >
+                            <Printer className="mr-1.5 h-4 w-4" />
+                            View
+                          </Button>
                           <Button
                             variant="outline"
                             size="sm"
@@ -4375,6 +4745,8 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <SelectContent className="bg-white text-slate-900 border-slate-200">
                       <SelectItem value="cash">Cash</SelectItem>
                       <SelectItem value="upi">UPI</SelectItem>
+                      <SelectItem value="card">Card</SelectItem>
+                      <SelectItem value="credit">Credit</SelectItem>
                       <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
                       <SelectItem value="credit_card">Credit Card</SelectItem>
                       <SelectItem value="cheque">Cheque</SelectItem>
