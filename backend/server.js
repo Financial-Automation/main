@@ -1400,9 +1400,9 @@ const startServer = async () => {
     console.warn("⚠️ Database connection failed. Starting server in degraded mode:", error.message);
   }
 
-  // Start the server regardless of initial DB connection state
+  // Start primary server listener
   const server = app.listen(PORT, HOST, () => {
-    console.log(`🚀 Server running on http://${HOST}:${PORT}`);
+    console.log(`🚀 Primary server running on http://${HOST}:${PORT}`);
     console.log(`🌐 Local access: http://localhost:${PORT}`);
   });
 
@@ -1413,6 +1413,19 @@ const startServer = async () => {
       console.error('❌ Server error:', err);
     }
   });
+
+  // Start secondary fallback listener on complementary port (5001 if 5000, 5000 if 5001)
+  const ALT_PORT = Number(PORT) === 5000 ? 5001 : 5000;
+  try {
+    const altServer = app.listen(ALT_PORT, HOST, () => {
+      console.log(`🚀 Fallback listener active on http://${HOST}:${ALT_PORT}`);
+    });
+    altServer.on('error', () => {
+      // Ignore if ALT_PORT is occupied
+    });
+  } catch (e) {
+    // Ignore secondary listener initialization errors
+  }
 };
 
 startServer();
