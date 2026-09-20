@@ -1407,11 +1407,10 @@ const startServer = async () => {
   });
 
   server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE' && PORT === 5000) {
-      console.log('⚠️ Port 5000 in use, attempting fallback to port 5001...');
-      app.listen(5001, HOST, () => {
-        console.log(`🚀 Server running on http://${HOST}:5001 (fallback)`);
-      });
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use.`);
+    } else {
+      console.error('❌ Server error:', err);
     }
   });
 };

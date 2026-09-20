@@ -140,6 +140,7 @@ jobs:
           export PATH="$PATH:/home/ubuntu/.nvm/versions/node/$(ls /home/ubuntu/.nvm/versions/node 2>/dev/null | tail -n 1)/bin:/usr/local/bin:/home/ubuntu/.npm-global/bin:/usr/bin"
 
           cd "$APP_DIR/backend"
+          sudo fuser -k 5000/tcp || true
           pm2 startOrRestart ecosystem.config.cjs --update-env || pm2 restart financial-backend --update-env || pm2 start server.js --name financial-backend
           pm2 save || true
 
