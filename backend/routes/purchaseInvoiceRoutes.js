@@ -56,17 +56,13 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     totalTax: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
     paid: { type: Number, default: 0 },
-    balance: { type: Number, default: 0 },
-<<<<<<< HEAD
     bankName: { type: String, default: "" },
     accountType: { type: String, default: "Current" },
     accountNumber: { type: String, default: "" },
     ifscCode: { type: String, default: "" },
     authorisedSignature: { type: String, default: "" },
-=======
     templateId: { type: String, default: "" },
     templateSnapshot: { type: Object, default: null },
->>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
     createdAt: { type: Date, default: Date.now },
 });
 

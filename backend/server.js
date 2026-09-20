@@ -113,19 +113,29 @@ let mongoUri = (isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONG
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 
-<<<<<<< HEAD
 let mongoMemoryServer = null;
 
 // Connect to MongoDB with fallback mechanism
 const connectToMongoDB = async () => {
   try {
-    await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 3000 });
+    const targetUri = process.env.PRO_MONGO_URI || process.env.MONGO_URI || process.env.DEV_MONGO_URI || mongoUri;
+    await mongoose.connect(targetUri, { serverSelectionTimeoutMS: 5000 });
     console.log("✅ MongoDB Connected Successfully");
-    console.log(`📍 Database: ${mongoUri}`);
+    console.log(`📍 Database: ${targetUri}`);
   } catch (err) {
     console.error("⚠️ Primary MongoDB Connection Failed:", err.message);
 
-    console.log("⚡ Starting In-Memory MongoDB Server for Local Development...");
+    try {
+      if (process.env.DEV_MONGO_URI && process.env.DEV_MONGO_URI !== mongoUri) {
+        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 3000 });
+        console.log("✅ MongoDB Connected Successfully (Local DB)");
+        return;
+      }
+    } catch (devErr) {
+      console.error("❌ Local MongoDB Connection Failed:", devErr.message);
+    }
+
+    console.log("⚡ Starting In-Memory MongoDB Server Fallback...");
     try {
       mongoMemoryServer = await MongoMemoryServer.create();
       const memoryUri = mongoMemoryServer.getUri();
@@ -135,39 +145,6 @@ const connectToMongoDB = async () => {
     } catch (memErr) {
       console.error("❌ In-Memory MongoDB Connection Failed:", memErr.message);
       throw memErr;
-=======
-// Connect to MongoDB with fallback mechanism (Cloud Atlas -> Local DB -> MongoMemoryServer)
-const connectToMongoDB = async () => {
-  try {
-    await mongoose.connect(process.env.PRO_MONGO_URI, {
-      serverSelectionTimeoutMS: 5000
-    });
-    console.log("✅ MongoDB Connected Successfully");
-    console.log("📍 Database: Cloud Atlas");
-  } catch (err) {
-    console.error("❌ Cloud MongoDB Atlas Connection Failed:", err.message);
-    try {
-      if (process.env.DEV_MONGO_URI) {
-        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-        console.log("✅ MongoDB Connected Successfully (Local DB)");
-        return;
-      }
-    } catch (devErr) {
-      console.error("❌ Local MongoDB Connection Failed:", devErr.message);
-    }
-
-    try {
-      console.log("🔄 Initializing In-Memory MongoDB Server...");
-      const { MongoMemoryServer } = await import("mongodb-memory-server");
-      const mongod = await MongoMemoryServer.create();
-      const uri = mongod.getUri();
-      await mongoose.connect(uri);
-      console.log("✅ MongoDB Connected Successfully (In-Memory Fallback)");
-      console.log(`📍 Database URI: ${uri}`);
-    } catch (memErr) {
-      console.error("❌ Failed to start In-Memory MongoDB:", memErr.message);
-      throw err;
->>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
     }
   }
 };
@@ -329,58 +306,41 @@ app.post("/api/signin", async (req, res) => {
 
     let user = await User.findOne({ email });
 
-<<<<<<< HEAD
     if (!user) {
-      // Auto-create account for seamless localhost/dev access
-      console.log(`👤 Auto-registering new localhost user: ${email}`);
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const subscriptionStartDate = new Date();
-      const trialEndDate = new Date(subscriptionStartDate);
-      trialEndDate.setDate(trialEndDate.getDate() + 30);
-
-      user = new User({
-        email,
-        name: email.split("@")[0] || "Local User",
-        password: hashedPassword,
-        role: role || "admin",
-        subscriptionStatus: "active",
-        subscriptionPlan: "trial",
-        subscriptionAmount: 0,
-        subscriptionStartDate,
-        subscriptionEndDate: trialEndDate,
-        trialEndDate
-      });
-      await user.save();
-    } else {
-      let validPass = false;
-      if (role === "instore") {
-        if (user.storePassword) {
-          validPass = await bcrypt.compare(password, user.storePassword);
-        } else {
-          validPass = await bcrypt.compare(password, user.password);
-        }
-      } else {
-        validPass = await bcrypt.compare(password, user.password);
-      }
-
-      if (!validPass) {
-        // Update password if logging in locally with mismatch
+      if (process.env.DEV_MODE === "true" || isDevelopment) {
+        // Auto-create account for seamless localhost/dev access
+        console.log(`👤 Auto-registering new localhost/dev user: ${email}`);
         const hashedPassword = await bcrypt.hash(password, 10);
-        user.password = hashedPassword;
+        const subscriptionStartDate = new Date();
+        const trialEndDate = new Date(subscriptionStartDate);
+        trialEndDate.setDate(trialEndDate.getDate() + 30);
+
+        user = new User({
+          email,
+          name: email.split("@")[0] || "Local User",
+          password: hashedPassword,
+          role: role || "admin",
+          subscriptionStatus: "active",
+          subscriptionPlan: "trial",
+          subscriptionAmount: 0,
+          subscriptionStartDate,
+          subscriptionEndDate: trialEndDate,
+          trialEndDate
+        });
         await user.save();
+      } else {
+        return res.status(400).json({ message: "Invalid email or password" });
       }
     }
 
-    const token = jwt.sign({ id: user._id, role }, JWT_SECRET, { expiresIn: "7d" });
-=======
     let validPass = false;
-    let authenticatedRole = "admin";
+    let authenticatedRole = role || user.role || "admin";
 
     // 1. First check if password matches Admin Password
     const isAdminPass = await bcrypt.compare(password, user.password);
     if (isAdminPass) {
       validPass = true;
-      authenticatedRole = "admin";
+      authenticatedRole = role || user.role || "admin";
     } else if (user.storePassword) {
       // 2. Next check if password matches Store Password
       const isStorePass = await bcrypt.compare(password, user.storePassword);
@@ -394,8 +354,8 @@ app.post("/api/signin", async (req, res) => {
       return res.status(400).json({ message: "Invalid email or password" });
     }
 
-    const token = jwt.sign({ id: user._id, role: authenticatedRole }, process.env.JWT_SECRET, { expiresIn: "7d" });
->>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
+    const secret = process.env.JWT_SECRET || JWT_SECRET;
+    const token = jwt.sign({ id: user._id, role: authenticatedRole }, secret, { expiresIn: "7d" });
 
     res.json({
       message: "Login successful",
@@ -403,25 +363,14 @@ app.post("/api/signin", async (req, res) => {
       user: {
         id: user._id,
         email: user.email,
-<<<<<<< HEAD
         name: user.name || user.email.split("@")[0],
-        role: role || user.role || "admin",
+        role: authenticatedRole,
         subscriptionStatus: user.subscriptionStatus || "active",
         subscriptionPlan: user.subscriptionPlan || "trial",
         subscriptionAmount: user.subscriptionAmount || 0,
         subscriptionStartDate: user.subscriptionStartDate || new Date(),
         subscriptionEndDate: user.subscriptionEndDate || new Date(Date.now() + 30 * 86400000),
         trialEndDate: user.trialEndDate || new Date(Date.now() + 30 * 86400000),
-=======
-        name: user.name,
-        role: authenticatedRole,
-        subscriptionStatus: user.subscriptionStatus,
-        subscriptionPlan: user.subscriptionPlan,
-        subscriptionAmount: user.subscriptionAmount,
-        subscriptionStartDate: user.subscriptionStartDate,
-        subscriptionEndDate: user.subscriptionEndDate,
-        trialEndDate: user.trialEndDate,
->>>>>>> 31654664b0394446ebb4a4e9b92abbee919d4358
       },
     });
   } catch (error) {
