@@ -138,7 +138,8 @@ jobs:
           echo "Restarting backend..."
           export PM2_HOME="/home/ubuntu/.pm2"
 
-          pm2 restart financial-backend --update-env
+          cd "$APP_DIR/backend"
+          pm2 startOrRestart ecosystem.config.cjs --update-env || pm2 restart financial-backend --update-env || pm2 start server.js --name financial-backend
           pm2 save
 
           echo "Backend status:"
