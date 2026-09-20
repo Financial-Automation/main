@@ -1400,31 +1400,22 @@ const startServer = async () => {
     console.warn("⚠️ Database connection failed. Starting server in degraded mode:", error.message);
   }
 
-  // Start primary server listener
-  const server = app.listen(PORT, HOST, () => {
-    console.log(`🚀 Primary server running on http://${HOST}:${PORT}`);
-    console.log(`🌐 Local access: http://localhost:${PORT}`);
-  });
-
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`❌ Port ${PORT} is already in use.`);
-    } else {
-      console.error('❌ Server error:', err);
+  // Start server listeners on primary and common Nginx proxy ports (5000, 5001, 3000, 8080)
+  const portsToListen = [Number(PORT), 5000, 5001, 3000, 8080].filter((v, i, a) => a.indexOf(v) === i);
+  
+  for (const p of portsToListen) {
+    try {
+      const srv = app.listen(p, HOST, () => {
+        console.log(`🚀 Express server listening on http://${HOST}:${p}`);
+      });
+      srv.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.warn(`⚠️ Port ${p} is already in use by another process.`);
+        }
+      });
+    } catch (err) {
+      // Ignore bind errors for supplementary ports
     }
-  });
-
-  // Start secondary fallback listener on complementary port (5001 if 5000, 5000 if 5001)
-  const ALT_PORT = Number(PORT) === 5000 ? 5001 : 5000;
-  try {
-    const altServer = app.listen(ALT_PORT, HOST, () => {
-      console.log(`🚀 Fallback listener active on http://${HOST}:${ALT_PORT}`);
-    });
-    altServer.on('error', () => {
-      // Ignore if ALT_PORT is occupied
-    });
-  } catch (e) {
-    // Ignore secondary listener initialization errors
   }
 };
 
