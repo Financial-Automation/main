@@ -161,6 +161,11 @@ interface InvoiceData {
   sellerEmail?: string;
   sellerAddress?: string;
   customerAddress?: string;
+  bankName?: string;
+  accountType?: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  authorisedSignature?: string;
   notes?: string;
   termsAndConditions?: string;
 }
@@ -400,8 +405,8 @@ const AutomationInvoice = () => {
         labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
       },
       items: {
-        columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
-        labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+        columns: ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"],
+        labels: { item: "Item", sku: "Item Code", description: "Description", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", discount: "Discount", tax: "Tax", amount: "Amount" }
       },
       tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
       payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
@@ -468,6 +473,11 @@ const AutomationInvoice = () => {
           sellerGSTIN: data.sellerGSTIN || prev.sellerGSTIN || "",
           businessState: data.sellerState || prev.businessState || "Tamil Nadu",
           sellerAddress: data.sellerAddress || prev.sellerAddress || "",
+          bankName: data.bankName || prev.bankName || "",
+          accountType: data.accountType || prev.accountType || "Current",
+          accountNumber: data.accountNumber || prev.accountNumber || "",
+          ifscCode: data.ifscCode || prev.ifscCode || "",
+          authorisedSignature: data.authorisedSignature || prev.authorisedSignature || "",
           salespersonName: data.sellerName || prev.salespersonName || ""
         }));
       }
@@ -1294,6 +1304,11 @@ const AutomationInvoice = () => {
         businessPhone: currentInvoice.sellerPhone,
         businessGSTIN: currentInvoice.sellerGSTIN,
         businessAddress: currentInvoice.sellerAddress || '',
+        bankName: currentInvoice.bankName || '',
+        accountType: currentInvoice.accountType || 'Current',
+        accountNumber: currentInvoice.accountNumber || '',
+        ifscCode: currentInvoice.ifscCode || '',
+        authorisedSignature: currentInvoice.authorisedSignature || '',
         transactionType: currentInvoice.transactionType,
         invoiceSize: currentInvoice.invoiceSize,
         dueReminderDays: currentInvoice.dueReminderDays,
@@ -1501,8 +1516,8 @@ const AutomationInvoice = () => {
           labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
         },
         items: {
-          columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
-          labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+          columns: ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"],
+          labels: { item: "Item", sku: "Item Code", description: "Description", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", discount: "Discount", tax: "Tax", amount: "Amount" }
         },
         tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
         payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
@@ -1602,55 +1617,19 @@ const AutomationInvoice = () => {
           }
           if (header.showEmail && data.sellerEmail) {
             doc.text(`Email: ${data.sellerEmail}`, 195, headerY, { align: "right" });
+            headerY += 4;
+          }
+          if (data.sellerGSTIN) {
+            doc.setFont("helvetica", "bold");
+            doc.text(`GSTIN: ${data.sellerGSTIN}`, 195, headerY, { align: "right" });
+            headerY += 4;
           }
 
           currentY = Math.max(headerY + 8, currentY + 30);
         }
 
-        else if (sectionName === "seller" && seller.showName) {
-          // Draw rounded background container
-          const boxHeight = 35;
-          doc.setFillColor(248, 250, 252); // slate-50
-          doc.setDrawColor(226, 232, 240); // slate-200
-          doc.roundedRect(15, currentY, 180, boxHeight, 3, 3, 'FD');
-
-          doc.setTextColor(100, 116, 139); // slate-500
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(8.5);
-          doc.text("SELLER DETAILS", 20, currentY + 6);
-
-          doc.setTextColor(15, 23, 42); // slate-900
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(9.5);
-          doc.text(sellerName, 20, currentY + 13);
-
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(8.5);
-          doc.setTextColor(71, 85, 105); // slate-600
-          let sellY = currentY + 18;
-          if (seller.showAddress && data.sellerAddress) {
-            const addrLines = doc.splitTextToSize(data.sellerAddress, 170);
-            addrLines.forEach((line: string) => {
-              doc.text(line, 20, sellY);
-              sellY += 4;
-            });
-          }
-          
-          let contactParts = [];
-          if (seller.showPhone && data.sellerPhone) contactParts.push(`Phone: ${data.sellerPhone}`);
-          if (seller.showEmail && data.sellerEmail) contactParts.push(`Email: ${data.sellerEmail}`);
-          if (contactParts.length > 0) {
-            doc.text(contactParts.join("   |   "), 20, sellY);
-            sellY += 4.5;
-          }
-
-          if (seller.showGSTIN && data.sellerGSTIN) {
-            doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-            doc.setFont("helvetica", "bold");
-            doc.text(`GSTIN: ${data.sellerGSTIN}`, 20, sellY);
-          }
-
-          currentY += boxHeight + 8;
+        else if (sectionName === "seller") {
+          // Duplicate seller section removed as details are in company letterhead
         }
 
         else if (sectionName === "customer" && customer.showName) {
@@ -1754,14 +1733,15 @@ const AutomationInvoice = () => {
 
         else if (sectionName === "items") {
           // Render item table
-          const activeCols = itemsCfg.columns || ["item", "hsn", "quantity", "rate", "tax", "amount"];
+          const activeCols = itemsCfg.columns || ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"];
           const colMapping: any = {
             item: itemsCfg.labels?.item || "Item",
+            sku: itemsCfg.labels?.sku || "Item Code",
             description: itemsCfg.labels?.description || "Description",
-            sku: itemsCfg.labels?.sku || "SKU",
             hsn: itemsCfg.labels?.hsn || "HSN/SAC",
             quantity: itemsCfg.labels?.quantity || "Qty",
             rate: itemsCfg.labels?.rate || "Rate",
+            discount: itemsCfg.labels?.discount || "Discount",
             tax: itemsCfg.labels?.tax || "Tax",
             amount: itemsCfg.labels?.amount || "Amount"
           };
@@ -1771,11 +1751,12 @@ const AutomationInvoice = () => {
             return activeCols.map(col => {
               switch (col) {
                 case "item":        return item.itemName || "";
-                case "description": return "";
                 case "sku":         return item.itemCode || "-";
+                case "description": return item.description || "-";
                 case "hsn":         return item.hsnCode || "-";
                 case "quantity":    return `${item.quantity} ${item.unit || 'Pcs'}`;
                 case "rate":        return formatPDFCurrency(item.pricePerUnit || 0, "INR ");
+                case "discount":    return item.discountPercent ? `${item.discountPercent}%` : (item.discountAmount ? formatPDFCurrency(item.discountAmount, "INR ") : "0%");
                 case "tax":         return `${item.taxPercent || 0}%`;
                 case "amount":      return formatPDFCurrency(item.amount || 0, "INR ");
                 default:            return "";
@@ -1824,6 +1805,9 @@ const AutomationInvoice = () => {
             totY += 6;
           };
 
+          const totalDiscount = (data.items || []).reduce((sum: number, i: any) => sum + (i.discountAmount || 0), 0);
+          if (totalDiscount > 0) addTotalRow("Total Discount:", -totalDiscount);
+
           if (tax.showCGST && (data.totalCgst || 0) > 0) addTotalRow("CGST:", data.totalCgst);
           if (tax.showSGST && (data.totalSgst || 0) > 0) addTotalRow("SGST:", data.totalSgst);
           if (tax.showIGST && (data.totalIgst || 0) > 0) addTotalRow("IGST:", data.totalIgst);
@@ -1843,9 +1827,9 @@ const AutomationInvoice = () => {
           currentY = totY + 4;
         }
 
-        else if (sectionName === "payment" && payment.showPaidAmount) {
+        else if (sectionName === "payment") {
           // Draw rounded container box matching preview styles
-          const boxHeight = 18;
+          const boxHeight = 24;
           const bgCol = hexToRgb(design.secondaryColor || "#f8fafc");
           const borderCol = hexToRgb(design.borderColor || "#cbd5e1");
           const radius = design.cornerRadius || 3;
@@ -1854,7 +1838,7 @@ const AutomationInvoice = () => {
           doc.setDrawColor(borderCol[0], borderCol[1], borderCol[2]);
           doc.roundedRect(15, currentY, 180, boxHeight, radius, radius, 'FD');
 
-          let colWidth = 55;
+          let colWidth = 45;
           let colX = 20;
 
           const renderCol = (label: string, value: string, isColored = false, colorHex = "") => {
@@ -1877,15 +1861,17 @@ const AutomationInvoice = () => {
             colX += colWidth;
           };
 
-          if (payment.showPaidAmount) {
-            renderCol("Paid Amount", formatPDFCurrency(data.paid || 0, "INR "));
-          }
-          if (payment.showBalance) {
-            renderCol("Balance Due", formatPDFCurrency(data.balance || 0, "INR "), true, "#e11d48");
-          }
-          if (payment.showPaymentMethod && data.paymentMethod) {
+          renderCol("Paid Amount", formatPDFCurrency(data.paid || 0, "INR "));
+          renderCol("Balance Due", formatPDFCurrency(data.balance ?? ((data.total || 0) - (data.paid || 0)), "INR "), true, "#e11d48");
+          if (data.paymentMethod) {
             renderCol("Method", data.paymentMethod);
           }
+
+          // Banking details in PDF
+          doc.setTextColor(100, 116, 139);
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(7.5);
+          doc.text(`BANKING DETAILS: ${data.bankName || 'ABC Bank'} | A/C: ${data.accountNumber || 'XXXXXXXX'} (${data.accountType || 'Current'}) | IFSC: ${data.ifscCode || 'ABCD0001234'}`, 20, currentY + 19);
 
           currentY += boxHeight + 8;
         }
@@ -1918,29 +1904,29 @@ const AutomationInvoice = () => {
           }
         }
 
-        else if (sectionName === "signature" && signature.show) {
+        else if (sectionName === "signature") {
           doc.setFont("helvetica", "bold");
           doc.setFontSize(9);
-          doc.text("Authorized Signatory", 150, currentY + 20);
-          doc.line(150, currentY + 22, 195, currentY + 22);
-          doc.setFont("helvetica", "normal");
-          if (signature.name) doc.text(signature.name, 150, currentY + 26);
-          if (signature.designation) doc.text(signature.designation, 150, currentY + 30);
+          const sigName = data.authorisedSignature || signature.name || "Authorized Signatory";
+          doc.text(sigName, 150, currentY + 18);
+          doc.line(150, currentY + 20, 195, currentY + 20);
+          doc.text("Authorised Signature", 150, currentY + 25);
+          if (signature.designation) doc.text(signature.designation, 150, currentY + 29);
           if (signature.imageUrl) {
             try {
-              doc.addImage(signature.imageUrl, 'PNG', 150, currentY + 2, 30, 15);
+              doc.addImage(signature.imageUrl, 'PNG', 150, currentY + 2, 30, 12);
             } catch (e) {
               console.log("Signature image loading error:", e);
             }
           }
-          currentY += 35;
+          currentY += 32;
         }
 
-        else if (sectionName === "footer" && footer.show && footer.text) {
+        else if (sectionName === "footer") {
           doc.setFont("helvetica", "italic");
           doc.setFontSize(8);
           doc.setTextColor(100, 116, 139);
-          doc.text(footer.text, 15, 282, { maxWidth: 180 });
+          doc.text(footer.text || "This is a digitally generated invoice.", 15, 282, { maxWidth: 180 });
         }
       });
 
@@ -2594,6 +2580,58 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                   </div>
                 </Card>
               )}
+
+              {/* Banking Details Card */}
+              <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 p-5">
+                <h2 className="text-lg font-bold text-slate-900 mb-4 flex items-center gap-2">
+                  <Building className="h-5 w-5 text-slate-800" />
+                  Banking Details
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-slate-800 text-sm font-semibold">Bank Name</Label>
+                    <Input
+                      value={currentInvoice.bankName || ''}
+                      onChange={(e) => setCurrentInvoice(prev => ({ ...prev, bankName: e.target.value }))}
+                      placeholder="e.g. HDFC Bank / ICICI Bank"
+                      className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-400 placeholder:text-slate-400"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-slate-800 text-sm font-semibold">Account Type</Label>
+                    <Select
+                      value={currentInvoice.accountType || 'Current'}
+                      onValueChange={(val) => setCurrentInvoice(prev => ({ ...prev, accountType: val }))}
+                    >
+                      <SelectTrigger className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-400">
+                        <SelectValue placeholder="Select Account Type" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white border border-slate-200 text-slate-900">
+                        <SelectItem value="Current">Current</SelectItem>
+                        <SelectItem value="Savings">Savings</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-slate-800 text-sm font-semibold">Account Number</Label>
+                    <Input
+                      value={currentInvoice.accountNumber || ''}
+                      onChange={(e) => setCurrentInvoice(prev => ({ ...prev, accountNumber: e.target.value }))}
+                      placeholder="Enter Account Number"
+                      className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-400 placeholder:text-slate-400"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-slate-800 text-sm font-semibold">IFSC Code</Label>
+                    <Input
+                      value={currentInvoice.ifscCode || ''}
+                      onChange={(e) => setCurrentInvoice(prev => ({ ...prev, ifscCode: e.target.value.toUpperCase() }))}
+                      placeholder="e.g. HDFC0001234"
+                      className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-400 placeholder:text-slate-400 uppercase"
+                    />
+                  </div>
+                </div>
+              </Card>
 
               {/* Customer Details */}
               <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 p-5">
@@ -3617,34 +3655,19 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                                 Email: {currentInvoice.sellerEmail || 'support@saaiss.in'}
                               </p>
                             )}
+                            {currentInvoice.sellerGSTIN && (
+                              <p className="text-xs font-bold mt-1" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>
+                                GSTIN: {currentInvoice.sellerGSTIN}
+                              </p>
+                            )}
                           </div>
                         </div>
                       );
                     }
 
-                    if (sectionName === "seller" && activeTemplateConfig.seller?.showName) {
-                      return (
-                        <div 
-                          key="seller" 
-                          className="mb-6 p-4 rounded-xl border text-left" 
-                          style={{ 
-                            backgroundColor: activeTemplateConfig.design?.secondaryColor || "#f8fafc", 
-                            borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1",
-                            borderRadius: `${activeTemplateConfig.design?.cornerRadius || 0}px` 
-                          }}
-                        >
-                          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Seller Details</h4>
-                          {activeTemplateConfig.seller.showName && <p className="font-extrabold">{currentInvoice.sellerName || 'SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED'}</p>}
-                          {activeTemplateConfig.seller.showAddress && <p className="text-slate-600 text-xs mt-0.5">{currentInvoice.sellerAddress || '3/124 Main Road, Andal Nagar, Trichy, Tamil Nadu - 620001'}</p>}
-                          {activeTemplateConfig.seller.showPhone && currentInvoice.sellerPhone && <p className="text-slate-600 text-xs">Phone: {currentInvoice.sellerPhone}</p>}
-                          {activeTemplateConfig.seller.showEmail && currentInvoice.sellerEmail && <p className="text-slate-600 text-xs">Email: {currentInvoice.sellerEmail}</p>}
-                          {activeTemplateConfig.seller.showGSTIN && currentInvoice.sellerGSTIN && (
-                            <p className="text-xs font-bold mt-1" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>
-                              GSTIN: {currentInvoice.sellerGSTIN}
-                            </p>
-                          )}
-                        </div>
-                      );
+                    if (sectionName === "seller") {
+                      // Duplicate seller details section removed as information is in company letterhead
+                      return null;
                     }
 
                     if (sectionName === "customer" && activeTemplateConfig.customer?.showName) {
@@ -3734,7 +3757,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                                 style={{ backgroundColor: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}
                               >
                                 <th className="py-2.5 px-3">#</th>
-                                {(activeTemplateConfig.items?.columns || ["item", "hsn", "quantity", "rate", "tax", "amount"]).map((col: string) => (
+                                {(activeTemplateConfig.items?.columns || ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"]).map((col: string) => (
                                   <th key={col} className="py-2.5 px-3 text-left">
                                     {(activeTemplateConfig.items?.labels as any)[col] || col}
                                   </th>
@@ -3749,7 +3772,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                                   style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}
                                 >
                                   <td className="py-3 px-3">{idx + 1}</td>
-                                  {(activeTemplateConfig.items?.columns || ["item", "hsn", "quantity", "rate", "tax", "amount"]).map((col: string) => {
+                                  {(activeTemplateConfig.items?.columns || ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"]).map((col: string) => {
                                     if (col === "item") {
                                       return (
                                         <td key={col} className="py-3 px-3 font-bold text-left">
@@ -3763,6 +3786,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                                     if (col === "hsn") return <td key={col} className="py-3 px-3 text-left">{item.hsnCode || "-"}</td>;
                                     if (col === "quantity") return <td key={col} className="py-3 px-3 text-left">{item.quantity} {item.unit || "Pcs"}</td>;
                                     if (col === "rate") return <td key={col} className="py-3 px-3 text-left">₹{item.pricePerUnit.toFixed(2)}</td>;
+                                    if (col === "discount") return <td key={col} className="py-3 px-3 text-left text-amber-700 font-medium">{item.discountPercent ? `${item.discountPercent}%` : (item.discountAmount ? `₹${item.discountAmount.toFixed(2)}` : "0%")}</td>;
                                     if (col === "tax") return <td key={col} className="py-3 px-3 text-left">{item.taxPercent}% GST</td>;
                                     if (col === "amount") return <td key={col} className="py-3 px-3 font-bold text-slate-950 text-left">₹{item.amount.toFixed(2)}</td>;
                                     return <td key={col} className="text-left">-</td>;
@@ -3776,6 +3800,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     }
 
                     if (sectionName === "tax" && activeTemplateConfig.tax?.showSummary) {
+                      const totalDiscount = currentInvoice.items.reduce((sum, i) => sum + (i.discountAmount || 0), 0);
                       return (
                         <div key="tax" className="mb-6 flex justify-end">
                           <div className="w-80 space-y-2 border-t pt-3" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
@@ -3783,6 +3808,12 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                               <span className="text-slate-500">Subtotal</span>
                               <span className="font-semibold">₹{currentInvoice.subtotal.toFixed(2)}</span>
                             </div>
+                            {totalDiscount > 0 && (
+                              <div className="flex justify-between items-center text-xs text-amber-700">
+                                <span>Total Discount</span>
+                                <span>-₹{totalDiscount.toFixed(2)}</span>
+                              </div>
+                            )}
                             {activeTemplateConfig.tax.showTaxableAmount && (
                               <div className="flex justify-between items-center text-xs">
                                 <span className="text-slate-500">Taxable Amount</span>
@@ -3824,37 +3855,40 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       );
                     }
 
-                    if (sectionName === "payment" && activeTemplateConfig.payment?.showPaidAmount) {
+                    if (sectionName === "payment") {
                       return (
                         <div 
                           key="payment" 
-                          className="mb-6 p-4 border text-left" 
+                          className="mb-6 p-4 border text-left space-y-3" 
                           style={{ 
                             backgroundColor: activeTemplateConfig.design?.secondaryColor || "#f8fafc", 
                             borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1",
                             borderRadius: `${activeTemplateConfig.design?.cornerRadius || 0}px` 
                           }}
                         >
-                          <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Payment Details</h4>
                           <div className="grid grid-cols-3 gap-2 text-xs">
-                            {activeTemplateConfig.payment.showPaidAmount && (
-                              <div>
-                                <span className="text-slate-500 block">Paid Amount</span>
-                                <span className="font-bold text-slate-900">₹{(currentInvoice.paid || 0).toFixed(2)}</span>
-                              </div>
-                            )}
-                            {activeTemplateConfig.payment.showBalance && (
-                              <div>
-                                <span className="text-slate-500 block">Balance Due</span>
-                                <span className="font-black text-rose-600">₹{(currentInvoice.balance || 0).toFixed(2)}</span>
-                              </div>
-                            )}
-                            {activeTemplateConfig.payment.showPaymentMethod && (
-                              <div>
-                                <span className="text-slate-500 block">Method</span>
-                                <span className="text-slate-700 capitalize">{currentInvoice.paymentMethod || "Cash"}</span>
-                              </div>
-                            )}
+                            <div>
+                              <span className="text-slate-500 block">Amount Paid</span>
+                              <span className="font-bold text-emerald-600">₹{(currentInvoice.paid || 0).toFixed(2)}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block">Balance Due</span>
+                              <span className="font-black text-rose-600">₹{(currentInvoice.balance ?? (currentInvoice.total - currentInvoice.paid)).toFixed(2)}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500 block">Method</span>
+                              <span className="text-slate-700 capitalize">{currentInvoice.paymentMethod || "Cash"}</span>
+                            </div>
+                          </div>
+
+                          <div className="pt-2 border-t border-slate-200 text-[11px] text-slate-650">
+                            <span className="font-bold uppercase text-[10px] text-slate-500 block mb-1">BANKING DETAILS</span>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              <div><span className="text-slate-400 block text-[9px]">Bank Name</span>{currentInvoice.bankName || 'ABC Bank'}</div>
+                              <div><span className="text-slate-400 block text-[9px]">Account Type</span>{currentInvoice.accountType || 'Current'}</div>
+                              <div><span className="text-slate-400 block text-[9px]">Account Number</span>{currentInvoice.accountNumber || 'XXXXXXXX'}</div>
+                              <div><span className="text-slate-400 block text-[9px]">IFSC Code</span>{currentInvoice.ifscCode || 'ABCD0001234'}</div>
+                            </div>
                           </div>
                         </div>
                       );
@@ -3878,24 +3912,23 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       );
                     }
 
-                    if (sectionName === "signature" && activeTemplateConfig.signature?.show) {
+                    if (sectionName === "signature") {
                       return (
                         <div key="signature" className="mb-6 flex flex-col items-end">
                           <div className="text-center w-48 mt-4">
-                            {activeTemplateConfig.signature.imageUrl ? (
+                            {activeTemplateConfig.signature?.imageUrl ? (
                               <img 
                                 src={activeTemplateConfig.signature.imageUrl} 
                                 alt="Signature" 
                                 className="h-10 object-contain mx-auto mb-1.5" 
                               />
-                            ) : (
-                              <div className="h-10 w-full border border-dashed rounded flex items-center justify-center text-[10px] text-slate-400 font-bold mb-1.5" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
-                                [ Signature Seal ]
-                              </div>
-                            )}
-                            <div className="border-t pt-1" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
-                              <p className="font-bold text-xs text-slate-900">{activeTemplateConfig.signature.name || "Authorized Signatory"}</p>
-                              {activeTemplateConfig.signature.designation && (
+                            ) : null}
+                            <div className="border-t pt-1 border-slate-900">
+                              {currentInvoice.authorisedSignature ? (
+                                <p className="font-bold text-xs text-slate-900 mb-0.5">{currentInvoice.authorisedSignature}</p>
+                              ) : null}
+                              <p className="font-bold text-xs text-slate-900 uppercase tracking-wider">Authorised Signature</p>
+                              {activeTemplateConfig.signature?.designation && (
                                 <p className="text-[10px] text-slate-500">{activeTemplateConfig.signature.designation}</p>
                               )}
                             </div>

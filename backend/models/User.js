@@ -22,6 +22,11 @@ const userSchema = new mongoose.Schema({
   sellerGSTIN: { type: String },
   sellerState: { type: String },
   sellerAddress: { type: String },
+  bankName: { type: String, default: "" },
+  accountType: { type: String, default: "Current" },
+  accountNumber: { type: String, default: "" },
+  ifscCode: { type: String, default: "" },
+  authorisedSignature: { type: String, default: "" },
   resetPasswordToken: { type: String },
   resetPasswordExpires: { type: Date },
 });

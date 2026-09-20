@@ -84,6 +84,13 @@ const invoiceSchema = new mongoose.Schema({
   amountPaid: { type: Number, default: 0 },
   balanceDue: { type: Number, required: true },
 
+  // Banking Details
+  bankName: { type: String, default: "" },
+  accountType: { type: String, default: "Current" },
+  accountNumber: { type: String, default: "" },
+  ifscCode: { type: String, default: "" },
+  authorisedSignature: { type: String, default: "" },
+
   // Additional Information
   notes: { type: String, default: "" },
   termsAndConditions: { type: String, default: "" },

@@ -25,6 +25,11 @@ type UserProfile = {
   sellerGSTIN?: string;
   sellerState?: string;
   sellerAddress?: string;
+  bankName?: string;
+  accountType?: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  authorisedSignature?: string;
   pendingDowngradePlan?: "monthly" | "annual" | "lifetime";
 };
 
@@ -58,6 +63,11 @@ const ProfileSettings = () => {
   const [sellerGSTIN, setSellerGSTIN] = useState("");
   const [sellerState, setSellerState] = useState("Tamil Nadu");
   const [sellerAddress, setSellerAddress] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [accountType, setAccountType] = useState("Current");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [ifscCode, setIfscCode] = useState("");
+  const [authorisedSignature, setAuthorisedSignature] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -71,6 +81,11 @@ const ProfileSettings = () => {
       setSellerGSTIN(contextUser.sellerGSTIN || "");
       setSellerState(contextUser.sellerState || "Tamil Nadu");
       setSellerAddress(contextUser.sellerAddress || "");
+      setBankName((contextUser as any).bankName || "");
+      setAccountType((contextUser as any).accountType || "Current");
+      setAccountNumber((contextUser as any).accountNumber || "");
+      setIfscCode((contextUser as any).ifscCode || "");
+      setAuthorisedSignature((contextUser as any).authorisedSignature || "");
       setLoading(false);
     }
   }, [contextUser]);
@@ -141,6 +156,11 @@ const ProfileSettings = () => {
         sellerGSTIN: sellerGSTIN.trim(),
         sellerState: sellerState,
         sellerAddress: sellerAddress.trim(),
+        bankName: bankName.trim(),
+        accountType: accountType,
+        accountNumber: accountNumber.trim(),
+        ifscCode: ifscCode.trim(),
+        authorisedSignature: authorisedSignature.trim(),
       }),
     })
       .then(async (res) => {
@@ -161,6 +181,11 @@ const ProfileSettings = () => {
           setSellerGSTIN(payload.user.sellerGSTIN || "");
           setSellerState(payload.user.sellerState || "Tamil Nadu");
           setSellerAddress(payload.user.sellerAddress || "");
+          setBankName((payload.user as any).bankName || "");
+          setAccountType((payload.user as any).accountType || "Current");
+          setAccountNumber((payload.user as any).accountNumber || "");
+          setIfscCode((payload.user as any).ifscCode || "");
+          setAuthorisedSignature((payload.user as any).authorisedSignature || "");
         }
 
         refreshUser();
@@ -315,6 +340,69 @@ const ProfileSettings = () => {
                     onChange={(e) => setSellerAddress(e.target.value)}
                     className="h-12 rounded-[18px] border-slate-200 bg-slate-50 text-slate-900 focus-visible:ring-0"
                     placeholder="Full seller address"
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* Banking & Signature Details Section */}
+            <div className="mt-8 pt-6 border-t border-slate-100">
+              <h3 className="text-md font-bold tracking-tight text-slate-805 uppercase tracking-[0.12em] text-xs mb-4 flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-slate-900"></span>
+                Banking & Signature Details
+              </h3>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <label className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-505">Bank Name</span>
+                  <Input
+                    value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    className="h-12 rounded-[18px] border-slate-200 bg-slate-50 text-slate-900 focus-visible:ring-0"
+                    placeholder="e.g. ABC Bank"
+                  />
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-505">Account Type</span>
+                  <select
+                    value={accountType}
+                    onChange={(e) => setAccountType(e.target.value)}
+                    className="flex h-12 w-full rounded-[18px] border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 ring-offset-white focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="Current">Current</option>
+                    <option value="Savings">Savings</option>
+                  </select>
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-505">Account Number</span>
+                  <Input
+                    value={accountNumber}
+                    onChange={(e) => setAccountNumber(e.target.value)}
+                    className="h-12 rounded-[18px] border-slate-200 bg-slate-50 text-slate-900 focus-visible:ring-0"
+                    placeholder="Account Number"
+                  />
+                </label>
+
+                <label className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-505">IFSC Code</span>
+                  <Input
+                    value={ifscCode}
+                    onChange={(e) => setIfscCode(e.target.value.toUpperCase())}
+                    className="h-12 rounded-[18px] border-slate-200 bg-slate-50 text-slate-900 focus-visible:ring-0"
+                    placeholder="e.g. ABCD0001234"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-4">
+                <label className="space-y-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-505">Authorised Signatory Name</span>
+                  <Input
+                    value={authorisedSignature}
+                    onChange={(e) => setAuthorisedSignature(e.target.value)}
+                    className="h-12 rounded-[18px] border-slate-200 bg-slate-50 text-slate-900 focus-visible:ring-0"
+                    placeholder="Authorised Signatory Name / Title"
                   />
                 </label>
               </div>

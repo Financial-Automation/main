@@ -183,11 +183,11 @@ const Bookkeeping = () => {
     useEffect(() => {
         let filtered = entries;
 
-        // Date Range Filter
+        // Date Range Filter with startOfDay / endOfDay boundaries
         if (dateRange.from && dateRange.to) {
             filtered = filtered.filter(entry => {
                 const entryDate = new Date(entry.date);
-                return entryDate >= dateRange.from! && entryDate <= dateRange.to!;
+                return entryDate >= startOfDay(dateRange.from!) && entryDate <= endOfDay(dateRange.to!);
             });
         }
 
@@ -205,11 +205,11 @@ const Bookkeeping = () => {
     // Financial Summary (based on filtered entries)
     useEffect(() => {
         const totalIncome = filteredEntries
-            .filter(entry => entry.type === 'Income')
+            .filter(entry => entry.type === 'Income' || entry.type === 'income')
             .reduce((sum, entry) => sum + entry.amount, 0);
 
         const totalExpenses = filteredEntries
-            .filter(entry => entry.type === 'Expenses')
+            .filter(entry => entry.type === 'Expenses' || entry.type === 'expense' || entry.type === 'Expense')
             .reduce((sum, entry) => sum + entry.amount, 0);
 
         const netBalance = totalIncome - totalExpenses;
@@ -271,22 +271,27 @@ const Bookkeeping = () => {
     const groupedEntries = getGroupedEntries();
     const sortedGroupKeys = Object.keys(groupedEntries).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
 
-    const allCategories = [...DEFAULT_CATEGORIES, ...customCategories.map(c => c.name)];
+    const uniqueCategories = Array.from(new Set(entries.map(e => e.category).filter(Boolean)));
+    const allCategories = Array.from(new Set([...DEFAULT_CATEGORIES, ...customCategories.map(c => c.name), ...uniqueCategories]));
+
     const INCOME_COLORS = ['#10b981', '#06b6d4', '#3b82f6', '#0284c7', '#14b8a6', '#22c55e', '#8b5cf6', '#6366f1', '#4ade80', '#059669'];
     const EXPENSE_COLORS = ['#ef4444', '#f97316', '#ec4899', '#f59e0b', '#e11d48', '#be185d', '#d97706', '#991b1b', '#c2410c', '#ff8a65'];
     const CHART_COLORS = [...INCOME_COLORS, ...EXPENSE_COLORS];
 
+    const isExpenseType = (type: string) => type === 'Expenses' || type === 'expense' || type === 'Expense' || type === 'expenses';
+    const isIncomeType = (type: string) => type === 'Income' || type === 'income';
+
     const incomeDistributionData = allCategories.map(cat => ({
         name: cat,
         value: filteredEntries
-            .filter(e => e.category === cat && e.type === 'Income')
+            .filter(e => e.category === cat && isIncomeType(e.type))
             .reduce((sum, e) => sum + e.amount, 0)
     })).filter(d => d.value > 0);
 
     const expenseDistributionData = allCategories.map(cat => ({
         name: cat,
         value: filteredEntries
-            .filter(e => e.category === cat && e.type === 'Expenses')
+            .filter(e => e.category === cat && isExpenseType(e.type))
             .reduce((sum, e) => sum + e.amount, 0)
     })).filter(d => d.value > 0);
 
@@ -935,7 +940,7 @@ const Bookkeeping = () => {
                                         </div>
 
                                         <div className="xl:col-span-1 rounded-[24px] border border-white/55 bg-white/42 p-6 flex flex-col items-center justify-center relative min-h-[400px] shadow-sm">
-                                            <h4 className="absolute top-6 left-6 text-lg font-bold text-slate-900">Expense Distribution</h4>
+                                            <h4 className="absolute top-6 left-6 text-lg font-bold text-slate-900">Expense Categorisation</h4>
 
                                             {expenseDistributionData.length > 0 ? (
                                                 <div className="w-full h-[300px] mt-8">
@@ -955,7 +960,11 @@ const Bookkeeping = () => {
                                                                 ))}
                                                             </Pie>
                                                             <Tooltip
-                                                                formatter={(value: number) => `₹${value.toLocaleString()}`}
+                                                                formatter={(value: number, name: string) => {
+                                                                    const total = expenseDistributionData.reduce((sum, e) => sum + e.value, 0);
+                                                                    const pct = total > 0 ? ((value / total) * 100).toFixed(1) : '0';
+                                                                    return [`₹${value.toLocaleString()} (${pct}%)`, name];
+                                                                }}
                                                                 contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', borderRadius: '12px', color: '#0f172a' }}
                                                                 itemStyle={{ color: '#0f172a' }}
                                                             />
@@ -966,9 +975,9 @@ const Bookkeeping = () => {
                                             ) : (
                                                 <div className="flex flex-col items-center text-slate-400">
                                                     <div className="p-4 rounded-full bg-white/50 mb-4">
-                                                        <BarChart3 className="h-8 w-8" />
+                                                        <BarChart3 className="h-8 w-8 text-slate-400" />
                                                     </div>
-                                                    <p>No expense data to display</p>
+                                                    <p className="font-medium text-slate-600">No expense data available</p>
                                                 </div>
                                             )}
                                         </div>

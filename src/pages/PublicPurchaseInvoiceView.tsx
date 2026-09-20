@@ -396,15 +396,31 @@ const PublicPurchaseInvoiceView = () => {
                                     </div>
                                 </div>
                             </div>
+
+                            {/* Authorised Signature & Banking Details */}
+                            <div className="mt-8 pt-6 border-t border-white/10 flex flex-col md:flex-row justify-between items-end gap-6 text-left">
+                                <div className="text-xs text-slate-400 space-y-1">
+                                    <p className="font-bold uppercase tracking-wider text-amber-400 text-xs mb-1">Banking Details</p>
+                                    <p><span className="text-slate-500 font-medium">Company:</span> Shree Andal AI Software Solutions (OPC) Pvt Ltd</p>
+                                    {invoice.gstin && <p><span className="text-slate-500 font-medium">GSTIN:</span> {invoice.gstin}</p>}
+                                </div>
+                                <div className="text-right">
+                                    <div className="w-48 text-center pt-2">
+                                        <div className="border-t border-white/20 pt-1">
+                                            <p className="text-xs font-bold text-white uppercase tracking-wider">Authorised Signature</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         {/* Footer */}
                         <div className="px-8 lg:px-12 py-8 bg-black/20 border-t border-white/5 text-center">
                             <p className="text-slate-500 text-sm">
-                                This is a digitally generated purchase invoice. No signature required.
+                                This is a digitally generated purchase invoice.
                             </p>
-                            <p className="text-amber-500/40 text-[10px] mt-2 tracking-widest font-bold uppercase">
-                                Powered by SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED ✨
+                            <p className="text-amber-500/60 text-[11px] mt-2 tracking-widest font-bold uppercase">
+                                Shree Andal AI Software Solutions (OPC) Pvt Ltd
                             </p>
                         </div>
                     </div>

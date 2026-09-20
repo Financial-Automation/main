@@ -74,14 +74,15 @@ const INITIAL_CONFIG = {
     }
   },
   items: {
-    columns: ["item", "description", "hsn", "quantity", "rate", "tax", "amount"],
+    columns: ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"],
     labels: {
       item: "Item",
+      sku: "Item Code",
       description: "Description",
-      sku: "SKU",
       hsn: "HSN/SAC",
       quantity: "Qty",
       rate: "Rate",
+      discount: "Discount",
       tax: "Tax",
       amount: "Amount"
     }

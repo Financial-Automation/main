@@ -43,6 +43,12 @@ interface InvoiceData {
     businessEmail: string;
     businessPhone?: string;
     businessGSTIN?: string;
+    businessAddress?: string;
+    bankName?: string;
+    accountType?: string;
+    accountNumber?: string;
+    ifscCode?: string;
+    authorisedSignature?: string;
     transactionType?: "B2B" | "B2C";
     invoiceSize?: "A4" | "QUARTER_A4" | "A6";
     items: InvoiceItem[];
@@ -138,8 +144,8 @@ const PublicInvoiceView = () => {
             labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
         },
         items: {
-            columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
-            labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+            columns: ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"],
+            labels: { item: "Item", sku: "Item Code", description: "Description", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", discount: "Discount", tax: "Tax", amount: "Amount" }
         },
         tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
         payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
@@ -292,9 +298,10 @@ const PublicInvoiceView = () => {
                                 )}
                                 <p className="mt-1 text-sm opacity-90 font-medium">
                                     {[
+                                        invoice.businessAddress ? invoice.businessAddress : '',
                                         header.showEmail && invoice.businessEmail ? invoice.businessEmail : '',
                                         header.showPhone && invoice.businessPhone ? invoice.businessPhone : '',
-                                        seller.showGSTIN && invoice.businessGSTIN ? `GSTIN: ${invoice.businessGSTIN}` : ''
+                                        invoice.businessGSTIN ? `GSTIN: ${invoice.businessGSTIN}` : ''
                                     ].filter(Boolean).join("  |  ")}
                                 </p>
                             </div>
@@ -311,18 +318,6 @@ const PublicInvoiceView = () => {
                     {/* Details Section */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-8 border-b border-slate-200 pb-6">
                         <div className="space-y-4">
-                            {seller.showName && (
-                                <div>
-                                    <h2 className="text-xs font-bold uppercase tracking-wider mb-2 border-l-2 pl-2" style={{ color: primaryColor, borderColor: primaryColor }}>From</h2>
-                                    <div className="space-y-0.5 text-sm">
-                                        <p className="font-bold text-slate-950">{invoice.businessName}</p>
-                                        {seller.showEmail && invoice.businessEmail && <p className="text-slate-650">{invoice.businessEmail}</p>}
-                                        {seller.showPhone && invoice.businessPhone && <p className="text-slate-650">Ph: {invoice.businessPhone}</p>}
-                                        {seller.showGSTIN && invoice.businessGSTIN && <p className="text-slate-650">GSTIN: {invoice.businessGSTIN}</p>}
-                                    </div>
-                                </div>
-                            )}
-
                             {customer.showName && (
                                 <div>
                                     <h2 className="text-xs font-bold uppercase tracking-wider mb-2 border-l-2 pl-2" style={{ color: primaryColor, borderColor: primaryColor }}>Bill To</h2>
@@ -373,7 +368,7 @@ const PublicInvoiceView = () => {
                             <thead>
                                 <tr className="border-b-2 border-slate-200 text-left bg-slate-50">
                                     {itemsCfg.columns.map((colName: string) => {
-                                        const alignment = (colName === "rate" || colName === "amount") ? "text-right" : (colName === "quantity" || colName === "tax") ? "text-center" : "text-left";
+                                        const alignment = (colName === "rate" || colName === "discount" || colName === "amount") ? "text-right" : (colName === "quantity" || colName === "tax") ? "text-center" : "text-left";
                                         const label = itemsCfg.labels?.[colName] || colName.toUpperCase();
                                         return (
                                             <th key={colName} className={`py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 ${alignment}`}>
@@ -387,19 +382,20 @@ const PublicInvoiceView = () => {
                                 {invoice.items.map((item, idx) => (
                                     <tr key={idx} className="text-sm">
                                         {itemsCfg.columns.map((colName: string) => {
-                                            const alignment = (colName === "rate" || colName === "amount") ? "text-right" : (colName === "quantity" || colName === "tax") ? "text-center" : "text-left";
+                                            const alignment = (colName === "rate" || colName === "discount" || colName === "amount") ? "text-right" : (colName === "quantity" || colName === "tax") ? "text-center" : "text-left";
                                             return (
                                                 <td key={colName} className={`py-4 px-2 ${alignment}`}>
                                                     {colName === "item" && (
                                                         <div>
                                                             <p className="text-slate-950 font-semibold">{item.productName}</p>
-                                                            {item.description && <p className="text-slate-400 text-xs mt-0.5">{item.description}</p>}
                                                         </div>
                                                     )}
-                                                    {colName === "sku" && <span className="text-slate-650">{item.description || "-"}</span>}
+                                                    {colName === "sku" && <span className="text-slate-650">{item.itemCode || item.sku || "-"}</span>}
+                                                    {colName === "description" && <span className="text-slate-650">{item.description || "-"}</span>}
                                                     {colName === "hsn" && <span className="text-slate-650">{item.hsnCode || item.sacCode || "-"}</span>}
                                                     {colName === "quantity" && <span className="text-slate-700">{item.quantity} {item.unit || "Pcs"}</span>}
                                                     {colName === "rate" && <span className="text-slate-700">₹{(item.unitPrice || 0).toFixed(2)}</span>}
+                                                    {colName === "discount" && <span className="text-slate-700">{item.discount ? `${item.discount}%` : (item.discountAmount ? `₹${item.discountAmount.toFixed(2)}` : "0%")}</span>}
                                                     {colName === "tax" && <span className="text-slate-700">{item.taxRate || 0}%</span>}
                                                     {colName === "amount" && <span className="text-slate-950 font-bold">₹{item.total.toFixed(2)}</span>}
                                                 </td>
@@ -492,42 +488,44 @@ const PublicInvoiceView = () => {
                                 </span>
                             </div>
 
-                            {payment.showPaidAmount && invoice.amountPaid && invoice.amountPaid > 0 && (
-                                <div className="flex justify-between text-slate-600 text-xs pt-2">
-                                    <span>Amount Paid</span>
-                                    <span className="text-emerald-600 font-bold">₹{invoice.amountPaid.toFixed(2)}</span>
-                                </div>
-                            )}
+                            <div className="flex justify-between text-slate-600 text-xs pt-2">
+                                <span>Amount Paid</span>
+                                <span className="text-emerald-600 font-bold">₹{(invoice.amountPaid || 0).toFixed(2)}</span>
+                            </div>
 
-                            {payment.showBalance && invoice.balanceDue && invoice.balanceDue > 0 && (
-                                <div className="flex justify-between text-slate-600 text-xs pt-1">
-                                    <span>Balance Due</span>
-                                    <span className="text-rose-600 font-bold">₹{invoice.balanceDue.toFixed(2)}</span>
-                                </div>
-                            )}
+                            <div className="flex justify-between text-slate-600 text-xs pt-1">
+                                <span>Balance Due</span>
+                                <span className="text-rose-600 font-bold">₹{(invoice.balanceDue ?? (invoice.grandTotal - (invoice.amountPaid || 0))).toFixed(2)}</span>
+                            </div>
                         </div>
                     </div>
 
-                    {/* Authorized Signatory Block */}
-                    {signature.show && (signature.name || signature.imageUrl) && (
-                        <div className="pt-6 flex flex-col items-end">
-                            <div className="w-48 text-center border-t border-slate-200 pt-2">
-                                {signature.imageUrl && (
-                                    <img src={signature.imageUrl} alt="Signature" className="h-10 mx-auto object-contain mb-1" />
-                                )}
-                                <p className="text-xs font-bold text-slate-900">{signature.name || "Authorized Signatory"}</p>
-                                {signature.designation && <p className="text-[10px] text-slate-500">{signature.designation}</p>}
+                    {/* Banking Details & Authorized Signatory Block */}
+                    <div className="pt-6 flex flex-col md:flex-row justify-between items-end gap-6 border-t border-slate-200">
+                        <div className="text-left space-y-1 text-xs text-slate-650">
+                            <p className="font-bold text-slate-900 uppercase tracking-wider text-xs mb-1">Banking Details</p>
+                            <p><span className="font-semibold text-slate-500">Bank Name:</span> {invoice.bankName || "ABC Bank"}</p>
+                            <p><span className="font-semibold text-slate-500">Account Type:</span> {invoice.accountType || "Current"}</p>
+                            <p><span className="font-semibold text-slate-500">Account Number:</span> {invoice.accountNumber || "XXXXXXXX"}</p>
+                            <p><span className="font-semibold text-slate-500">IFSC Code:</span> {invoice.ifscCode || "ABCD0001234"}</p>
+                        </div>
+                        <div className="w-48 text-center pt-2">
+                            {invoice.authorisedSignature ? (
+                                <p className="text-xs font-bold text-slate-900 mb-1">{invoice.authorisedSignature}</p>
+                            ) : null}
+                            <div className="border-t border-slate-900 pt-1">
+                                <p className="text-xs font-bold text-slate-900 uppercase tracking-wider">Authorised Signature</p>
                             </div>
                         </div>
-                    )}
+                    </div>
 
                     {/* Footer Info */}
                     <div className="px-8 py-8 bg-slate-50 border-t border-slate-200 text-center">
                         <p className="text-slate-500 text-xs">
-                            {footer.show && footer.text ? footer.text : "This is a digitally generated invoice. No signature required."}
+                            {footer.show && footer.text ? footer.text : "This is a digitally generated invoice."}
                         </p>
-                        <p className="text-slate-400 text-[9px] mt-2 tracking-widest font-bold uppercase">
-                            Powered by FinSmart Financial Automation ✨
+                        <p className="text-slate-700 text-[10px] mt-2 tracking-widest font-bold uppercase">
+                            Shree Andal AI Software Solutions (OPC) Pvt Ltd
                         </p>
                     </div>
                 </div>
