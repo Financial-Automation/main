@@ -137,10 +137,11 @@ jobs:
 
           echo "Restarting backend..."
           export PM2_HOME="/home/ubuntu/.pm2"
+          export PATH="$PATH:/home/ubuntu/.nvm/versions/node/$(ls /home/ubuntu/.nvm/versions/node 2>/dev/null | tail -n 1)/bin:/usr/local/bin:/home/ubuntu/.npm-global/bin:/usr/bin"
 
           cd "$APP_DIR/backend"
           pm2 startOrRestart ecosystem.config.cjs --update-env || pm2 restart financial-backend --update-env || pm2 start server.js --name financial-backend
-          pm2 save
+          pm2 save || true
 
           echo "Backend status:"
           pm2 describe financial-backend | grep -E "status|script path|exec cwd"
