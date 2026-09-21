@@ -14,7 +14,8 @@ import {
   Zap,
   Hexagon,
   Eye,
-  EyeOff
+  EyeOff,
+  AlertCircle
 } from "lucide-react";
 import { VoiceButton } from "@/components/ui/VoiceButton";
 import { API_ENDPOINTS, apiRequest } from "@/lib/api";
@@ -332,6 +333,7 @@ const Auth = () => {
   const [password, setPassword] = useState("");
   const [storePassword, setStorePassword] = useState("");
   const [name, setName] = useState("");
+  const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [showStorePassword, setShowStorePassword] = useState(false);
@@ -343,6 +345,7 @@ const Auth = () => {
 
     if (tab === "signup" || tab === "signin") {
       setView(tab);
+      setError("");
       if (tab === "signup") setSignupStep(1);
     }
     if (plan && plan in subscriptionPlans) {
@@ -377,17 +380,23 @@ const Auth = () => {
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
-      return toast({ variant: "destructive", title: "Required", description: "Email and password are required." });
+    setError("");
+    const cleanedEmail = email.trim().toLowerCase();
+
+    if (!cleanedEmail || !password) {
+      const msg = "Email and password are required.";
+      setError(msg);
+      return toast({ variant: "destructive", title: "Required", description: msg });
     }
+
     setLoading(true);
     try {
       const res = await apiRequest(API_ENDPOINTS.SIGNIN, {
         method: "POST",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: cleanedEmail, password }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message);
+      if (!res.ok) throw new Error(data.message || "Invalid email or password.");
 
       if (data.user?.subscriptionStatus === "expired") {
         toast({
@@ -406,10 +415,12 @@ const Auth = () => {
       await refreshUser(data.user);
       setTimeout(() => navigate("/dashboard"), 300);
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : "Invalid email or password.";
+      setError(errMsg);
       toast({
         variant: "destructive",
         title: "Sign In Failed",
-        description: err instanceof Error ? err.message : "Invalid credentials."
+        description: errMsg
       });
     } finally {
       setLoading(false);
@@ -418,8 +429,13 @@ const Auth = () => {
 
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password || !storePassword) {
-      return toast({ variant: "destructive", title: "Required", description: "Work Email, Admin password, and Store password are required." });
+    setError("");
+    const cleanedEmail = email.trim().toLowerCase();
+
+    if (!cleanedEmail || !password || !storePassword) {
+      const msg = "Work Email, Admin password, and Store password are required.";
+      setError(msg);
+      return toast({ variant: "destructive", title: "Required", description: msg });
     }
     setPaymentLoading(true);
 
@@ -428,10 +444,10 @@ const Auth = () => {
         setLoading(true);
         const trialRes = await apiRequest(API_ENDPOINTS.SIGNUP_TRIAL, {
           method: "POST",
-          body: JSON.stringify({ email, password, storePassword, name: name || email.split("@")[0], role: "admin" }),
+          body: JSON.stringify({ email: cleanedEmail, password, storePassword, name: name || cleanedEmail.split("@")[0], role: "admin" }),
         });
         const trialData = await trialRes.json();
-        if (!trialRes.ok) throw new Error(trialData.message);
+        if (!trialRes.ok) throw new Error(trialData.message || "Sign up failed.");
 
         clearInvoiceCache();
         localStorage.setItem("token", trialData.token);
@@ -443,10 +459,10 @@ const Auth = () => {
 
       const orderRes = await apiRequest(API_ENDPOINTS.CREATE_ORDER, {
         method: "POST",
-        body: JSON.stringify({ email, plan: selectedPlan }),
+        body: JSON.stringify({ email: cleanedEmail, plan: selectedPlan }),
       });
       const orderData = await orderRes.json();
-      if (!orderRes.ok) throw new Error(orderData.message);
+      if (!orderRes.ok) throw new Error(orderData.message || "Failed to create order.");
 
       const options: RazorpayOptions = {
         key: orderData.key,
@@ -460,29 +476,33 @@ const Auth = () => {
             setLoading(true);
             const verifyRes = await apiRequest(API_ENDPOINTS.VERIFY_PAYMENT, {
               method: "POST",
-              body: JSON.stringify({ ...response, email, password, storePassword, plan: selectedPlan, name: name || email.split('@')[0], role: "admin" }),
+              body: JSON.stringify({ ...response, email: cleanedEmail, password, storePassword, plan: selectedPlan, name: name || cleanedEmail.split('@')[0], role: "admin" }),
             });
             const verifyData = await verifyRes.json();
-            if (!verifyRes.ok) throw new Error(verifyData.message);
+            if (!verifyRes.ok) throw new Error(verifyData.message || "Payment verification failed.");
 
             clearInvoiceCache();
             localStorage.setItem("token", verifyData.token);
             await refreshUser(verifyData.user);
             setTimeout(() => navigate("/dashboard"), 300);
           } catch (err) {
-            toast({ variant: "destructive", title: "Payment Error", description: err instanceof Error ? err.message : "Verification failed" });
+            const errMsg = err instanceof Error ? err.message : "Verification failed";
+            setError(errMsg);
+            toast({ variant: "destructive", title: "Payment Error", description: errMsg });
           } finally {
             setLoading(false);
             setPaymentLoading(false);
           }
         },
         modal: { ondismiss: () => setPaymentLoading(false) },
-        prefill: { email, name: name || email.split('@')[0] },
+        prefill: { email: cleanedEmail, name: name || cleanedEmail.split('@')[0] },
         theme: { color: "#0f172a" },
       };
       new window.Razorpay(options).open();
     } catch (err) {
-      toast({ variant: "destructive", title: "Error", description: err instanceof Error ? err.message : "An error occurred." });
+      const errMsg = err instanceof Error ? err.message : "An error occurred.";
+      setError(errMsg);
+      toast({ variant: "destructive", title: "Error", description: errMsg });
       setPaymentLoading(false);
       setLoading(false);
     }
@@ -634,17 +654,23 @@ const Auth = () => {
                     {view === "signin" ? (
                       /* --- SIGN IN FORM --- */
                       <div className="flex flex-col h-full">
-                        <div className="mb-10">
+                        <div className="mb-8">
                           <h1 className="text-[30px] font-bold text-[#0f172a] tracking-tight mb-2">Welcome back</h1>
                           <p className="text-[15px] text-[#64748b] font-medium">Sign in to your account to manage your business ledgers.</p>
                         </div>
+                        {error && (
+                          <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3 text-red-600 text-sm font-medium">
+                            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-red-500" />
+                            <span>{error}</span>
+                          </div>
+                        )}
                         <form onSubmit={handleSignIn} className="space-y-5">
                           <div>
                             <label className="block text-[13px] font-bold text-[#333] mb-2 uppercase tracking-wide">Work Email</label>
                             <div className="relative flex items-center">
                               <Mail className="absolute left-3.5 w-[18px] h-[18px] text-[#94a3b8]" />
-                              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="name@company.com" required />
-                              <div className="absolute right-2"><VoiceButton onTranscript={setEmail} onClear={() => setEmail("")} size="sm" /></div>
+                              <input type="email" value={email} onChange={(e) => { setEmail(e.target.value); setError(""); }} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="name@company.com" required />
+                              <div className="absolute right-2"><VoiceButton onTranscript={(txt) => { setEmail(txt); setError(""); }} onClear={() => { setEmail(""); setError(""); }} size="sm" /></div>
                             </div>
                           </div>
                           <div>
@@ -654,7 +680,7 @@ const Auth = () => {
                             </div>
                             <div className="relative flex items-center">
                               <Lock className="absolute left-3.5 w-[18px] h-[18px] text-[#94a3b8]" />
-                              <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="••••••••" required />
+                              <input type={showPassword ? "text" : "password"} value={password} onChange={(e) => { setPassword(e.target.value); setError(""); }} className="w-full h-12 pl-10 pr-10 bg-white border border-[#cbd5e1] rounded-[10px] text-[15px] focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/10 outline-none transition-all placeholder:text-[#94a3b8]" placeholder="••••••••" required />
                               <button
                                 type="button"
                                 onClick={() => setShowPassword(!showPassword)}
@@ -673,13 +699,19 @@ const Auth = () => {
                     ) : (
                       /* --- SIGN UP: STEP 2 (ACCOUNT DETAILS) --- */
                       <div className="flex flex-col h-full">
-                        <button onClick={() => setSignupStep(1)} className="text-[13px] font-semibold text-[#64748b] hover:text-[#0f172a] flex items-center gap-1.5 mb-8 transition-colors w-fit group">
+                        <button onClick={() => { setSignupStep(1); setError(""); }} className="text-[13px] font-semibold text-[#64748b] hover:text-[#0f172a] flex items-center gap-1.5 mb-8 transition-colors w-fit group">
                           <ArrowRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Back to pricing
                         </button>
-                        <div className="mb-10">
+                        <div className="mb-8">
                           <h1 className="text-[30px] font-bold text-[#0f172a] tracking-tight mb-2">Create your account</h1>
                           <p className="text-[15px] text-[#64748b] font-medium">Complete your <span className="font-bold text-[#0f172a]">{subscriptionPlans[selectedPlan].name}</span> plan setup.</p>
                         </div>
+                        {error && (
+                          <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3 text-red-600 text-sm font-medium">
+                            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5 text-red-500" />
+                            <span>{error}</span>
+                          </div>
+                        )}
                         <form onSubmit={handleSignUp} className="space-y-5">
                           <div>
                             <label className="block text-[13px] font-bold text-[#333] mb-2 uppercase tracking-wide">Work Email</label>

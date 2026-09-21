@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
-import { API_ENDPOINTS } from "@/lib/api";
+import { API_ENDPOINTS, apiRequest } from "@/lib/api";
 
 export type UserProfile = {
   id: string;
@@ -67,19 +67,20 @@ export const SubscriptionProvider: React.FC<{ children: React.ReactNode }> = ({ 
     }
 
     try {
-      const res = await fetch(API_ENDPOINTS.USER, {
+      const res = await apiRequest(API_ENDPOINTS.USER, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (res.ok) {
         const data = await res.json();
         setUser(data);
         return data;
-      } else {
-        // Token might be invalid
+      } else if (res.status === 401 || res.status === 403) {
+        // Token is invalid/expired
         localStorage.removeItem("token");
         setUser(null);
         return null;
       }
+      return null;
     } catch (err) {
       console.error("Error fetching user profile in SubscriptionProvider:", err);
       return null;

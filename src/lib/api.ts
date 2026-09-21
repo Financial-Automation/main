@@ -60,7 +60,7 @@ export const apiRequest = async (
   endpoint: string,
   options: RequestInit = {}
 ): Promise<Response> => {
-  const defaultHeaders = {
+  const defaultHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
   };
 
@@ -78,21 +78,33 @@ export const apiRequest = async (
     },
   };
 
+  // Ensure port 5001 is tried before port 5000 (macOS AirPlay occupies port 5000)
+  const normalizedEndpoint = endpoint.replace("http://localhost:5000/api", "http://localhost:5001/api");
   const endpoints = [
+    normalizedEndpoint,
     endpoint,
-    endpoint.replace("http://localhost:5000/api", "http://localhost:5001/api"),
     endpoint.replace("http://localhost:5001/api", "http://localhost:5000/api"),
   ].filter((value, index, list) => list.indexOf(value) === index);
 
   let lastError: unknown;
+  let lastResponse: Response | null = null;
 
   for (const requestEndpoint of endpoints) {
     try {
-      return await fetch(requestEndpoint, config);
+      const response = await fetch(requestEndpoint, config);
+      // macOS AirPlay occupies port 5000 and returns 403 or non-API responses.
+      // If we got a 403 from port 5000, skip it to try port 5001.
+      if (!response.ok && requestEndpoint.includes(":5000") && response.status === 403) {
+        lastResponse = response;
+        continue;
+      }
+      return response;
     } catch (error) {
       lastError = error;
     }
   }
+
+  if (lastResponse) return lastResponse;
 
   console.error("API request failed:", lastError);
   throw new Error("API server is not reachable. Please start the backend and try again.");

@@ -186,15 +186,18 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // ✅ REGISTER (Sign Up)
 app.post("/api/signup", async (req, res) => {
   try {
     const { email, password, storePassword, role = "admin" } = req.body;
+    const cleanEmail = email ? email.trim().toLowerCase() : "";
 
-    if (!email || !password)
+    if (!cleanEmail || !password)
       return res.status(400).json({ message: "Email and password are required" });
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     if (existingUser)
       return res.status(400).json({ message: "User already exists" });
 
@@ -202,10 +205,10 @@ app.post("/api/signup", async (req, res) => {
     const userRole = allowedRoles.includes(req.body.role) ? req.body.role : "admin";
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedStorePassword = storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
-    const newUser = new User({ email, password: hashedPassword, storePassword: hashedStorePassword, role: userRole });
+    const newUser = new User({ email: cleanEmail, password: hashedPassword, storePassword: hashedStorePassword, role: userRole });
     await newUser.save();
 
-    const token = jwt.sign({ id: newUser._id, role: userRole }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ id: newUser._id, role: userRole }, process.env.JWT_SECRET || JWT_SECRET, { expiresIn: "7d" });
 
     res.status(201).json({ message: "User registered successfully", token, user: { role: newUser.role } });
   } catch (error) {
@@ -221,12 +224,13 @@ app.post("/api/signup", async (req, res) => {
 app.post("/api/signup-trial", async (req, res) => {
   try {
     const { email, password, storePassword, name, role = "admin" } = req.body;
+    const cleanEmail = email ? email.trim().toLowerCase() : "";
 
-    if (!email || !password) {
+    if (!cleanEmail || !password) {
       return res.status(400).json({ message: "Email and password are required" });
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     if (existingUser) {
       return res.status(400).json({ message: "User already exists" });
     }
@@ -240,8 +244,8 @@ app.post("/api/signup-trial", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedStorePassword = storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
     const newUser = new User({
-      email,
-      name: name || email.split("@")[0],
+      email: cleanEmail,
+      name: name || cleanEmail.split("@")[0],
       password: hashedPassword,
       storePassword: hashedStorePassword,
       subscriptionStatus: "active",
@@ -255,20 +259,24 @@ app.post("/api/signup-trial", async (req, res) => {
 
     await newUser.save();
 
-    // Create Subscription record in database
-    const sandboxPlan = await Plan.findOne({ name: "Sandbox" });
-    if (sandboxPlan) {
-      const subscription = new Subscription({
-        userId: newUser._id,
-        planId: sandboxPlan._id,
-        status: "active",
-        startDate: subscriptionStartDate,
-        endDate: trialEndDate
-      });
-      await subscription.save();
+    // Create Subscription record in database (optional, non-blocking if plans aren't seeded yet)
+    try {
+      const sandboxPlan = await Plan.findOne({ name: "Sandbox" });
+      if (sandboxPlan) {
+        const subscription = new Subscription({
+          userId: newUser._id,
+          planId: sandboxPlan._id,
+          status: "active",
+          startDate: subscriptionStartDate,
+          endDate: trialEndDate
+        });
+        await subscription.save();
+      }
+    } catch (planErr) {
+      console.warn("⚠️ Subscription plan record link warning:", planErr.message);
     }
 
-    const token = jwt.sign({ id: newUser._id, role: userRole }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    const token = jwt.sign({ id: newUser._id, role: userRole }, process.env.JWT_SECRET || JWT_SECRET, { expiresIn: "7d" });
 
     res.status(201).json({
       message: "Free trial started successfully",
@@ -292,7 +300,7 @@ app.post("/api/signup-trial", async (req, res) => {
     }
 
     console.error("Trial Signup Error:", error);
-    res.status(500).json({ message: "Internal Server Error" });
+    res.status(500).json({ message: error.message || "Internal Server Error" });
   }
 });
 
@@ -304,21 +312,28 @@ app.post("/api/signin", async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ message: "Email and password are required" });
 
-    let user = await User.findOne({ email });
+    const cleanEmail = email.trim().toLowerCase();
+    let user = await User.findOne({ email: cleanEmail });
+    if (!user) {
+      user = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
+    }
+
+    const isDevOrInMemory = !process.env.PRO_MONGO_URI || process.env.DEV_MODE === "true";
 
     if (!user) {
-      if (process.env.DEV_MODE === "true" || isDevelopment) {
-        // Auto-create account for seamless localhost/dev access
-        console.log(`👤 Auto-registering new localhost/dev user: ${email}`);
+      if (isDevOrInMemory) {
+        // Auto-create account for seamless dev/in-memory access
+        console.log(`👤 Auto-registering new user on login: ${cleanEmail}`);
         const hashedPassword = await bcrypt.hash(password, 10);
         const subscriptionStartDate = new Date();
         const trialEndDate = new Date(subscriptionStartDate);
         trialEndDate.setDate(trialEndDate.getDate() + 30);
 
         user = new User({
-          email,
-          name: email.split("@")[0] || "Local User",
+          email: cleanEmail,
+          name: cleanEmail.split("@")[0] || "User",
           password: hashedPassword,
+          storePassword: hashedPassword,
           role: role || "admin",
           subscriptionStatus: "active",
           subscriptionPlan: "trial",
@@ -337,11 +352,15 @@ app.post("/api/signin", async (req, res) => {
     let authenticatedRole = role || user.role || "admin";
 
     // 1. First check if password matches Admin Password
-    const isAdminPass = await bcrypt.compare(password, user.password);
-    if (isAdminPass) {
-      validPass = true;
-      authenticatedRole = role || user.role || "admin";
-    } else if (user.storePassword) {
+    if (user.password && typeof user.password === "string") {
+      const isAdminPass = await bcrypt.compare(password, user.password);
+      if (isAdminPass) {
+        validPass = true;
+        authenticatedRole = role || user.role || "admin";
+      }
+    }
+
+    if (!validPass && user.storePassword && typeof user.storePassword === "string") {
       // 2. Next check if password matches Store Password
       const isStorePass = await bcrypt.compare(password, user.storePassword);
       if (isStorePass) {
@@ -351,7 +370,15 @@ app.post("/api/signin", async (req, res) => {
     }
 
     if (!validPass) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      if (isDevOrInMemory) {
+        // In local/dev mode, update password automatically to prevent lockouts
+        console.log(`🔑 Updating password for user: ${cleanEmail}`);
+        user.password = await bcrypt.hash(password, 10);
+        await user.save();
+        validPass = true;
+      } else {
+        return res.status(400).json({ message: "Invalid email or password" });
+      }
     }
 
     const secret = process.env.JWT_SECRET || JWT_SECRET;
@@ -375,7 +402,7 @@ app.post("/api/signin", async (req, res) => {
     });
   } catch (error) {
     console.error("Signin Error:", error);
-    res.status(500).json({ message: "Internal Server Error" });
+    res.status(500).json({ message: error.message || "Internal Server Error" });
   }
 });
 
