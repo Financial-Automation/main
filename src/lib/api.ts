@@ -17,13 +17,12 @@ export const API_BASE_URL = getApiUrl();
 
 // API endpoints
 export const API_ENDPOINTS = {
-  // Auth & Leads endpoints
+  // Auth endpoints
   SIGNUP: `${API_BASE_URL}/signup`,
   SIGNUP_TRIAL: `${API_BASE_URL}/signup-trial`,
   SIGNIN: `${API_BASE_URL}/signin`,
   USER: `${API_BASE_URL}/user`,
   UPDATE_PROFILE: `${API_BASE_URL}/user`,
-  LEADS: `${API_BASE_URL}/leads`,
 
   // Payment endpoints
   CREATE_ORDER: `${API_BASE_URL}/create-order`,
@@ -92,22 +91,68 @@ export const apiRequest = async (
   for (const requestEndpoint of endpoints) {
     try {
       const response = await fetch(requestEndpoint, config);
+
       // macOS AirPlay occupies port 5000 and returns 403 or non-API responses.
       // If we got a 403 from port 5000, skip it to try port 5001.
       if (!response.ok && requestEndpoint.includes(":5000") && response.status === 403) {
         lastResponse = response;
         continue;
       }
+
+      // Safeguard against HTML responses (e.g. Nginx 502/504 Bad Gateway, 404 HTML, or SPA fallback)
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        const text = await response.clone().text();
+        if (text.trim().startsWith("<") || text.includes("<html>")) {
+          const htmlMsg = response.status === 502
+            ? "Production backend server is currently unreachable (502 Bad Gateway). Please verify the backend process is active."
+            : response.status === 504
+            ? "Production backend server timed out (504 Gateway Timeout)."
+            : `API server returned an HTML response (${response.status}) instead of JSON.`;
+
+          const jsonErrorBody = JSON.stringify({
+            success: false,
+            message: htmlMsg
+          });
+
+          return new Response(jsonErrorBody, {
+            status: response.status >= 400 ? response.status : 500,
+            statusText: response.statusText,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+
       return response;
     } catch (error) {
       lastError = error;
     }
   }
 
-  if (lastResponse) return lastResponse;
+  if (lastResponse) {
+    const contentType = lastResponse.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      const jsonErrorBody = JSON.stringify({
+        success: false,
+        message: `API server returned an HTML error (${lastResponse.status}).`
+      });
+      return new Response(jsonErrorBody, {
+        status: lastResponse.status >= 400 ? lastResponse.status : 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    return lastResponse;
+  }
 
   console.error("API request failed:", lastError);
-  throw new Error("API server is not reachable. Please start the backend and try again.");
+  const fallbackJson = JSON.stringify({
+    success: false,
+    message: "API server is not reachable. Please check backend connection."
+  });
+  return new Response(fallbackJson, {
+    status: 503,
+    headers: { 'Content-Type': 'application/json' }
+  });
 };
 
 // Log current API configuration (for debugging)

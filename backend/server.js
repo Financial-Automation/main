@@ -38,14 +38,9 @@ import scannedDocRoutes from "./routes/scannedDocRoutes.js";
 import civilEngineeringRoutes from "./routes/civilEngineeringRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
-import purchaseInvoiceTemplateRoutes from "./routes/purchaseInvoiceTemplateRoutes.js";
-import leadRoutes from "./routes/leadRoutes.js";
-
-import { MongoMemoryServer } from "mongodb-memory-server";
 
 dotenv.config();
 const app = express();
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
 // ✅ Razorpay Configuration
 if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
@@ -53,8 +48,8 @@ if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
 }
 
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_dummy_key_id",
-  key_secret: process.env.RAZORPAY_KEY_SECRET || "dummy_key_secret",
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 // ✅ Middleware
@@ -107,44 +102,35 @@ if (process.env.DEV_MODE !== 'true') {
 
 // ✅ MongoDB Connection - Dynamic based on DEV_MODE with fallback
 const isDevelopment = process.env.DEV_MODE === 'true';
-const defaultUri = "mongodb://127.0.0.1:27017/ai_accounting";
-let mongoUri = (isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI) || process.env.MONGO_URI || process.env.DEV_MONGO_URI || process.env.PRO_MONGO_URI || defaultUri;
+let mongoUri = isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI;
 
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 
-let mongoMemoryServer = null;
-
 // Connect to MongoDB with fallback mechanism
 const connectToMongoDB = async () => {
   try {
-    const targetUri = process.env.PRO_MONGO_URI || process.env.MONGO_URI || process.env.DEV_MONGO_URI || mongoUri;
-    await mongoose.connect(targetUri, { serverSelectionTimeoutMS: 5000 });
+    await mongoose.connect(mongoUri);
     console.log("✅ MongoDB Connected Successfully");
-    console.log(`📍 Database: ${targetUri}`);
+    console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
   } catch (err) {
-    console.error("⚠️ Primary MongoDB Connection Failed:", err.message);
+    console.error("❌ Primary MongoDB Connection Failed:", err.message);
 
-    try {
-      if (process.env.DEV_MONGO_URI && process.env.DEV_MONGO_URI !== mongoUri) {
-        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 3000 });
-        console.log("✅ MongoDB Connected Successfully (Local DB)");
-        return;
+    if (isDevelopment) {
+      console.log("🔄 Falling back to Cloud Database...");
+      try {
+        await mongoose.connect(process.env.PRO_MONGO_URI);
+        console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
+        console.log("📍 Database: Cloud Atlas (Fallback)");
+      } catch (fallbackErr) {
+        console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
+        console.error("💡 Please ensure MongoDB is running locally or check your internet connection");
+        throw fallbackErr; // Throw error to prevent server from starting without DB
       }
-    } catch (devErr) {
-      console.error("❌ Local MongoDB Connection Failed:", devErr.message);
-    }
-
-    console.log("⚡ Starting In-Memory MongoDB Server Fallback...");
-    try {
-      mongoMemoryServer = await MongoMemoryServer.create();
-      const memoryUri = mongoMemoryServer.getUri();
-      await mongoose.connect(memoryUri);
-      console.log("✅ In-Memory MongoDB Connected Successfully!");
-      console.log(`📍 Database: In-Memory (${memoryUri})`);
-    } catch (memErr) {
-      console.error("❌ In-Memory MongoDB Connection Failed:", memErr.message);
-      throw memErr;
+    } else {
+      console.error("❌ Production MongoDB Connection Failed");
+      console.error("💡 Please check your cloud database configuration");
+      throw err; // Throw error to prevent server from starting without DB
     }
   }
 };
@@ -156,7 +142,6 @@ const connectToMongoDB = async () => {
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  storePassword: { type: String },
   name: { type: String },
   role: { type: String, enum: ["admin", "instore"], default: "admin" },
   subscriptionStatus: { type: String, enum: ["pending", "active", "expired"], default: "pending" },
@@ -175,11 +160,6 @@ const userSchema = new mongoose.Schema({
   sellerGSTIN: { type: String },
   sellerState: { type: String },
   sellerAddress: { type: String },
-  bankName: { type: String, default: "" },
-  accountType: { type: String, default: "Current" },
-  accountNumber: { type: String, default: "" },
-  ifscCode: { type: String, default: "" },
-  authorisedSignature: { type: String, default: "" },
   resetPasswordToken: { type: String },
   resetPasswordExpires: { type: Date },
 });
@@ -195,14 +175,14 @@ app.post("/api/signup", async (req, res) => {
     const cleanEmail = email ? email.trim().toLowerCase() : "";
 
     if (!cleanEmail || !password)
-      return res.status(400).json({ message: "Email and password are required" });
+      return res.status(400).json({ success: false, message: "Email and password are required" });
 
     const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     if (existingUser)
-      return res.status(400).json({ message: "User already exists" });
+      return res.status(400).json({ success: false, message: "User already exists" });
 
     const allowedRoles = ["admin", "instore"];
-    const userRole = allowedRoles.includes(req.body.role) ? req.body.role : "admin";
+    const userRole = allowedRoles.includes(role) ? role : "admin";
     const hashedPassword = await bcrypt.hash(password, 10);
     const hashedStorePassword = storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
     const newUser = new User({ email: cleanEmail, password: hashedPassword, storePassword: hashedStorePassword, role: userRole });
@@ -210,13 +190,13 @@ app.post("/api/signup", async (req, res) => {
 
     const token = jwt.sign({ id: newUser._id, role: userRole }, process.env.JWT_SECRET || JWT_SECRET, { expiresIn: "7d" });
 
-    res.status(201).json({ message: "User registered successfully", token, user: { role: newUser.role } });
+    res.status(201).json({ success: true, message: "User registered successfully", token, user: { role: newUser.role } });
   } catch (error) {
     if (error.code === 11000)
-      return res.status(400).json({ message: "Email already exists" });
+      return res.status(400).json({ success: false, message: "Email already exists" });
 
     console.error("Signup Error:", error);
-    res.status(500).json({ message: "Internal Server Error" });
+    res.status(500).json({ success: false, message: error.message || "Internal Server Error" });
   }
 });
 
@@ -227,12 +207,12 @@ app.post("/api/signup-trial", async (req, res) => {
     const cleanEmail = email ? email.trim().toLowerCase() : "";
 
     if (!cleanEmail || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+      return res.status(400).json({ success: false, message: "Email and password are required" });
     }
 
     const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
+      return res.status(400).json({ success: false, message: "User already exists" });
     }
 
     const subscriptionStartDate = new Date();
@@ -259,7 +239,6 @@ app.post("/api/signup-trial", async (req, res) => {
 
     await newUser.save();
 
-    // Create Subscription record in database (optional, non-blocking if plans aren't seeded yet)
     try {
       const sandboxPlan = await Plan.findOne({ name: "Sandbox" });
       if (sandboxPlan) {
@@ -279,6 +258,7 @@ app.post("/api/signup-trial", async (req, res) => {
     const token = jwt.sign({ id: newUser._id, role: userRole }, process.env.JWT_SECRET || JWT_SECRET, { expiresIn: "7d" });
 
     res.status(201).json({
+      success: true,
       message: "Free trial started successfully",
       token,
       user: {
@@ -296,11 +276,11 @@ app.post("/api/signup-trial", async (req, res) => {
     });
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ message: "Email already exists" });
+      return res.status(400).json({ success: false, message: "Email already exists" });
     }
 
     console.error("Trial Signup Error:", error);
-    res.status(500).json({ message: error.message || "Internal Server Error" });
+    res.status(500).json({ success: false, message: error.message || "Internal Server Error" });
   }
 });
 
@@ -310,7 +290,7 @@ app.post("/api/signin", async (req, res) => {
     const { email, password, role } = req.body;
 
     if (!email || !password)
-      return res.status(400).json({ message: "Email and password are required" });
+      return res.status(400).json({ success: false, message: "Email and password are required" });
 
     const cleanEmail = email.trim().toLowerCase();
     let user = await User.findOne({ email: cleanEmail });
@@ -322,7 +302,6 @@ app.post("/api/signin", async (req, res) => {
 
     if (!user) {
       if (isDevOrInMemory) {
-        // Auto-create account for seamless dev/in-memory access
         console.log(`👤 Auto-registering new user on login: ${cleanEmail}`);
         const hashedPassword = await bcrypt.hash(password, 10);
         const subscriptionStartDate = new Date();
@@ -344,7 +323,7 @@ app.post("/api/signin", async (req, res) => {
         });
         await user.save();
       } else {
-        return res.status(400).json({ message: "Invalid email or password" });
+        return res.status(400).json({ success: false, message: "Invalid email or password" });
       }
     }
 
@@ -371,13 +350,12 @@ app.post("/api/signin", async (req, res) => {
 
     if (!validPass) {
       if (isDevOrInMemory) {
-        // In local/dev mode, update password automatically to prevent lockouts
         console.log(`🔑 Updating password for user: ${cleanEmail}`);
         user.password = await bcrypt.hash(password, 10);
         await user.save();
         validPass = true;
       } else {
-        return res.status(400).json({ message: "Invalid email or password" });
+        return res.status(400).json({ success: false, message: "Invalid email or password" });
       }
     }
 
@@ -385,6 +363,7 @@ app.post("/api/signin", async (req, res) => {
     const token = jwt.sign({ id: user._id, role: authenticatedRole }, secret, { expiresIn: "7d" });
 
     res.json({
+      success: true,
       message: "Login successful",
       token,
       user: {
@@ -402,7 +381,7 @@ app.post("/api/signin", async (req, res) => {
     });
   } catch (error) {
     console.error("Signin Error:", error);
-    res.status(500).json({ message: error.message || "Internal Server Error" });
+    res.status(500).json({ success: false, message: error.message || "Internal Server Error" });
   }
 });
 
@@ -509,7 +488,7 @@ const verifyToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch (error) {
@@ -527,7 +506,7 @@ app.get("/api/user", verifyToken, async (req, res) => {
       email: user.email,
       name: user.name,
       id: user._id,
-      role: req.user?.role || user.role || "admin",
+      role: user.role || "admin",
       subscriptionStatus: user.subscriptionStatus,
       subscriptionPlan: user.subscriptionPlan,
       subscriptionAmount: user.subscriptionAmount,
@@ -540,11 +519,6 @@ app.get("/api/user", verifyToken, async (req, res) => {
       sellerGSTIN: user.sellerGSTIN || "",
       sellerState: user.sellerState || "",
       sellerAddress: user.sellerAddress || "",
-      bankName: user.bankName || "",
-      accountType: user.accountType || "Current",
-      accountNumber: user.accountNumber || "",
-      ifscCode: user.ifscCode || "",
-      authorisedSignature: user.authorisedSignature || "",
     });
   } catch (error) {
     console.error("Get User Error:", error);
@@ -555,7 +529,7 @@ app.get("/api/user", verifyToken, async (req, res) => {
 // ✅ UPDATE USER PROFILE (Protected Route)
 app.put("/api/user", verifyToken, async (req, res) => {
   try {
-    const { name, email, sellerName, sellerPhone, sellerEmail, sellerGSTIN, sellerState, sellerAddress, bankName, accountType, accountNumber, ifscCode, authorisedSignature } = req.body;
+    const { name, email, sellerName, sellerPhone, sellerEmail, sellerGSTIN, sellerState, sellerAddress } = req.body;
     const trimmedEmail = email?.trim().toLowerCase();
 
     if (!trimmedEmail) {
@@ -582,11 +556,6 @@ app.put("/api/user", verifyToken, async (req, res) => {
         sellerGSTIN,
         sellerState,
         sellerAddress,
-        bankName,
-        accountType,
-        accountNumber,
-        ifscCode,
-        authorisedSignature,
       },
       { new: true, runValidators: true }
     ).select("-password");
@@ -613,11 +582,6 @@ app.put("/api/user", verifyToken, async (req, res) => {
         sellerGSTIN: user.sellerGSTIN || "",
         sellerState: user.sellerState || "",
         sellerAddress: user.sellerAddress || "",
-        bankName: user.bankName || "",
-        accountType: user.accountType || "Current",
-        accountNumber: user.accountNumber || "",
-        ifscCode: user.ifscCode || "",
-        authorisedSignature: user.authorisedSignature || "",
       },
     });
   } catch (error) {
@@ -632,86 +596,29 @@ app.put("/api/user", verifyToken, async (req, res) => {
 
 // ✅ Subscription Plans Configuration (matching frontend)
 const subscriptionPlans = {
-  trial: {
-    id: "trial",
-    name: "Sandbox Trial",
-    price: 0,
-    gst: 0,
-    totalAmount: 0,
-    duration: "14 days"
-  },
-  basic: {
-    id: "basic",
-    name: "Basic Plan",
-    price: 950,
-    gst: 171,
-    totalAmount: 1121,
-    duration: "month"
-  },
-  basic_annual: {
-    id: "basic_annual",
-    name: "Basic Plan (Annual)",
-    price: 9120,
-    gst: 1642,
-    totalAmount: 10762,
-    duration: "year"
-  },
-  intermediate: {
-    id: "intermediate",
-    name: "Intermediate Plan",
-    price: 1950,
-    gst: 351,
-    totalAmount: 2301,
-    duration: "month"
-  },
-  intermediate_annual: {
-    id: "intermediate_annual",
-    name: "Intermediate Plan (Annual)",
-    price: 18720,
-    gst: 3370,
-    totalAmount: 22090,
-    duration: "year"
-  },
-  premium: {
-    id: "premium",
-    name: "Premium Plan",
-    price: 4950,
-    gst: 891,
-    totalAmount: 5841,
-    duration: "month"
-  },
-  premium_annual: {
-    id: "premium_annual",
-    name: "Premium Plan (Annual)",
-    price: 47520,
-    gst: 8554,
-    totalAmount: 56074,
-    duration: "year"
-  },
-  // Legacy alias mapping for backward compatibility
   monthly: {
     id: "monthly",
-    name: "Basic Plan",
-    price: 950,
-    gst: 171,
-    totalAmount: 1121,
+    name: "Monthly Subscription",
+    price: 1500,
+    gst: 270,
+    totalAmount: 1770,
     duration: "month"
   },
   annual: {
     id: "annual",
-    name: "Intermediate Plan",
-    price: 1950,
-    gst: 351,
-    totalAmount: 2301,
-    duration: "month"
+    name: "Annual Subscription",
+    price: 16200,
+    gst: 2916,
+    totalAmount: 19116,
+    duration: "year"
   },
   lifetime: {
     id: "lifetime",
-    name: "Premium Plan",
-    price: 4950,
-    gst: 891,
-    totalAmount: 5841,
-    duration: "month"
+    name: "Lifetime Access",
+    price: 45000,
+    gst: 8100,
+    totalAmount: 53100,
+    duration: "lifetime"
   }
 };
 
@@ -829,7 +736,6 @@ app.post("/api/verify-payment", async (req, res) => {
       razorpay_signature,
       email,
       password,
-      storePassword,
       plan = "monthly",
       name,
       role = "admin"
@@ -923,9 +829,6 @@ app.post("/api/verify-payment", async (req, res) => {
       existingUser.razorpayPaymentId = paymentIdToCheck;
       existingUser.razorpayOrderId = orderIdToCheck;
       existingUser.pendingDowngradePlan = undefined;
-      if (storePassword) {
-        existingUser.storePassword = await bcrypt.hash(storePassword, 10);
-      }
       
       await existingUser.save();
       userToUse = existingUser;
@@ -940,12 +843,10 @@ app.post("/api/verify-payment", async (req, res) => {
       const allowedRoles = ["admin", "instore"];
       const userRole = allowedRoles.includes(role) ? role : "admin";
       const hashedPassword = await bcrypt.hash(password, 10);
-      const hashedStorePassword = storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
       const newUser = new User({
         email,
         name: name || email.split('@')[0],
         password: hashedPassword,
-        storePassword: hashedStorePassword,
         subscriptionStatus: "active",
         subscriptionPlan: plan,
         subscriptionAmount: selectedPlan.totalAmount,
@@ -1343,14 +1244,12 @@ app.use("/api/scanned-docs", authenticateUser, checkSubscription, checkModuleAcc
 app.use("/api/civil-engineering", authenticateUser, checkSubscription, checkModuleAccess("civil-engineering"), civilEngineeringRoutes);
 app.use("/api/customers", authenticateUser, checkSubscription, checkModuleAccess("invoice"), customerRoutes);
 app.use("/api/invoice-templates", authenticateUser, checkSubscription, checkModuleAccess("invoice"), invoiceTemplateRoutes);
-app.use("/api/purchase-templates", authenticateUser, checkSubscription, checkModuleAccess("invoice"), purchaseInvoiceTemplateRoutes);
-app.use("/api/leads", leadRoutes);
 
 const seedPlans = async () => {
   const plans = [
     { 
       name: "Sandbox", 
-      allowedModules: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "export"],
+      allowedModules: ["dashboard", "invoice", "inventory", "bookkeeping", "tax-gst", "balance-sheet", "profit-loss", "cashflow", "cashflow-statement", "financial-ratios", "payroll", "bank-reconciliation", "fraud-detection", "civil-engineering", "export"],
       invoiceLimit: 50,
       transactionLimit: 100,
       seatLimit: 1,
@@ -1411,6 +1310,24 @@ const seedPlans = async () => {
     console.error("❌ Failed to seed subscription plans:", err.message);
   }
 };
+
+// ✅ Global 404 JSON Handler for /api routes (guarantees JSON response, never HTML)
+app.use((req, res, next) => {
+  if (req.originalUrl && req.originalUrl.startsWith("/api/")) {
+    return res.status(404).json({ success: false, message: `API endpoint ${req.originalUrl} not found.` });
+  }
+  next();
+});
+
+// ✅ Global Error Handler (guarantees Express never outputs HTML error pages)
+app.use((err, req, res, _next) => {
+  console.error("Global Express Error:", err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    success: false,
+    message: err.message || "Internal Server Error"
+  });
+});
 
 // ✅ Start Server (after MongoDB connection)
 const PORT = process.env.PORT || 5000;
