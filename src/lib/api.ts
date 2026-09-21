@@ -59,7 +59,7 @@ export const apiRequest = async (
   endpoint: string,
   options: RequestInit = {}
 ): Promise<Response> => {
-  const defaultHeaders = {
+  const defaultHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
   };
 
@@ -77,24 +77,82 @@ export const apiRequest = async (
     },
   };
 
+  // Ensure port 5001 is tried before port 5000 (macOS AirPlay occupies port 5000)
+  const normalizedEndpoint = endpoint.replace("http://localhost:5000/api", "http://localhost:5001/api");
   const endpoints = [
+    normalizedEndpoint,
     endpoint,
-    endpoint.replace("http://localhost:5000/api", "http://localhost:5001/api"),
     endpoint.replace("http://localhost:5001/api", "http://localhost:5000/api"),
   ].filter((value, index, list) => list.indexOf(value) === index);
 
   let lastError: unknown;
+  let lastResponse: Response | null = null;
 
   for (const requestEndpoint of endpoints) {
     try {
-      return await fetch(requestEndpoint, config);
+      const response = await fetch(requestEndpoint, config);
+
+      // macOS AirPlay occupies port 5000 and returns 403 or non-API responses.
+      // If we got a 403 from port 5000, skip it to try port 5001.
+      if (!response.ok && requestEndpoint.includes(":5000") && response.status === 403) {
+        lastResponse = response;
+        continue;
+      }
+
+      // Safeguard against HTML responses (e.g. Nginx 502/504 Bad Gateway, 404 HTML, or SPA fallback)
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("text/html")) {
+        const text = await response.clone().text();
+        if (text.trim().startsWith("<") || text.includes("<html>")) {
+          const htmlMsg = response.status === 502
+            ? "Production backend server is currently unreachable (502 Bad Gateway). Please verify the backend process is active."
+            : response.status === 504
+            ? "Production backend server timed out (504 Gateway Timeout)."
+            : `API server returned an HTML response (${response.status}) instead of JSON.`;
+
+          const jsonErrorBody = JSON.stringify({
+            success: false,
+            message: htmlMsg
+          });
+
+          return new Response(jsonErrorBody, {
+            status: response.status >= 400 ? response.status : 500,
+            statusText: response.statusText,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+
+      return response;
     } catch (error) {
       lastError = error;
     }
   }
 
+  if (lastResponse) {
+    const contentType = lastResponse.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      const jsonErrorBody = JSON.stringify({
+        success: false,
+        message: `API server returned an HTML error (${lastResponse.status}).`
+      });
+      return new Response(jsonErrorBody, {
+        status: lastResponse.status >= 400 ? lastResponse.status : 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    return lastResponse;
+  }
+
   console.error("API request failed:", lastError);
-  throw new Error("API server is not reachable. Please start the backend and try again.");
+  const fallbackJson = JSON.stringify({
+    success: false,
+    message: "API server is not reachable. Please check backend connection."
+  });
+  return new Response(fallbackJson, {
+    status: 503,
+    headers: { 'Content-Type': 'application/json' }
+  });
 };
 
 // Log current API configuration (for debugging)
