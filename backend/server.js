@@ -38,19 +38,27 @@ import scannedDocRoutes from "./routes/scannedDocRoutes.js";
 import civilEngineeringRoutes from "./routes/civilEngineeringRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
+import { MongoMemoryServer } from "mongodb-memory-server";
 
 dotenv.config();
 const app = express();
+const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
 // ✅ Razorpay Configuration
-if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+let razorpay = null;
+
+if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+  try {
+    razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  } catch (err) {
+    console.warn("⚠️  Razorpay initialization failed:", err.message);
+  }
+} else {
   console.warn("⚠️  Razorpay keys not configured. Payment features will not work.");
 }
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
 
 // ✅ Middleware
 // Increase payload limit for image/PDF uploads (50MB)
@@ -102,35 +110,43 @@ if (process.env.DEV_MODE !== 'true') {
 
 // ✅ MongoDB Connection - Dynamic based on DEV_MODE with fallback
 const isDevelopment = process.env.DEV_MODE === 'true';
-let mongoUri = isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI;
+const defaultUri = "mongodb://127.0.0.1:27017/ai_accounting";
+let mongoUri = (isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI) || process.env.MONGO_URI || defaultUri;
 
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
-console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
+
+let mongoMemoryServer = null;
 
 // Connect to MongoDB with fallback mechanism
 const connectToMongoDB = async () => {
+  const targetUri = process.env.PRO_MONGO_URI || process.env.MONGO_URI || process.env.DEV_MONGO_URI || mongoUri;
   try {
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(targetUri, { serverSelectionTimeoutMS: 5000 });
     console.log("✅ MongoDB Connected Successfully");
-    console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
+    console.log(`📍 Database: ${targetUri}`);
   } catch (err) {
-    console.error("❌ Primary MongoDB Connection Failed:", err.message);
+    console.warn("⚠️ Primary MongoDB Connection Failed:", err.message);
 
-    if (isDevelopment) {
-      console.log("🔄 Falling back to Cloud Database...");
-      try {
-        await mongoose.connect(process.env.PRO_MONGO_URI);
-        console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
-        console.log("📍 Database: Cloud Atlas (Fallback)");
-      } catch (fallbackErr) {
-        console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
-        console.error("💡 Please ensure MongoDB is running locally or check your internet connection");
-        throw fallbackErr; // Throw error to prevent server from starting without DB
+    try {
+      if (process.env.DEV_MONGO_URI && process.env.DEV_MONGO_URI !== targetUri) {
+        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 3000 });
+        console.log("✅ MongoDB Connected Successfully (Local DB)");
+        return;
       }
-    } else {
-      console.error("❌ Production MongoDB Connection Failed");
-      console.error("💡 Please check your cloud database configuration");
-      throw err; // Throw error to prevent server from starting without DB
+    } catch (devErr) {
+      console.warn("❌ Local MongoDB Connection Failed:", devErr.message);
+    }
+
+    console.log("⚡ Starting In-Memory MongoDB Server Fallback...");
+    try {
+      mongoMemoryServer = await MongoMemoryServer.create();
+      const memoryUri = mongoMemoryServer.getUri();
+      await mongoose.connect(memoryUri);
+      console.log("✅ In-Memory MongoDB Connected Successfully!");
+      console.log(`📍 Database: In-Memory (${memoryUri})`);
+    } catch (memErr) {
+      console.error("❌ In-Memory MongoDB Connection Failed:", memErr.message);
+      throw memErr;
     }
   }
 };
