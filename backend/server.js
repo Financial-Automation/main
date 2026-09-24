@@ -138,10 +138,11 @@ const connectToMongoDB = async () => {
 // Don't call it here - we'll call it before starting the server
 // connectToMongoDB();
 
-// ✅ User Schema
+// ✅ User Schema (synced with models/User.js)
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
+  storePassword: { type: String },          // ← required for instore role login
   name: { type: String },
   role: { type: String, enum: ["admin", "instore"], default: "admin" },
   subscriptionStatus: { type: String, enum: ["pending", "active", "expired"], default: "pending" },
@@ -160,11 +161,16 @@ const userSchema = new mongoose.Schema({
   sellerGSTIN: { type: String },
   sellerState: { type: String },
   sellerAddress: { type: String },
+  bankName: { type: String, default: "" },
+  accountType: { type: String, default: "Current" },
+  accountNumber: { type: String, default: "" },
+  ifscCode: { type: String, default: "" },
+  authorisedSignature: { type: String, default: "" },
   resetPasswordToken: { type: String },
   resetPasswordExpires: { type: Date },
 });
 
-const User = mongoose.model("User", userSchema);
+const User = mongoose.models.User || mongoose.model("User", userSchema);
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
