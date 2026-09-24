@@ -38,27 +38,19 @@ import scannedDocRoutes from "./routes/scannedDocRoutes.js";
 import civilEngineeringRoutes from "./routes/civilEngineeringRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
-import { MongoMemoryServer } from "mongodb-memory-server";
 
 dotenv.config();
 const app = express();
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
 // ✅ Razorpay Configuration
-let razorpay = null;
-
-if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
-  try {
-    razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
-    });
-  } catch (err) {
-    console.warn("⚠️  Razorpay initialization failed:", err.message);
-  }
-} else {
+if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
   console.warn("⚠️  Razorpay keys not configured. Payment features will not work.");
 }
+
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
 
 // ✅ Middleware
 // Increase payload limit for image/PDF uploads (50MB)
@@ -110,43 +102,35 @@ if (process.env.DEV_MODE !== 'true') {
 
 // ✅ MongoDB Connection - Dynamic based on DEV_MODE with fallback
 const isDevelopment = process.env.DEV_MODE === 'true';
-const defaultUri = "mongodb://127.0.0.1:27017/ai_accounting";
-let mongoUri = (isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI) || process.env.MONGO_URI || defaultUri;
+let mongoUri = isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI;
 
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
-
-let mongoMemoryServer = null;
+console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 
 // Connect to MongoDB with fallback mechanism
 const connectToMongoDB = async () => {
-  const targetUri = process.env.PRO_MONGO_URI || process.env.MONGO_URI || process.env.DEV_MONGO_URI || mongoUri;
   try {
-    await mongoose.connect(targetUri, { serverSelectionTimeoutMS: 5000 });
+    await mongoose.connect(mongoUri);
     console.log("✅ MongoDB Connected Successfully");
-    console.log(`📍 Database: ${targetUri}`);
+    console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
   } catch (err) {
-    console.warn("⚠️ Primary MongoDB Connection Failed:", err.message);
+    console.error("❌ Primary MongoDB Connection Failed:", err.message);
 
-    try {
-      if (process.env.DEV_MONGO_URI && process.env.DEV_MONGO_URI !== targetUri) {
-        await mongoose.connect(process.env.DEV_MONGO_URI, { serverSelectionTimeoutMS: 3000 });
-        console.log("✅ MongoDB Connected Successfully (Local DB)");
-        return;
+    if (isDevelopment) {
+      console.log("🔄 Falling back to Cloud Database...");
+      try {
+        await mongoose.connect(process.env.PRO_MONGO_URI);
+        console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
+        console.log("📍 Database: Cloud Atlas (Fallback)");
+      } catch (fallbackErr) {
+        console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
+        console.error("💡 Please ensure MongoDB is running locally or check your internet connection");
+        throw fallbackErr; // Throw error to prevent server from starting without DB
       }
-    } catch (devErr) {
-      console.warn("❌ Local MongoDB Connection Failed:", devErr.message);
-    }
-
-    console.log("⚡ Starting In-Memory MongoDB Server Fallback...");
-    try {
-      mongoMemoryServer = await MongoMemoryServer.create();
-      const memoryUri = mongoMemoryServer.getUri();
-      await mongoose.connect(memoryUri);
-      console.log("✅ In-Memory MongoDB Connected Successfully!");
-      console.log(`📍 Database: In-Memory (${memoryUri})`);
-    } catch (memErr) {
-      console.error("❌ In-Memory MongoDB Connection Failed:", memErr.message);
-      throw memErr;
+    } else {
+      console.error("❌ Production MongoDB Connection Failed");
+      console.error("💡 Please check your cloud database configuration");
+      throw err; // Throw error to prevent server from starting without DB
     }
   }
 };
@@ -1346,7 +1330,7 @@ app.use((err, req, res, _next) => {
 });
 
 // ✅ Start Server (after MongoDB connection)
-const PORT = process.env.PORT || 5000;
+const PORT = parseInt(process.env.PORT || '5001', 10);
 const HOST = '0.0.0.0';
 
 const startServer = async () => {
@@ -1360,23 +1344,23 @@ const startServer = async () => {
     console.warn("⚠️ Database connection failed. Starting server in degraded mode:", error.message);
   }
 
-  // Start server listeners on primary and common Nginx proxy ports (5000, 5001, 3000, 8080)
-  const portsToListen = [Number(PORT), 5000, 5001, 3000, 8080].filter((v, i, a) => a.indexOf(v) === i);
-  
-  for (const p of portsToListen) {
-    try {
-      const srv = app.listen(p, HOST, () => {
-        console.log(`🚀 Express server listening on http://${HOST}:${p}`);
-      });
-      srv.on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-          console.warn(`⚠️ Port ${p} is already in use by another process.`);
-        }
-      });
-    } catch (err) {
-      // Ignore bind errors for supplementary ports
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`🚀 Financial Backend running on http://${HOST}:${PORT}`);
+    console.log(`🌐 Production URL: https://software.saaiss.in`);
+    console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use. Kill the process using it and restart.`);
+      console.error(`   Run: lsof -ti:${PORT} | xargs kill -9`);
+      process.exit(1);
+    } else {
+      console.error('❌ Server error:', err);
+      process.exit(1);
     }
-  }
+  });
 };
 
 startServer();
+
