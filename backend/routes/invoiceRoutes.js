@@ -661,7 +661,7 @@ router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 8. Update Payment Status
-router.all("/:id/payment", async (req, res) => {
+router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
   if (req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'PUT') {
     return res.status(405).json({ message: "Method not allowed" });
   }
@@ -686,12 +686,14 @@ router.all("/:id/payment", async (req, res) => {
 
     const newAmountPaid = (invoice.amountPaid || 0) + payAmt;
     const newBalanceDue = Math.max(0, invoice.grandTotal - newAmountPaid);
-    const newStatus = newBalanceDue <= 0 ? 'paid' : newAmountPaid > 0 ? 'partial' : 'pending';
+    const newPaymentStatus = newBalanceDue <= 0 ? 'paid' : newAmountPaid > 0 ? 'partial' : 'pending';
 
     invoice.amountPaid = newAmountPaid;
     invoice.balanceDue = newBalanceDue;
-    invoice.paymentStatus = paymentStatus || newStatus;
-    invoice.status = newStatus;
+    invoice.paymentStatus = paymentStatus || newPaymentStatus;
+    if (newBalanceDue <= 0) {
+      invoice.status = 'paid';
+    }
     if (paymentMethod) invoice.paymentMethod = paymentMethod;
     if (paymentDate) invoice.paymentDate = new Date(paymentDate);
     invoice.updatedAt = new Date();

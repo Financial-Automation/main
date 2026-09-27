@@ -130,6 +130,9 @@ jobs:
 
           test -f "$APP_DIR/dist/index.html"
 
+          echo "Running Permanent Regression Protection Suite..."
+          npm run test
+
           echo "Publishing frontend..."
           sudo mkdir -p "$WEB_DIR"
           sudo rsync -a --delete "$APP_DIR/dist/" "$WEB_DIR/"

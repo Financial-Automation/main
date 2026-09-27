@@ -40,6 +40,9 @@ import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
 
 dotenv.config();
+if (!process.env.PRO_MONGO_URI && !process.env.DEV_MONGO_URI) {
+  dotenv.config({ path: "./backend/.env" });
+}
 const app = express();
 
 // ✅ Razorpay Configuration
@@ -48,8 +51,8 @@ if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
 }
 
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+  key_id: process.env.RAZORPAY_KEY_ID || "rzp_test_placeholder",
+  key_secret: process.env.RAZORPAY_KEY_SECRET || "placeholder_secret",
 });
 
 // ✅ Middleware

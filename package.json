@@ -8,7 +8,11 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node tests/run-tests.js",
+    "test:regression": "node tests/run-tests.js --regression",
+    "test:golden": "node tests/run-tests.js --golden",
+    "test:smoke": "node tests/run-tests.js --smoke"
   },
   "dependencies": {
     "@babel/runtime": "^7.28.6",
