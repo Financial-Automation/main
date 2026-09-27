@@ -63,6 +63,7 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     authorisedSignature: { type: String, default: "" },
     templateId: { type: String, default: "" },
     templateSnapshot: { type: Object, default: null },
+    status: { type: String, enum: ["draft", "completed", "paid", "cancelled"], default: "completed" },
     createdAt: { type: Date, default: Date.now },
 });
 
@@ -116,76 +117,166 @@ router.post("/create", verifyToken, async (req, res) => {
         });
         await newInvoice.save();
 
-        // Automatically generate Bookkeeping Entry for purchase invoice
-        await upsertAutomatedBookkeepingEntry({
-            userId: req.user.id,
-            date: newInvoice.billDate ? new Date(newInvoice.billDate) : new Date(),
-            description: `Purchase Invoice ${newInvoice.billNo} from ${newInvoice.supplierName}`,
-            category: "Purchases",
-            amount: newInvoice.total || newInvoice.subtotal,
-            type: "expense",
-            referenceId: `purchase_inv_${newInvoice._id}`
-        });
-
-        // Add purchased items to inventory stock
-        const InventoryItem = getInventoryModel();
-        const stockResults = [];
-
-        for (const item of invoiceData.items) {
-            const rawSku = item.itemCode ? item.itemCode.trim() : "";
-            const rawName = item.itemName ? item.itemName.trim() : "";
-            const sku = rawSku || `PUR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-            // Check if item with same SKU or Name already exists for this user to avoid duplicates
-            const searchOr = [];
-            if (rawSku) searchOr.push({ sku: rawSku });
-            if (rawName) searchOr.push({ itemName: new RegExp(`^${rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") });
-
-            const existingItem = searchOr.length > 0 ? await InventoryItem.findOne({
+        // Automatically generate Bookkeeping Entry for purchase invoice if not draft
+        if (newInvoice.status !== 'draft') {
+            await upsertAutomatedBookkeepingEntry({
                 userId: req.user.id,
-                $or: searchOr,
-            }) : null;
+                date: newInvoice.billDate ? new Date(newInvoice.billDate) : new Date(),
+                description: `Purchase Invoice ${newInvoice.billNo} from ${newInvoice.supplierName}`,
+                category: "Purchases",
+                amount: newInvoice.total || newInvoice.subtotal,
+                type: "expense",
+                referenceId: `purchase_inv_${newInvoice._id}`
+            });
+        }
 
-            if (existingItem) {
-                // Update quantity and product master info of existing item
-                existingItem.quantity += item.quantity;
-                existingItem.price = item.pricePerUnit;
-                if (item.hsnCode) existingItem.hsnCode = item.hsnCode;
-                if (item.taxPercent !== undefined) existingItem.gstRate = item.taxPercent;
-                if (item.unit) existingItem.unit = item.unit;
-                existingItem.lastUpdated = Date.now();
-                await existingItem.save();
-                stockResults.push({ itemName: item.itemName, action: "updated", quantity: existingItem.quantity });
-            } else {
-                // Create new inventory item
-                const newStockItem = new InventoryItem({
+        // Add purchased items to inventory stock if not draft
+        const stockResults = [];
+        if (newInvoice.status !== 'draft') {
+            const InventoryItem = getInventoryModel();
+
+            for (const item of invoiceData.items) {
+                const rawSku = item.itemCode ? item.itemCode.trim() : "";
+                const rawName = item.itemName ? item.itemName.trim() : "";
+                const sku = rawSku || `PUR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+                // Check if item with same SKU or Name already exists for this user to avoid duplicates
+                const searchOr = [];
+                if (rawSku) searchOr.push({ sku: rawSku });
+                if (rawName) searchOr.push({ itemName: new RegExp(`^${rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") });
+
+                const existingItem = searchOr.length > 0 ? await InventoryItem.findOne({
                     userId: req.user.id,
-                    itemName: item.itemName,
-                    sku: sku,
-                    hsnCode: item.hsnCode || "",
-                    quantity: item.quantity,
-                    unit: item.unit || "Pcs",
-                    price: item.pricePerUnit,
-                    category: "General",
-                    gstRate: item.taxPercent || 0,
-                    sgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
-                    cgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
-                    igst: item.isInterState ? (item.taxPercent || 0) : 0,
-                    stateOfSupply: invoiceData.stateOfSupply || "",
-                });
-                await newStockItem.save();
-                stockResults.push({ itemName: item.itemName, action: "created", quantity: item.quantity });
+                    $or: searchOr,
+                }) : null;
+
+                if (existingItem) {
+                    // Update quantity and product master info of existing item
+                    existingItem.quantity += item.quantity;
+                    existingItem.price = item.pricePerUnit;
+                    if (item.hsnCode) existingItem.hsnCode = item.hsnCode;
+                    if (item.taxPercent !== undefined) existingItem.gstRate = item.taxPercent;
+                    if (item.unit) existingItem.unit = item.unit;
+                    existingItem.lastUpdated = Date.now();
+                    await existingItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "updated", quantity: existingItem.quantity });
+                } else {
+                    // Create new inventory item
+                    const newStockItem = new InventoryItem({
+                        userId: req.user.id,
+                        itemName: item.itemName,
+                        sku: sku,
+                        hsnCode: item.hsnCode || "",
+                        quantity: item.quantity,
+                        unit: item.unit || "Pcs",
+                        price: item.pricePerUnit,
+                        category: "General",
+                        gstRate: item.taxPercent || 0,
+                        sgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        cgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        igst: item.isInterState ? (item.taxPercent || 0) : 0,
+                        stateOfSupply: invoiceData.stateOfSupply || "",
+                    });
+                    await newStockItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "created", quantity: item.quantity });
+                }
             }
         }
 
         res.status(201).json({
-            message: "Purchase invoice saved & items added to stock!",
+            message: newInvoice.status === 'draft' ? "Purchase invoice drafted!" : "Purchase invoice saved & items added to stock!",
             invoice: newInvoice,
             stockUpdates: stockResults,
         });
     } catch (error) {
         console.error("Error creating purchase invoice:", error);
         res.status(500).json({ message: "Error saving purchase invoice", error: error.message });
+    }
+});
+
+// PUT - Update purchase invoice & add items to inventory stock if completed
+router.put("/:id", verifyToken, async (req, res) => {
+    try {
+        const invoiceData = req.body;
+        const existingInvoice = await PurchaseInvoice.findOne({ _id: req.params.id, userId: req.user.id });
+        if (!existingInvoice) {
+            return res.status(404).json({ message: "Purchase invoice not found" });
+        }
+
+        // We only add to stock if it transitioned from draft to completed
+        const wasDraft = existingInvoice.status === "draft" || existingInvoice.status === undefined;
+        const isNowCompleted = invoiceData.status !== "draft";
+        
+        Object.assign(existingInvoice, invoiceData);
+        await existingInvoice.save();
+
+        const stockResults = [];
+        if (wasDraft && isNowCompleted) {
+            const InventoryItem = getInventoryModel();
+            for (const item of invoiceData.items) {
+                const rawSku = item.itemCode ? item.itemCode.trim() : "";
+                const rawName = item.itemName ? item.itemName.trim() : "";
+                const sku = rawSku || `PUR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+                const searchOr = [];
+                if (rawSku) searchOr.push({ sku: rawSku });
+                if (rawName) searchOr.push({ itemName: new RegExp(`^${rawName.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, "i") });
+
+                const existingItem = searchOr.length > 0 ? await InventoryItem.findOne({
+                    userId: req.user.id,
+                    $or: searchOr,
+                }) : null;
+
+                if (existingItem) {
+                    existingItem.quantity += item.quantity;
+                    existingItem.price = item.pricePerUnit;
+                    if (item.hsnCode) existingItem.hsnCode = item.hsnCode;
+                    if (item.taxPercent !== undefined) existingItem.gstRate = item.taxPercent;
+                    if (item.unit) existingItem.unit = item.unit;
+                    existingItem.lastUpdated = Date.now();
+                    await existingItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "updated", quantity: existingItem.quantity });
+                } else {
+                    const newStockItem = new InventoryItem({
+                        userId: req.user.id,
+                        itemName: item.itemName,
+                        sku: sku,
+                        hsnCode: item.hsnCode || "",
+                        quantity: item.quantity,
+                        unit: item.unit || "Pcs",
+                        price: item.pricePerUnit,
+                        category: "General",
+                        gstRate: item.taxPercent || 0,
+                        sgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        cgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        igst: item.isInterState ? (item.taxPercent || 0) : 0,
+                        stateOfSupply: invoiceData.stateOfSupply || "",
+                    });
+                    await newStockItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "created", quantity: item.quantity });
+                }
+            }
+            
+            // Upsert Bookkeeping Entry since it is now completed
+            await upsertAutomatedBookkeepingEntry({
+                userId: req.user.id,
+                date: existingInvoice.billDate ? new Date(existingInvoice.billDate) : new Date(),
+                description: `Purchase Invoice ${existingInvoice.billNo} from ${existingInvoice.supplierName}`,
+                category: "Purchases",
+                amount: existingInvoice.total || existingInvoice.subtotal,
+                type: "expense",
+                referenceId: `purchase_inv_${existingInvoice._id}`
+            });
+        }
+
+        res.json({
+            message: existingInvoice.status === "draft" ? "Purchase invoice draft updated!" : "Purchase invoice updated & items added to stock!",
+            invoice: existingInvoice,
+            stockUpdates: stockResults,
+        });
+    } catch (error) {
+        console.error("Error updating purchase invoice:", error);
+        res.status(500).json({ message: "Error updating purchase invoice", error: error.message });
     }
 });
 
@@ -214,7 +305,41 @@ router.get("/:id", verifyToken, async (req, res) => {
     }
 });
 
+
+// POST - Record payment for purchase invoice
+router.post("/:id/payment", verifyToken, async (req, res) => {
+    try {
+        const { amount } = req.body;
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ message: "Invalid payment amount" });
+        }
+        
+        const invoice = await PurchaseInvoice.findOne({ _id: req.params.id, userId: req.user.id });
+        if (!invoice) {
+            return res.status(404).json({ message: "Purchase invoice not found" });
+        }
+        
+        // Update paid and balance
+        invoice.paid = (invoice.paid || 0) + Number(amount);
+        invoice.balance = invoice.total - invoice.paid;
+        
+        // Don't allow negative balance
+        if (invoice.balance < 0) {
+            invoice.balance = 0;
+            invoice.paid = invoice.total;
+        }
+        
+        await invoice.save();
+        
+        res.json({ message: "Payment recorded successfully", invoice });
+    } catch (error) {
+        console.error("Error recording payment:", error);
+        res.status(500).json({ message: "Error recording payment" });
+    }
+});
+
 // DELETE - Delete purchase invoice
+
 router.delete("/:id", verifyToken, async (req, res) => {
     try {
         const deleted = await PurchaseInvoice.findOneAndDelete({ _id: req.params.id, userId: req.user.id });

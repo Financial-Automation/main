@@ -38,6 +38,10 @@ interface PurchaseInvoiceData {
     gstin: string;
     billNo: string;
     billDate: string;
+    bankName?: string;
+    accountType?: string;
+    accountNumber?: string;
+    ifscCode?: string;
     paymentMethod?: "Cash" | "Credit" | "G Pay" | "Net Banking";
     invoiceSize?: "A4" | "A5";
     invoiceFormat?: "Supermarket" | "Hotel" | "Stationery Shop";
@@ -132,28 +136,167 @@ const PublicPurchaseInvoiceView = () => {
 
     // Safe fallback template configuration
     const initialConfig = {
-        header: { showLogo: true, logoPosition: "left" as const, logoSize: "medium" as const, logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
-        seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
-        customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
+        header: {
+            showLogo: true,
+            logoPosition: "left" as const,
+            logoSize: "medium" as const,
+            logoUrl: "",
+            headerTitle: "TAX INVOICE / PURCHASE BILL",
+            showCompanyName: true,
+            showAddress: true,
+            showPhone: true,
+            showEmail: true
+        },
+        supplier: {
+            showName: true,
+            showPhone: true,
+            showEmail: true,
+            showGSTIN: true,
+            showAddress: true
+        },
+        customer: {
+            showName: true,
+            showGSTIN: true,
+            showPhone: true,
+            showEmail: true,
+            showBillingAddress: true,
+            showShippingAddress: true,
+            showPlaceOfSupply: true
+        },
         invoiceInfo: {
-            showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
-            labels: { invoiceNumber: "Bill No.", invoiceDate: "Bill Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
+            showInvoiceNumber: true,
+            showInvoiceDate: true,
+            showDueDate: true,
+            showPaymentTerms: true,
+            showOrderNumber: true,
+            showSalesperson: true,
+            labels: {
+                invoiceNumber: "Bill No.",
+                invoiceDate: "Bill Date",
+                dueDate: "Due Date",
+                paymentTerms: "Payment Terms",
+                orderNumber: "Order No.",
+                salespersonName: "Salesperson"
+            }
         },
         items: {
-            columns: ["item", "hsn", "quantity", "rate", "tax", "amount"],
-            labels: { item: "Item", description: "Description", sku: "SKU", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", tax: "Tax", amount: "Amount" }
+            columns: ["item", "description", "hsn", "quantity", "rate", "tax", "amount"],
+            labels: {
+                item: "Item",
+                description: "Description",
+                sku: "SKU",
+                hsn: "HSN/SAC",
+                quantity: "Qty",
+                rate: "Price/Unit",
+                tax: "Tax",
+                amount: "Amount"
+            }
         },
-        tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
-        payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
-        footer: { show: true, text: "" },
-        design: { primaryColor: "#d97706", secondaryColor: "#f8fafc", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#cbd5e1", fontFamily: "Inter", fontSize: 12, borderStyle: "light" as const }
+        tax: {
+            showSummary: true,
+            showCGST: true,
+            showSGST: true,
+            showIGST: true,
+            showTaxableAmount: true,
+            showTotalTax: true
+        },
+        banking: {
+            show: true,
+            label: "Banking Details"
+        },
+        payment: {
+            showPaidAmount: true,
+            showBalance: true,
+            showPaymentMethod: true
+        },
+        notes: {
+            show: true,
+            label: "Purchase Notes",
+            defaultText: "Goods received in good condition."
+        },
+        terms: {
+            show: true,
+            label: "Terms & Conditions",
+            defaultText: "Payment terms as per vendor agreement."
+        },
+        signature: {
+            show: false,
+            name: "Authorized Signatory",
+            designation: "Store Manager",
+            imageUrl: ""
+        },
+        footer: {
+            show: true,
+            text: "Powered by SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED ✨"
+        },
+        design: {
+            primaryColor: "#d97706",
+            secondaryColor: "#fffbeb",
+            textColor: "#0f172a",
+            backgroundColor: "#ffffff",
+            borderColor: "#cbd5e1",
+            fontFamily: "Inter",
+            fontSize: 12,
+            headingSize: 18,
+            bodySize: 12,
+            borderStyle: "light" as const,
+            cornerRadius: 8,
+            invoiceSize: "A4" as const,
+            invoiceFormat: "Supermarket" as const
+        },
+        sectionsOrder: [
+            "header",
+            "supplier",
+            "customer",
+            "invoiceInfo",
+            "items",
+            "tax",
+            "payment",
+            "banking",
+            "notes",
+            "terms",
+            "signature",
+            "footer"
+        ]
     };
 
-    const config = invoice.templateSnapshot || initialConfig;
-    const header = config.header || initialConfig.header;
-    const design = config.design || initialConfig.design;
-    const primaryColor = design.primaryColor || "#d97706";
-    const fontFamily = design.fontFamily || "Inter";
+
+    const config = {
+        ...initialConfig,
+        ...(invoice.templateSnapshot || {}),
+        header: { ...initialConfig.header, ...(invoice.templateSnapshot?.header || {}) },
+        supplier: { ...initialConfig.supplier, ...(invoice.templateSnapshot?.supplier || {}) },
+        customer: { ...initialConfig.customer, ...(invoice.templateSnapshot?.customer || {}) },
+        invoiceInfo: { 
+            ...initialConfig.invoiceInfo, 
+            ...(invoice.templateSnapshot?.invoiceInfo || {}),
+            labels: { ...initialConfig.invoiceInfo.labels, ...(invoice.templateSnapshot?.invoiceInfo?.labels || {}) }
+        },
+        items: { 
+            ...initialConfig.items, 
+            ...(invoice.templateSnapshot?.items || {}),
+            labels: { ...initialConfig.items.labels, ...(invoice.templateSnapshot?.items?.labels || {}) }
+        },
+        tax: { ...initialConfig.tax, ...(invoice.templateSnapshot?.tax || {}) },
+        banking: {
+            ...initialConfig.banking,
+            ...(invoice.templateSnapshot?.banking || {}),
+            show: invoice.templateSnapshot?.banking?.show !== undefined ? invoice.templateSnapshot?.banking?.show : true,
+            label: invoice.templateSnapshot?.banking?.label || "Banking Details"
+        },
+        payment: { ...initialConfig.payment, ...(invoice.templateSnapshot?.payment || {}) },
+        notes: { ...initialConfig.notes, ...(invoice.templateSnapshot?.notes || {}) },
+        terms: { ...initialConfig.terms, ...(invoice.templateSnapshot?.terms || {}) },
+        signature: { ...initialConfig.signature, ...(invoice.templateSnapshot?.signature || {}) },
+        footer: { ...initialConfig.footer, ...(invoice.templateSnapshot?.footer || {}) },
+        design: { ...initialConfig.design, ...(invoice.templateSnapshot?.design || {}) },
+        sectionsOrder: invoice.templateSnapshot?.sectionsOrder || initialConfig.sectionsOrder
+    };
+
+    const header = config.header;
+    const design = config.design;
+    const primaryColor = design.primaryColor;
+    const fontFamily = design.fontFamily;
 
     return (
         <>
@@ -249,198 +392,264 @@ const PublicPurchaseInvoiceView = () => {
                     </div>
 
                     {/* Styled Purchase Invoice Card matching Invoice Module Layout */}
-                    <div id="purchase-invoice-print" className="bg-white border border-slate-300 rounded-[12px] shadow-md overflow-hidden text-slate-950 p-8 lg:p-12 space-y-6">
-                        
-                        {/* Header Banner using Primary Theme Color */}
-                        <div className="p-8 -mx-8 -mt-8 rounded-t-[11px] mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-4 text-white" style={{ backgroundColor: primaryColor }}>
-                            <div className="flex items-center gap-4">
-                                {header.showLogo && header.logoUrl && (
-                                    <img src={header.logoUrl} alt="Logo" className="h-10 w-auto object-contain rounded-md" />
-                                )}
-                                <div>
-                                    <p className="text-xs font-bold uppercase tracking-[0.24em] opacity-80">Tax Invoice / Purchase Bill</p>
-                                    <h2 className="mt-1 text-2xl lg:text-3xl font-black text-white">{invoice.supplierName}</h2>
-                                    <p className="mt-1 text-sm opacity-90 font-medium">
-                                        {[
-                                            invoice.phone ? `Ph: ${invoice.phone}` : '',
-                                            invoice.gstin ? `GSTIN: ${invoice.gstin}` : '',
-                                            invoice.stateOfSupply ? `State: ${invoice.stateOfSupply}` : ''
-                                        ].filter(Boolean).join("  |  ")}
-                                    </p>
-                                </div>
-                            </div>
-                            <div className="md:text-right">
-                                <p className="text-sm opacity-80 font-medium">Bill No.</p>
-                                <p className="text-2xl font-black text-white">#{invoice.billNo}</p>
-                                <p className="mt-2 inline-flex rounded-full bg-white/10 px-3.5 py-1.5 text-xs font-bold uppercase tracking-widest text-white border border-white/20">
-                                    {invoice.customerType || "B2C"} | {invoiceSize}
-                                </p>
-                            </div>
-                        </div>
+                    <div
+                                        id="purchase-a4-preview"
+                                        className="w-[210mm] min-h-[297mm] bg-white p-10 shadow-2xl relative border border-slate-300 rounded-sm text-slate-900"
+                                        style={{
+                                            fontFamily: config.design.fontFamily,
+                                            fontSize: `${config.design.fontSize}px`,
+                                            color: config.design.textColor,
+                                            lineHeight: "1.5"
+                                        }}
+                                    >
+                                        {/* Dynamic Styled Sections from sectionsOrder */}
+                                        {config.sectionsOrder.map((sectionName) => {
+                                            if (sectionName === "header") {
+                                                const pos = config.header.logoPosition;
+                                                const sz = config.header.logoSize;
+                                                const logoHeight = sz === 'small' ? 'h-8' : sz === 'large' ? 'h-16' : 'h-11';
+                                                
+                                                return (
+                                                    <div
+                                                        key="header"
+                                                        className={`p-6 -mx-10 -mt-10 rounded-t-sm mb-6 flex text-white ${
+                                                            pos === 'center' ? 'flex-col items-center text-center justify-center' : pos === 'right' ? 'flex-row-reverse justify-between items-start' : 'flex-row justify-between items-start'
+                                                        }`}
+                                                        style={{ backgroundColor: config.design.primaryColor }}
+                                                    >
+                                                        <div className={`flex items-center gap-4 ${pos === 'center' ? 'flex-col' : ''}`}>
+                                                            {config.header.showLogo && (
+                                                                config.header.logoUrl ? (
+                                                                    <img src={config.header.logoUrl} alt="Logo" className={`${logoHeight} w-auto object-contain rounded bg-white/10 p-1`} />
+                                                                ) : (
+                                                                    <div className={`${logoHeight} w-24 bg-white/20 border border-dashed border-white/40 rounded flex items-center justify-center text-[10px] font-bold text-white`}>
+                                                                        LOGO
+                                                                    </div>
+                                                                )
+                                                            )}
+                                                            <div>
+                                                                <p className="text-[10px] font-bold uppercase tracking-widest opacity-80">{config.header.headerTitle || "TAX INVOICE / PURCHASE BILL"}</p>
+                                                                {config.header.showCompanyName && <h2 className="text-2xl font-black text-white">SHREE ANDAL TRADERS</h2>}
+                                                                {config.header.showAddress && <p className="text-xs opacity-90 mt-0.5">123 Market Road, Wholesale Hub, Chennai, TN 600001</p>}
+                                                                <p className="text-xs opacity-90">
+                                                                    {config.header.showPhone && "Ph: +91 98765 43210"}
+                                                                    {config.header.showPhone && config.header.showEmail && " | "}
+                                                                    {config.header.showEmail && "Email: contact@shreeandal.ai"}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                        <div className={pos === 'center' ? 'mt-3 text-center' : 'text-right'}>
+                                                            <p className="text-xs opacity-80 font-medium">
+                                                                {config.invoiceInfo.labels?.invoiceNumber || "Bill No."}
+                                                            </p>
+                                                            <p className="text-xl font-black text-white">#PUR-2026-001</p>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
 
-                        {/* Details Section: Supplier (From) & Customer (Bill To) */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 border-b border-slate-200 pb-6">
-                            <div className="space-y-4">
-                                <div>
-                                    <h2 className="text-xs font-bold uppercase tracking-wider mb-2 border-l-2 pl-2" style={{ color: primaryColor, borderColor: primaryColor }}>Supplier (Vendor)</h2>
-                                    <div className="space-y-0.5 text-sm">
-                                        <p className="font-bold text-slate-950">{invoice.supplierName}</p>
-                                        {invoice.phone && <p className="text-slate-650">Ph: {invoice.phone}</p>}
-                                        {invoice.gstin && <p className="text-slate-650">GSTIN: {invoice.gstin}</p>}
-                                        <p className="text-slate-650">State of Supply: {invoice.stateOfSupply}</p>
-                                    </div>
-                                </div>
+                                            if (sectionName === "supplier" && config.supplier.showName) {
+                                                return (
+                                                    <div 
+                                                        key="supplier" 
+                                                        className="mb-5 p-4 border"
+                                                        style={{ 
+                                                            backgroundColor: config.design.secondaryColor || '#fffbeb',
+                                                            borderColor: config.design.borderColor || '#cbd5e1',
+                                                            borderRadius: `${config.design.cornerRadius}px`
+                                                        }}
+                                                    >
+                                                        <h4 className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: config.design.primaryColor }}>Supplier (Vendor Details)</h4>
+                                                        <p className="font-extrabold text-sm text-slate-950">Apex Wholesale Distributors Private Limited</p>
+                                                        {config.supplier.showAddress && <p className="text-xs text-slate-600">Plot 45, Industrial Estate, Guindy, Chennai - 600032</p>}
+                                                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600 mt-1">
+                                                            {config.supplier.showPhone && <span>Ph: +91 94433 22110</span>}
+                                                            {config.supplier.showEmail && <span>Email: billing@apexwholesale.com</span>}
+                                                            {config.supplier.showGSTIN && <span className="font-semibold text-slate-800">GSTIN: 33APEXD9182B1Z4</span>}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
 
-                                <div>
-                                    <h2 className="text-xs font-bold uppercase tracking-wider mb-2 border-l-2 pl-2" style={{ color: primaryColor, borderColor: primaryColor }}>Bill To (Customer)</h2>
-                                    <div className="space-y-0.5 text-sm">
-                                        <p className="font-bold text-slate-950">{invoice.customerName || "Walk-in Customer"}</p>
-                                        <p className="text-slate-650">Type: {invoice.customerType || "B2C"}</p>
-                                        {invoice.customerPhone && <p className="text-slate-650">Phone: {invoice.customerPhone}</p>}
-                                        {invoice.customerGstin && <p className="text-slate-650">GSTIN: {invoice.customerGstin}</p>}
-                                    </div>
-                                </div>
-                            </div>
+                                            if (sectionName === "customer" && config.customer.showName) {
+                                                return (
+                                                    <div key="customer" className="mb-5 p-4 border border-slate-200 rounded-xl bg-slate-50/50">
+                                                        <h4 className="text-[10px] font-bold uppercase tracking-wider mb-1 text-slate-500">Bill To (Customer / Receiving Branch)</h4>
+                                                        <p className="font-bold text-xs text-slate-900">SHREE ANDAL TRADERS - Central Warehouse</p>
+                                                        {config.customer.showBillingAddress && <p className="text-xs text-slate-600">Main Bazaar Road, Madurai, TN 625001</p>}
+                                                        <div className="flex flex-wrap gap-x-4 text-xs text-slate-600 mt-1">
+                                                            {config.customer.showPhone && <span>Ph: +91 98765 43210</span>}
+                                                            {config.customer.showGSTIN && <span className="font-semibold">GSTIN: 33ANDAL8271A1Z5</span>}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
 
-                            <div className="space-y-2 md:text-right flex flex-col md:items-end text-sm">
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3 w-48 text-left md:text-right">
-                                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Bill Date</h2>
-                                    <p className="text-slate-950 font-bold">{invoice.billDate}</p>
-                                </div>
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3 w-48 text-left md:text-right">
-                                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Payment Method</h2>
-                                    <p className="text-slate-950 font-bold">{invoice.paymentMethod || "Cash"}</p>
-                                </div>
-                                <div className="text-xs text-slate-500">
-                                    <span className="font-semibold">Business State:</span> {invoice.businessState || "Tamil Nadu"}
-                                </div>
-                            </div>
-                        </div>
+                                            if (sectionName === "invoiceInfo") {
+                                                const info = config.invoiceInfo;
+                                                return (
+                                                    <div key="invoiceInfo" className="mb-5 grid grid-cols-2 md:grid-cols-4 gap-3 bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs">
+                                                        {info.showInvoiceNumber && (
+                                                            <div>
+                                                                <span className="text-[10px] text-slate-500 font-bold uppercase block">{info.labels?.invoiceNumber || "Bill No."}</span>
+                                                                <span className="font-bold text-slate-900">PUR-2026-001</span>
+                                                            </div>
+                                                        )}
+                                                        {info.showInvoiceDate && (
+                                                            <div>
+                                                                <span className="text-[10px] text-slate-500 font-bold uppercase block">{info.labels?.invoiceDate || "Bill Date"}</span>
+                                                                <span className="font-semibold text-slate-800">12 Sep 2026</span>
+                                                            </div>
+                                                        )}
+                                                        {info.showDueDate && (
+                                                            <div>
+                                                                <span className="text-[10px] text-slate-500 font-bold uppercase block">{info.labels?.dueDate || "Due Date"}</span>
+                                                                <span className="font-semibold text-slate-800">27 Sep 2026</span>
+                                                            </div>
+                                                        )}
+                                                        {info.showPaymentTerms && (
+                                                            <div>
+                                                                <span className="text-[10px] text-slate-500 font-bold uppercase block">{info.labels?.paymentTerms || "Terms"}</span>
+                                                                <span className="font-semibold text-slate-800">Net 15 Days</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            }
 
-                        {/* Items Table */}
-                        <div className="w-full overflow-x-auto">
-                            <table className="w-full border-collapse">
-                                <thead>
-                                    <tr className="border-b-2 border-slate-200 text-left bg-slate-50">
-                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650">Item</th>
-                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-center">Qty</th>
-                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-center">Unit</th>
-                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-right">Price/Unit</th>
-                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-right">Tax</th>
-                                        <th className="py-3 px-2 text-xs font-bold uppercase tracking-wider text-slate-650 text-right">Amount</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {invoice.items.map((item, idx) => (
-                                        <tr key={idx} className="text-sm">
-                                            <td className="py-4 px-2">
-                                                <p className="text-slate-950 font-semibold">{item.itemName}</p>
-                                                {item.hsnCode && <p className="text-slate-400 text-xs mt-0.5">{item.codeType || "HSN"}: {item.hsnCode}</p>}
-                                            </td>
-                                            <td className="py-4 px-2 text-center text-slate-700">{item.quantity}</td>
-                                            <td className="py-4 px-2 text-center text-slate-700">{item.unit || "Pcs"}</td>
-                                            <td className="py-4 px-2 text-right text-slate-700">₹{item.pricePerUnit.toFixed(2)}</td>
-                                            <td className="py-4 px-2 text-right text-slate-700">{item.taxPercent}%</td>
-                                            <td className="py-4 px-2 text-right text-slate-950 font-bold">₹{item.amount.toFixed(2)}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                                            if (sectionName === "items") {
+                                                const borderCls = config.design.borderStyle === "none" ? "border-none" : config.design.borderStyle === "medium" ? "border-2 border-slate-300" : "border border-slate-200";
+                                                
+                                                return (
+                                                    <div key="items" className="mb-6 overflow-hidden" style={{ borderRadius: `${config.design.cornerRadius}px` }}>
+                                                        <table className={`w-full text-left border-collapse ${borderCls}`}>
+                                                            <thead>
+                                                                <tr className="text-white text-xs font-bold" style={{ backgroundColor: config.design.primaryColor }}>
+                                                                    <th className="py-2.5 px-3">#</th>
+                                                                    {config.items.columns.map((col) => (
+                                                                        <th key={col} className="py-2.5 px-3">
+                                                                            {(config.items.labels as any)[col] || col}
+                                                                        </th>
+                                                                    ))}
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody className="divide-y divide-slate-100 text-xs">
+                                                                {invoice.items.map((item, idx) => (
+                                                                    <tr key={idx} style={{ backgroundColor: idx % 2 === 1 ? config.design.secondaryColor || '#fffbeb' : 'transparent' }}>
+                                                                        <td className="py-3 px-3">{idx + 1}</td>
+                                                                        {config.items.columns.map((col) => {
+                                                                            if (col === "item") return <td key={col} className="py-3 px-3 font-bold text-slate-950">{item.itemName}</td>;
+                                                                            if (col === "description") return <td key={col} className="py-3 px-3 text-slate-500">{item.description || "-"}</td>;
+                                                                            if (col === "sku") return <td key={col} className="py-3 px-3 text-slate-600 font-mono text-[11px]">{item.itemCode || "-"}</td>;
+                                                                            if (col === "hsn") return <td key={col} className="py-3 px-3 text-slate-600">{item.hsnCode || "-"}</td>;
+                                                                            if (col === "quantity") return <td key={col} className="py-3 px-3">{item.quantity} {item.unit}</td>;
+                                                                            if (col === "rate") return <td key={col} className="py-3 px-3">₹{item.pricePerUnit.toFixed(2)}</td>;
+                                                                            if (col === "tax") return <td key={col} className="py-3 px-3">{item.taxPercent}% GST</td>;
+                                                                            if (col === "amount") return <td key={col} className="py-3 px-3 font-bold text-slate-950">₹{item.amount.toFixed(2)}</td>;
+                                                                            return <td key={col}>-</td>;
+                                                                        })}
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                );
+                                            }
 
-                        {/* Totals Summary */}
-                        <div className="flex flex-col md:flex-row justify-between items-start gap-8 pt-6 border-t border-slate-200">
-                            <div className="text-xs text-slate-500 max-w-md space-y-2">
-                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                                    <p className="font-bold text-slate-700 mb-1 uppercase tracking-wider text-[11px]">Payment Summary</p>
-                                    <p className="text-emerald-700 font-semibold text-sm">Amount Paid: ₹{invoice.paid.toFixed(2)}</p>
-                                    {invoice.balance > 0 && (
-                                        <p className="text-rose-700 font-semibold text-sm mt-1">Balance Due: ₹{invoice.balance.toFixed(2)}</p>
-                                    )}
-                                </div>
-                            </div>
+                                            if (sectionName === "tax") {
+                                                const taxCfg = config.tax;
+                                                return (
+                                                    <div key="tax" className="mb-6 flex justify-end">
+                                                        <div className="w-72 space-y-1.5 text-xs">
+                                                            {taxCfg.showTaxableAmount && <div className="flex justify-between text-slate-600"><span>Taxable Amount</span><span>₹16,880.00</span></div>}
+                                                            {taxCfg.showCGST && <div className="flex justify-between text-slate-500 text-[11px]"><span>CGST (2.5%)</span><span>₹422.00</span></div>}
+                                                            {taxCfg.showSGST && <div className="flex justify-between text-slate-500 text-[11px]"><span>SGST (2.5%)</span><span>₹422.00</span></div>}
+                                                            {taxCfg.showTotalTax && <div className="flex justify-between text-slate-600 font-medium border-t border-slate-100 pt-1"><span>Total Tax</span><span>₹844.00</span></div>}
+                                                            <div 
+                                                                className="flex justify-between items-center py-2.5 px-3.5 text-white font-bold rounded-lg mt-2 shadow-sm"
+                                                                style={{ 
+                                                                    backgroundColor: config.design.primaryColor,
+                                                                    borderRadius: `${config.design.cornerRadius}px`
+                                                                }}
+                                                            >
+                                                                <span>Grand Total Amount</span>
+                                                                <span className="text-base font-black">₹17,724.00</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
 
-                            <div className="w-full md:w-72 space-y-2.5 text-sm">
-                                <div className="flex justify-between text-slate-600">
-                                    <span>Subtotal</span>
-                                    <span>₹{invoice.subtotal.toFixed(2)}</span>
-                                </div>
+                                            if (sectionName === "payment" && (config.payment.showPaidAmount || config.payment.showBalance)) {
+                                                return (
+                                                    <div key="payment" className="mb-5 p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl flex justify-between items-center text-xs">
+                                                        {config.payment.showPaidAmount && <div><span className="text-slate-500 block text-[10px] font-bold uppercase">Amount Paid</span><span className="font-bold text-emerald-800 text-sm">₹10,000.00</span></div>}
+                                                        {config.payment.showBalance && <div><span className="text-slate-500 block text-[10px] font-bold uppercase">Balance Due</span><span className="font-bold text-rose-700 text-sm">₹7,724.00</span></div>}
+                                                        {config.payment.showPaymentMethod && <div><span className="text-slate-500 block text-[10px] font-bold uppercase">Payment Mode</span><span className="font-semibold text-slate-800">Bank Wire / NEFT</span></div>}
+                                                    </div>
+                                                );
+                                            }
 
-                                {invoice.totalSgst > 0 && (
-                                    <div className="flex justify-between text-slate-500 text-xs">
-                                        <span>SGST</span>
-                                        <span>₹{invoice.totalSgst.toFixed(2)}</span>
-                                    </div>
-                                )}
-                                {invoice.totalCgst > 0 && (
-                                    <div className="flex justify-between text-slate-500 text-xs">
-                                        <span>CGST</span>
-                                        <span>₹{invoice.totalCgst.toFixed(2)}</span>
-                                    </div>
-                                )}
-                                {invoice.totalIgst > 0 && (
-                                    <div className="flex justify-between text-slate-500 text-xs">
-                                        <span>IGST</span>
-                                        <span>₹{invoice.totalIgst.toFixed(2)}</span>
-                                    </div>
-                                )}
+                                            
+                                            if (sectionName === "banking" && config.banking?.show) {
+                                                return (
+                                                    <div key="banking" className="mb-4 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                        <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px] mb-1">{config.banking.label || "Banking Details"}</p>
+                                                        <div className="grid grid-cols-2 gap-2 text-slate-600">
+                                                            <p><span className="font-medium text-slate-500">Bank Name:</span> {invoice.bankName || "N/A"}</p>
+                                                            <p><span className="font-medium text-slate-500">Account Type:</span> {invoice.accountType || "N/A"}</p>
+                                                            <p><span className="font-medium text-slate-500">Account Number:</span> {invoice.accountNumber || "N/A"}</p>
+                                                            <p><span className="font-medium text-slate-500">IFSC Code:</span> {invoice.ifscCode || "N/A"}</p>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
 
-                                {invoice.totalTax > 0 && (
-                                    <div className="flex justify-between text-slate-600">
-                                        <span>Total Tax</span>
-                                        <span>₹{invoice.totalTax.toFixed(2)}</span>
-                                    </div>
-                                )}
+                                            if (sectionName === "notes" && config.notes.show) {
+                                                return (
+                                                    <div key="notes" className="mb-4 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                        <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px] mb-0.5">{config.notes.label || "Purchase Notes"}</p>
+                                                        <p className="text-slate-600">{config.notes.defaultText}</p>
+                                                    </div>
+                                                );
+                                            }
 
-                                <div className="flex justify-between items-center pt-3 pb-3 px-4 rounded-xl shadow-md text-white" style={{ backgroundColor: primaryColor }}>
-                                    <span className="text-base font-bold">Grand Total</span>
-                                    <span className="text-2xl font-black">
-                                        ₹{invoice.total.toFixed(2)}
-                                    </span>
-                                </div>
+                                            if (sectionName === "terms" && config.terms.show) {
+                                                return (
+                                                    <div key="terms" className="mb-4 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                        <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px] mb-0.5">{config.terms.label || "Terms & Conditions"}</p>
+                                                        <p className="text-slate-500">{config.terms.defaultText}</p>
+                                                    </div>
+                                                );
+                                            }
 
-                                {invoice.paid > 0 && (
-                                    <div className="flex justify-between text-slate-600 text-xs pt-2">
-                                        <span>Paid</span>
-                                        <span className="text-emerald-600 font-bold">₹{invoice.paid.toFixed(2)}</span>
-                                    </div>
-                                )}
+                                            if (sectionName === "signature" && config.signature.show) {
+                                                return (
+                                                    <div key="signature" className="mt-8 flex justify-end">
+                                                        <div className="text-center w-52">
+                                                            {config.signature.imageUrl ? (
+                                                                <img src={config.signature.imageUrl} alt="Signature" className="h-12 w-auto mx-auto object-contain mb-1" />
+                                                            ) : (
+                                                                <div className="h-10 border-b border-slate-400 mb-1"></div>
+                                                            )}
+                                                            <p className="font-extrabold text-xs text-slate-900">{config.signature.name || "Inventory Manager"}</p>
+                                                            <p className="text-[10px] text-slate-500">{config.signature.designation || "Authorized Stock Receiver"}</p>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
 
-                                {invoice.balance > 0 && (
-                                    <div className="flex justify-between text-slate-600 text-xs pt-1">
-                                        <span>Balance Due</span>
-                                        <span className="text-rose-600 font-bold">₹{invoice.balance.toFixed(2)}</span>
-                                    </div>
-                                )}
-                            </div>
+                                            if (sectionName === "footer" && config.footer.show) {
+                                                return (
+                                                    <div key="footer" className="mt-8 pt-4 border-t border-slate-200 text-center text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                                                        {config.footer.text}
+                                                    </div>
+                                                );
+                                            }
 
-                            {/* Authorised Signature & Banking Details */}
-                            <div className="mt-8 pt-6 border-t border-white/10 flex flex-col md:flex-row justify-between items-end gap-6 text-left">
-                                <div className="text-xs text-slate-400 space-y-1">
-                                    <p className="font-bold uppercase tracking-wider text-amber-400 text-xs mb-1">Banking Details</p>
-                                    <p><span className="text-slate-500 font-medium">Company:</span> Shree Andal AI Software Solutions (OPC) Pvt Ltd</p>
-                                    {invoice.gstin && <p><span className="text-slate-500 font-medium">GSTIN:</span> {invoice.gstin}</p>}
-                                </div>
-                                <div className="text-right">
-                                    <div className="w-48 text-center pt-2">
-                                        <div className="border-t border-white/20 pt-1">
-                                            <p className="text-xs font-bold text-white uppercase tracking-wider">Authorised Signature</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Footer Info */}
-                        <div className="px-8 py-8 bg-slate-50 border-t border-slate-200 text-center rounded-b-[11px]">
-                            <p className="text-slate-500 text-xs">
-                                This is a digitally generated purchase invoice.
-                            </p>
-                            <p className="text-slate-400 text-[10px] mt-2 tracking-widest font-bold uppercase">
-                                Shree Andal AI Software Solutions (OPC) Pvt Ltd • Powered by FinSmart ✨
-                            </p>
-                        </div>
-                    </div>
+                                            return null;
+                                        })}
+</div>
                 </div>
             </div>
         </>

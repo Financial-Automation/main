@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
-import { ArrowLeft, Plus, Trash2, Package, Search, Archive, ShoppingCart, Loader2, Shield, Mic, Save, FileText, Calculator, IndianRupee, AlertCircle, Download, Printer, Copy, MessageCircle, Share2, Layout, Check, Edit, Edit3, Star, Palette, Eye, Settings, Sliders, Building2, User, PenTool, FolderOpen, Image as ImageIcon, CheckCircle, Calendar } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Package, Search, Archive, ShoppingCart, Loader2, Shield, Mic, Save, FileText, Calculator, IndianRupee, AlertCircle, Download, Printer, Copy, MessageCircle, Share2, Layout, Check, Edit, Edit3, Star, Palette, Eye, Settings, Sliders, Building2, User, PenTool, FolderOpen, Image as ImageIcon, CheckCircle, Calendar, CreditCard, X } from "lucide-react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { parseVoiceInventoryText } from "@/lib/voiceInventoryParser";
@@ -113,6 +113,10 @@ interface PurchaseInvoice {
     total: number;
     paid: number;
     balance: number;
+    bankName?: string;
+    accountType?: string;
+    accountNumber?: string;
+    ifscCode?: string;
 }
 
 const BUSINESS_STATE = "Tamil Nadu";
@@ -239,6 +243,10 @@ const Inventory = () => {
             showTaxableAmount: true,
             showTotalTax: true
         },
+        banking: {
+            show: true,
+            label: "Banking Details"
+        },
         payment: {
             showPaidAmount: true,
             showBalance: true,
@@ -287,6 +295,7 @@ const Inventory = () => {
             "items",
             "tax",
             "payment",
+            "banking",
             "notes",
             "terms",
             "signature",
@@ -393,7 +402,11 @@ const Inventory = () => {
                 labels: { ...DEFAULT_PURCHASE_CONFIG.items.labels, ...cfg.items?.labels }
             },
             tax: { ...DEFAULT_PURCHASE_CONFIG.tax, ...cfg.tax },
-            payment: { ...DEFAULT_PURCHASE_CONFIG.payment, ...cfg.payment },
+            banking: {
+            show: true,
+            label: "Banking Details"
+        },
+        payment: { ...DEFAULT_PURCHASE_CONFIG.payment, ...cfg.payment },
             notes: { ...DEFAULT_PURCHASE_CONFIG.notes, ...cfg.notes },
             terms: { ...DEFAULT_PURCHASE_CONFIG.terms, ...cfg.terms },
             signature: { ...DEFAULT_PURCHASE_CONFIG.signature, ...cfg.signature },
@@ -535,6 +548,64 @@ const Inventory = () => {
     };
 
     const [purchaseInvoices, setPurchaseInvoices] = useState<PurchaseInvoice[]>([]);
+    const [isRecordPaymentOpen, setIsRecordPaymentOpen] = useState(false);
+    const [selectedPaymentInvoiceId, setSelectedPaymentInvoiceId] = useState<string | null>(null);
+    const [paymentForm, setPaymentForm] = useState({ amount: 0, paymentDate: new Date().toISOString().split('T')[0], paymentMethod: 'cash', notes: '', referenceNumber: '', depositAccount: '' });
+
+    const handleRecordPaymentSubmit = async () => {
+        if (paymentForm.amount <= 0) {
+            toast.error("Payment amount must be greater than zero.");
+            return;
+        }
+        
+        const isCredit = paymentForm.paymentMethod === 'credit';
+        const actualAmount = isCredit ? 0 : paymentForm.amount;
+
+        if (!selectedPaymentInvoiceId) {
+            setPurchaseInvoice(prev => ({
+                ...prev,
+                paid: (prev.paid || 0) + actualAmount,
+                balance: Math.max(0, prev.total - ((prev.paid || 0) + actualAmount)),
+                paymentMethod: paymentForm.paymentMethod as any
+            }));
+            toast.success("Payment recorded. Please save invoice.");
+            setIsRecordPaymentOpen(false);
+            return;
+        }
+
+        if (paymentForm.amount <= 0) {
+            toast.error("Payment amount must be greater than zero.");
+            return;
+        }
+
+        try {
+            const token = localStorage.getItem("token");
+            const res = await fetch(`${API_BASE_URL}/purchase-invoice/${selectedPaymentInvoiceId}/payment`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                    amount: actualAmount,
+                    amountPaid: actualAmount,
+                    paymentMethod: paymentForm.paymentMethod,
+                    paymentDate: paymentForm.paymentDate
+                })
+            });
+
+            if (res.ok) {
+                toast.success("Payment recorded successfully!");
+                setIsRecordPaymentOpen(false);
+                fetchPurchaseInvoices();
+            } else {
+                toast.error("Failed to record payment.");
+            }
+        } catch (error) {
+            console.error("Payment error:", error);
+            toast.error("An error occurred while recording payment.");
+        }
+    };
 
     const generatePurchaseNo = (invoicesList: PurchaseInvoice[] = purchaseInvoices) => {
         const prefix = 'PUR';
@@ -604,6 +675,10 @@ const Inventory = () => {
         total: 0,
         paid: 0,
         balance: 0,
+        bankName: '',
+        accountType: 'Current',
+        accountNumber: '',
+        ifscCode: '',
     });
 
     const [purchaseNewItem, setPurchaseNewItem] = useState<Partial<PurchaseItem>>({
@@ -837,7 +912,7 @@ const Inventory = () => {
         }));
     };
 
-    const savePurchaseInvoice = async () => {
+    const savePurchaseInvoice = async (status: string = 'completed') => {
         if (purchaseInvoice.items.length === 0) {
             toast.error("Please add at least one item");
             return;
@@ -861,12 +936,19 @@ const Inventory = () => {
             const activeTemplate = userTemplates.find((t: any) => t._id === selectedTemplateId);
             const payload = {
                 ...purchaseInvoice,
+                status,
                 templateId: selectedTemplateId || undefined,
                 templateSnapshot: activeTemplate ? activeTemplate.config : undefined,
             };
 
-            const res = await fetch(`${API_BASE_URL}/purchase-invoice/create`, {
-                method: 'POST',
+            const targetId = lastSavedPurchaseId || (purchaseInvoice as any)._id;
+            const url = targetId 
+                ? `${API_BASE_URL}/purchase-invoice/${targetId}`
+                : `${API_BASE_URL}/purchase-invoice/create`;
+            const method = targetId ? 'PUT' : 'POST';
+
+            const res = await fetch(url, {
+                method,
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`,
@@ -880,7 +962,7 @@ const Inventory = () => {
                 const added = stockUpdates.filter((s: { action: string }) => s.action === 'created').length;
                 const updated = stockUpdates.filter((s: { action: string }) => s.action === 'updated').length;
 
-                let msg = "Purchase invoice saved!";
+                let msg = status === 'draft' ? "Purchase invoice drafted! You can continue from History." : "Purchase invoice saved!";
                 if (added > 0) msg += ` ${added} new item(s) added to stock.`;
                 if (updated > 0) msg += ` ${updated} item(s) stock updated.`;
 
@@ -888,6 +970,8 @@ const Inventory = () => {
                 setLastSavedPurchaseId(data.invoice?._id || null);
                 fetchItems(); // Refresh inventory items list
                 fetchPurchaseInvoices(); // Refresh purchase invoices list to update sequence
+                
+                // Note: The history list is already on the same page (bottom of purchase tab)
             } else {
                 const data = await res.json();
                 toast.error(data.message || "Failed to save purchase invoice");
@@ -928,6 +1012,46 @@ const Inventory = () => {
             balance: 0,
         });
         setLastSavedPurchaseId(null);
+    };
+
+    const continuePurchaseDraft = (inv: any) => {
+        setPurchaseInvoice({
+            type: inv.type || 'purchase',
+            customerType: inv.customerType || 'B2C',
+            customerName: inv.customerName || '',
+            customerPhone: inv.customerPhone || '',
+            customerGstin: inv.customerGstin || '',
+            supplierName: inv.supplierName || '',
+            phone: inv.phone || '',
+            gstin: inv.gstin || '',
+            billNo: inv.billNo || inv.invoiceNo || generatePurchaseNo(),
+            billDate: inv.billDate || inv.invoiceDate || new Date().toISOString().split('T')[0],
+            paymentMethod: inv.paymentMethod || 'Cash',
+            invoiceSize: inv.invoiceSize || 'A4',
+            invoiceFormat: inv.invoiceFormat || 'Supermarket',
+            stateOfSupply: inv.stateOfSupply || '',
+            businessState: inv.businessState || BUSINESS_STATE,
+            items: inv.items || [],
+            subtotal: inv.subtotal || 0,
+            totalSgst: inv.totalSgst || 0,
+            totalCgst: inv.totalCgst || 0,
+            totalIgst: inv.totalIgst || 0,
+            totalTax: inv.totalTax || 0,
+            total: inv.total || 0,
+            paid: inv.paid || 0,
+            balance: inv.balance || 0,
+            status: 'draft',
+            bankName: inv.bankName || '',
+            accountType: inv.accountType || 'Current',
+            accountNumber: inv.accountNumber || '',
+            ifscCode: inv.ifscCode || ''
+        });
+        setLastSavedPurchaseId(inv.id || inv._id);
+        setActiveTab('purchase');
+        setTimeout(() => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }, 50);
+        toast.success(`Draft #${inv.billNo || inv.invoiceNo || ''} loaded for editing.`);
     };
 
     // Export purchase invoice as CSV
@@ -2636,6 +2760,54 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                             </div>
                                         </div>
 
+                                        <div className="pt-2">
+                                            <Label className="text-amber-400 font-bold uppercase tracking-wider text-xs mb-3 block">Banking Details</Label>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="space-y-2">
+                                                    <Label className="text-amber-100 text-xs">Bank Name</Label>
+                                                    <Input
+                                                        value={purchaseInvoice.bankName || ''}
+                                                        onChange={(e) => setPurchaseInvoice(prev => ({ ...prev, bankName: e.target.value }))}
+                                                        className="bg-white/5 border-amber-400/30 text-amber-100"
+                                                        placeholder="e.g. HDFC Bank"
+                                                    />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <Label className="text-amber-100 text-xs">Account Type</Label>
+                                                    <Select
+                                                        value={purchaseInvoice.accountType || 'Current'}
+                                                        onValueChange={(val) => setPurchaseInvoice(prev => ({ ...prev, accountType: val }))}
+                                                    >
+                                                        <SelectTrigger className="bg-white/5 border-amber-400/30 text-amber-100">
+                                                            <SelectValue placeholder="Account Type" />
+                                                        </SelectTrigger>
+                                                        <SelectContent className="bg-slate-900 border-amber-400/20 text-white">
+                                                            <SelectItem value="Current">Current</SelectItem>
+                                                            <SelectItem value="Savings">Savings</SelectItem>
+                                                        </SelectContent>
+                                                    </Select>
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <Label className="text-amber-100 text-xs">Account Number</Label>
+                                                    <Input
+                                                        value={purchaseInvoice.accountNumber || ''}
+                                                        onChange={(e) => setPurchaseInvoice(prev => ({ ...prev, accountNumber: e.target.value }))}
+                                                        className="bg-white/5 border-amber-400/30 text-amber-100"
+                                                        placeholder="Account Number"
+                                                    />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <Label className="text-amber-100 text-xs">IFSC Code</Label>
+                                                    <Input
+                                                        value={purchaseInvoice.ifscCode || ''}
+                                                        onChange={(e) => setPurchaseInvoice(prev => ({ ...prev, ifscCode: e.target.value }))}
+                                                        className="bg-white/5 border-amber-400/30 text-amber-100 uppercase"
+                                                        placeholder="IFSC Code"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+
                                         {/* Inter/Intra state indicator */}
                                         {purchaseInvoice.stateOfSupply && (
                                             <div className={`flex items-center gap-2 text-xs py-2 px-3 rounded-lg ${isInterStatePurchase()
@@ -2924,21 +3096,33 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                         {/* Paid / Balance */}
                                         <div className="border-t border-amber-400/20 pt-3 space-y-3">
                                             <div className="space-y-2">
-                                                <Label className="text-amber-100">Amount Paid</Label>
-                                                <Input
-                                                    type="number"
-                                                    value={purchaseInvoice.paid || ''}
-                                                    onChange={(e) => {
-                                                        const paid = Number(e.target.value) || 0;
-                                                        setPurchaseInvoice(prev => ({
-                                                            ...prev,
-                                                            paid,
-                                                            balance: prev.total - paid,
-                                                        }));
-                                                    }}
-                                                    className="bg-white/5 border-amber-400/30 text-amber-100"
-                                                    placeholder="0.00"
-                                                />
+                                                {lastSavedPurchaseId && purchaseInvoice.status !== 'draft' && (
+                                                    <div className="space-y-3">
+                                                        {purchaseInvoice.paid > 0 && (
+                                                            <div className="flex justify-between items-center text-sm mb-2">
+                                                                <span className="text-amber-100">Amount Paid</span>
+                                                                <span className="font-bold text-emerald-400">₹{purchaseInvoice.paid.toFixed(2)}</span>
+                                                            </div>
+                                                        )}
+                                                        {purchaseInvoice.balance > 0 && (
+                                                            <Button
+                                                                onClick={() => {
+                                                                    setSelectedPaymentInvoiceId(lastSavedPurchaseId);
+                                                                    setPaymentForm(prev => ({ ...prev, amount: purchaseInvoice.balance }));
+                                                                    setIsRecordPaymentOpen(true);
+                                                                }}
+                                                                className="w-full bg-amber-500 hover:bg-amber-600 text-slate-900 rounded-xl py-6 font-bold flex items-center justify-center gap-2"
+                                                            >
+                                                                <CreditCard className="h-5 w-5" />
+                                                                Record Payment
+                                                            </Button>
+                                                        )}
+                                                        <Button onClick={() => downloadPurchaseInvoicePDF(purchaseInvoice)} variant="outline" className="w-full bg-white/5 border-amber-400/30 text-amber-200 hover:bg-white/10 rounded-xl py-6 font-bold flex items-center justify-center gap-2">
+                                                            <Printer className="h-5 w-5" />
+                                                            Print Invoice
+                                                        </Button>
+                                                    </div>
+                                                )}
                                             </div>
                                             <div className="flex justify-between text-sm">
                                                 <span className="text-amber-300/70">Balance Due</span>
@@ -2950,26 +3134,32 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
 
                                         {/* Action Buttons */}
                                         <div className="border-t border-amber-400/20 pt-3 space-y-2">
-                                            <Button
-                                                onClick={savePurchaseInvoice}
-                                                disabled={isPurchaseSaving || purchaseInvoice.items.length === 0}
-                                                className="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold h-12 rounded-xl"
-                                            >
-                                                {isPurchaseSaving ? (
-                                                    <><Loader2 className="h-4 w-4 animate-spin mr-2" /> Saving...</>
-                                                ) : (
-                                                    <><Save className="h-4 w-4 mr-2" /> Save Purchase Invoice</>
-                                                )}
-                                            </Button>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <Button
+                                                        onClick={() => savePurchaseInvoice('draft')}
+                                                        disabled={isPurchaseSaving || (purchaseInvoice.status !== 'draft' && purchaseInvoice.status !== undefined)}
+                                                        variant="outline"
+                                                        className="w-full border-amber-400/30 text-amber-100 hover:bg-amber-400/10 font-bold h-12 rounded-xl"
+                                                    >
+                                                        Save Draft
+                                                    </Button>
+                                                    <Button
+                                                        onClick={() => savePurchaseInvoice('completed')}
+                                                        disabled={isPurchaseSaving || purchaseInvoice.items.length === 0}
+                                                        className="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold h-12 rounded-xl"
+                                                    >
+                                                        {isPurchaseSaving ? (
+                                                            <><Loader2 className="h-4 w-4 animate-spin mr-2" /> Saving...</>
+                                                        ) : (
+                                                            <><Save className="h-4 w-4 mr-2" /> Save Invoice</>
+                                                        )}
+                                                    </Button>
+                                                </div>
 
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <Button onClick={printPurchaseInvoice} variant="outline" className="py-2 bg-white/5 border-amber-400/30 text-amber-200 hover:bg-white/10 text-sm rounded-xl">
-                                                    <Printer className="h-4 w-4 mr-1" />
-                                                    Print
-                                                </Button>
-                                                <Button onClick={resetPurchaseForm} variant="outline" className="py-2 bg-white/5 border-amber-400/30 text-amber-200 hover:bg-white/10 text-sm rounded-xl">
+                                            <div className="grid grid-cols-1 gap-2">
+                                                <Button onClick={resetPurchaseForm} variant="outline" className="py-2 bg-white/5 border-amber-400/30 text-amber-200 hover:bg-white/10 text-sm rounded-xl font-bold">
                                                     <Trash2 className="h-4 w-4 mr-1" />
-                                                    Clear
+                                                    Clear Form
                                                 </Button>
                                             </div>
 
@@ -3122,6 +3312,34 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                                                 </div>
 
                                                                 <div className="flex flex-wrap items-center gap-2">
+                                                                    {inv.status === 'draft' ? (
+                                                                        <Button
+                                                                            size="sm"
+                                                                            variant="outline"
+                                                                            onClick={() => continuePurchaseDraft(inv)}
+                                                                            className="bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20 hover:text-amber-100 text-xs rounded-xl flex items-center px-3 py-1.5 font-medium transition-colors"
+                                                                        >
+                                                                            <Edit3 className="h-3.5 w-3.5 mr-1.5" />
+                                                                            Continue Draft
+                                                                        </Button>
+                                                                    ) : (
+                                                                        (inv.balance || 0) > 0 && (
+                                                                            <Button
+                                                                                size="sm"
+                                                                                variant="outline"
+                                                                                onClick={() => {
+                                                                                    setSelectedPaymentInvoiceId(inv._id);
+                                                                                    setPaymentForm(prev => ({ ...prev, amount: inv.balance || 0 }));
+                                                                                    setIsRecordPaymentOpen(true);
+                                                                                }}
+                                                                                className="bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-100 text-xs rounded-xl flex items-center px-3 py-1.5 font-medium transition-colors"
+                                                                            >
+                                                                                <CreditCard className="h-3.5 w-3.5 mr-1.5" />
+                                                                                Pay
+                                                                            </Button>
+                                                                        )
+                                                                    )}
+
                                                                     <Button
                                                                         size="sm"
                                                                         variant="outline"
@@ -3683,6 +3901,34 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                                     </div>
                                                 </Card>
 
+                                                
+                                                {/* Banking Details */}
+                                                <Card className="p-3.5 border-slate-200 shadow-none">
+                                                    <h3 className="font-bold text-xs text-slate-900 border-b border-slate-100 pb-2 mb-3 flex items-center gap-2">
+                                                        <Building2 className="h-4 w-4 text-amber-600" />
+                                                        Banking Details Toggles
+                                                    </h3>
+                                                    <div className="space-y-3">
+                                                        <div className="flex items-center justify-between text-xs">
+                                                            <Label className="font-semibold text-slate-700">Show Banking Section</Label>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={purchaseConfig.banking.show}
+                                                                onChange={(e) => updatePurchaseSubConfig("banking", "show", e.target.checked)}
+                                                                className="h-4 w-4 accent-amber-600"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <Label className="text-xs font-semibold text-slate-700">Section Label</Label>
+                                                            <Input 
+                                                                value={purchaseConfig.banking.label}
+                                                                onChange={(e) => updatePurchaseSubConfig("banking", "label", e.target.value)}
+                                                                className="h-8 text-xs bg-white"
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                </Card>
+
                                                 {/* Notes & Terms */}
                                                 <Card className="p-3.5 border-slate-200 shadow-none">
                                                     <h3 className="font-bold text-xs text-slate-900 border-b border-slate-100 pb-2 mb-3">
@@ -4221,6 +4467,21 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                                 );
                                             }
 
+                                            
+                                            if (sectionName === "banking" && purchaseConfig.banking?.show) {
+                                                return (
+                                                    <div key="banking" className="mb-4 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                                        <p className="font-bold text-slate-800 uppercase tracking-wider text-[10px] mb-1">{purchaseConfig.banking.label || "Banking Details"}</p>
+                                                        <div className="grid grid-cols-2 gap-2 text-slate-600">
+                                                            <p><span className="font-medium text-slate-500">Bank Name:</span> HDFC Bank</p>
+                                                            <p><span className="font-medium text-slate-500">Account Type:</span> Current</p>
+                                                            <p><span className="font-medium text-slate-500">Account Number:</span> 50200012345678</p>
+                                                            <p><span className="font-medium text-slate-500">IFSC Code:</span> HDFC0001234</p>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            }
+
                                             if (sectionName === "notes" && purchaseConfig.notes.show) {
                                                 return (
                                                     <div key="notes" className="mb-4 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
@@ -4394,8 +4655,92 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                     Powered by SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED ✨
                 </p>
             </div>
+
+            {isRecordPaymentOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+                    <div className="bg-white rounded-[24px] shadow-2xl w-full max-w-md overflow-hidden border border-slate-100 animate-in fade-in zoom-in duration-200">
+                        <div className="px-6 py-5 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-xl font-extrabold text-slate-900">Record Payment</h3>
+                                <p className="text-slate-500 text-sm mt-0.5">Record a manual payment receipt.</p>
+                            </div>
+                            <Button variant="ghost" size="icon" onClick={() => setIsRecordPaymentOpen(false)} className="rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100">
+                                <X className="h-5 w-5" />
+                            </Button>
+                        </div>
+                        <div className="p-6">
+                            <div className="space-y-5">
+                                <div className="space-y-1.5">
+                                    <Label className="text-slate-800 text-sm font-semibold">Payment Amount (₹)</Label>
+                                    <div className="relative">
+                                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-medium">₹</span>
+                                        <Input
+                                            type="number"
+                                            value={paymentForm.amount}
+                                            onChange={(e) => setPaymentForm(prev => ({ ...prev, amount: parseFloat(e.target.value) || 0 }))}
+                                            className="pl-8 rounded-xl border-slate-200 font-bold text-slate-900"
+                                        />
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <Label className="text-slate-800 text-sm font-semibold">Payment Date</Label>
+                                        <Input
+                                            type="date"
+                                            value={paymentForm.paymentDate}
+                                            onChange={(e) => setPaymentForm(prev => ({ ...prev, paymentDate: e.target.value }))}
+                                            className="rounded-xl border-slate-200 text-xs text-slate-900"
+                                        />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <Label className="text-slate-800 text-sm font-semibold">Method</Label>
+                                        <Select
+                                            value={paymentForm.paymentMethod}
+                                            onValueChange={(val) => setPaymentForm(prev => ({ ...prev, paymentMethod: val }))}
+                                        >
+                                            <SelectTrigger className="rounded-xl border-slate-200 text-slate-900">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent className="bg-white text-slate-900 border-slate-200">
+                                                <SelectItem value="cash">Cash</SelectItem>
+                                                <SelectItem value="upi">UPI</SelectItem>
+                                                <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
+                                                <SelectItem value="cheque">Cheque</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label className="text-slate-800 text-sm font-semibold">Reference Number</Label>
+                                    <Input
+                                        value={paymentForm.referenceNumber}
+                                        onChange={(e) => setPaymentForm(prev => ({ ...prev, referenceNumber: e.target.value }))}
+                                        placeholder="Transaction/Cheque ID"
+                                        className="rounded-xl border-slate-200 text-slate-900"
+                                    />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label className="text-slate-800 text-sm font-semibold">Notes</Label>
+                                    <textarea
+                                        value={paymentForm.notes}
+                                        onChange={(e) => setPaymentForm(prev => ({ ...prev, notes: e.target.value }))}
+                                        placeholder="Internal receipt description"
+                                        className="w-full p-2.5 text-sm rounded-xl border border-slate-200 text-slate-900 focus:outline-none"
+                                        rows={2}
+                                    />
+                                </div>
+                            </div>
+                            <div className="mt-6 flex justify-end gap-3 border-t border-slate-100 pt-4">
+                                <Button variant="outline" onClick={() => setIsRecordPaymentOpen(false)} className="rounded-full">Cancel</Button>
+                                <Button onClick={handleRecordPaymentSubmit} className="rounded-full bg-slate-950 text-white hover:bg-slate-850">Apply Payment</Button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
-};
+}
+;
 
 export default Inventory;

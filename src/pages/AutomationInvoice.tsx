@@ -631,10 +631,15 @@ const AutomationInvoice = () => {
   const handleRecordPaymentSubmit = async () => {
     const targetId = selectedPaymentInvoiceId || lastSavedId;
 
-    if (paymentForm.amount <= 0) {
+    const isCredit = paymentForm.paymentMethod === 'credit';
+
+    // For non-credit, amount must be > 0
+    if (!isCredit && paymentForm.amount <= 0) {
       toast.error("Payment amount must be greater than zero.");
       return;
     }
+
+    const actualAmount = isCredit ? 0 : paymentForm.amount;
 
     let updatedInvoiceData: any = null;
 
@@ -648,10 +653,11 @@ const AutomationInvoice = () => {
             "Authorization": `Bearer ${token}`
           },
           body: JSON.stringify({
-            amount: paymentForm.amount,
-            amountPaid: paymentForm.amount,
+            amount: actualAmount,
+            amountPaid: actualAmount,
             paymentMethod: paymentForm.paymentMethod,
-            paymentDate: paymentForm.paymentDate
+            paymentDate: paymentForm.paymentDate,
+            isCredit
           })
         });
 
@@ -680,14 +686,27 @@ const AutomationInvoice = () => {
     if (idx !== -1) {
       const currentPaid = savedList[idx].paid || 0;
       const currentTotal = savedList[idx].total || savedList[idx].grandTotal || 0;
-      newPaid = updatedInvoiceData ? (updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid) : (currentPaid + paymentForm.amount);
-      newBalance = updatedInvoiceData ? (updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance) : Math.max(0, currentTotal - newPaid);
-      newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+
+      if (isCredit) {
+        // Credit = no payment made now, keep balance as-is, mark unpaid
+        newPaid = currentPaid; // don't change paid
+        newBalance = currentTotal - newPaid; // keep balance
+        newStatus = 'pending'; // always unpaid for credit
+      } else if (updatedInvoiceData) {
+        newPaid = updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? 0;
+        newBalance = updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? 0;
+        newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+      } else {
+        newPaid = currentPaid + paymentForm.amount;
+        newBalance = Math.max(0, currentTotal - newPaid);
+        newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+      }
 
       savedList[idx].paid = newPaid;
       savedList[idx].balance = newBalance;
       savedList[idx].paymentStatus = newStatus;
-      savedList[idx].status = newStatus;
+      savedList[idx].status = isCredit ? 'sent' : newStatus; // keep 'sent' for credit so it stays in history
+      savedList[idx].isCredit = isCredit;
 
       localStorage.setItem('savedInvoices', JSON.stringify(savedList));
       setInvoiceHistory(savedList);
@@ -697,20 +716,38 @@ const AutomationInvoice = () => {
     if (!targetId || targetId === lastSavedId || (currentInvoice && idx !== -1)) {
       const currentPaid = currentInvoice.paid || 0;
       const currentTotal = currentInvoice.total || 0;
-      const finalPaid = updatedInvoiceData ? (updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid) : (currentPaid + paymentForm.amount);
-      const finalBalance = updatedInvoiceData ? (updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance) : Math.max(0, currentTotal - finalPaid);
-      const finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
+
+      let finalPaid: number;
+      let finalBalance: number;
+      let finalStatus: string;
+
+      if (isCredit) {
+        finalPaid = currentPaid;
+        finalBalance = currentTotal - finalPaid;
+        finalStatus = 'pending';
+      } else if (updatedInvoiceData) {
+        finalPaid = updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? 0;
+        finalBalance = updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? 0;
+        finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
+      } else {
+        finalPaid = currentPaid + paymentForm.amount;
+        finalBalance = Math.max(0, currentTotal - finalPaid);
+        finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
+      }
 
       setCurrentInvoice(prev => ({
         ...prev,
         paid: finalPaid,
         balance: finalBalance,
         paymentStatus: finalStatus as any,
-        status: finalStatus as any
+        status: isCredit ? prev.status : finalStatus as any
       }));
     }
 
-    toast.success("Payment recorded & applied successfully!");
+    const msg = isCredit
+      ? "Recorded as credit (unpaid). Invoice marked as Unpaid in history."
+      : "Payment recorded & applied successfully!";
+    toast.success(msg);
     setIsRecordPaymentOpen(false);
     setSelectedPaymentInvoiceId(null);
   };
@@ -1498,6 +1535,12 @@ const AutomationInvoice = () => {
       localStorage.setItem('savedInvoices', JSON.stringify(savedList));
       setInvoiceHistory(savedList);
 
+      // Always ensure lastSavedId is set after saving so the summary shows Record Payment
+      const finalId = backendId || currentInvoice.invoiceNo || `local_${Date.now()}`;
+      if (!lastSavedId) {
+        setLastSavedId(finalId);
+      }
+
       setCurrentInvoice(prev => ({
         ...prev,
         status: statusValue
@@ -1736,7 +1779,7 @@ const AutomationInvoice = () => {
   };
 
   // Generate Invoice PDF using jsPDF and jspdf-autotable
-  const generateInvoicePDF = (data: InvoiceData) => {
+  const generateInvoicePDF = (data: InvoiceData, forceDownload = false) => {
     try {
       const doc = new jsPDF();
       const sellerName = data.sellerName || COMPANY_NAME;
@@ -2170,12 +2213,17 @@ const AutomationInvoice = () => {
       const pdfBlob = doc.output('blob');
       const blobURL = URL.createObjectURL(pdfBlob);
       
-      const printWindow = window.open(blobURL);
-      if (printWindow) {
-        toast.success("Opening print preview...");
-      } else {
+      if (forceDownload) {
         doc.save(`invoice_${data.invoiceNo}.pdf`);
         toast.success("PDF saved! Please check your downloads.");
+      } else {
+        const printWindow = window.open(blobURL);
+        if (printWindow) {
+          toast.success("Opening print preview...");
+        } else {
+          doc.save(`invoice_${data.invoiceNo}.pdf`);
+          toast.success("PDF saved! Please check your downloads.");
+        }
       }
     } catch (e) {
       console.error(e);
@@ -2372,16 +2420,22 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
   };
 
   // Share on WhatsApp — auto-saves first if needed
-  const shareOnWhatsApp = async () => {
-    if (currentInvoice.items.length === 0 && invoiceHistory.length === 0) {
+  const shareOnWhatsApp = async (targetInvoice?: any) => {
+    // Determine if this is a click event or an actual invoice object
+    const isEvent = targetInvoice && targetInvoice.nativeEvent;
+    const actualInvoice = isEvent ? undefined : targetInvoice;
+    const isHistoryShare = !!actualInvoice;
+    const dataToUse = isHistoryShare ? actualInvoice : currentInvoice;
+
+    if (!isHistoryShare && currentInvoice.items.length === 0 && invoiceHistory.length === 0) {
       toast.error("Add items to the invoice before sharing.");
       return;
     }
 
-    let idToUse = lastSavedId;
+    let idToUse = isHistoryShare ? (actualInvoice.id || actualInvoice._id) : lastSavedId;
 
-    // Auto-save if not yet saved
-    if (!idToUse && currentInvoice.items.length > 0) {
+    // Auto-save if not yet saved (only for active invoice)
+    if (!isHistoryShare && !idToUse && currentInvoice.items.length > 0) {
       toast.info("Saving invoice before sharing...");
       const savedId = await saveInvoice('sent');
       if (!savedId) {
@@ -2392,7 +2446,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
     }
 
     // Use saved invoice data
-    const data = currentInvoice;
+    const data = dataToUse;
     const customerName = data.partyName || 'Valued Customer';
     const grandTotal = data.total || 0;
     const amountPaid = data.paid || 0;
@@ -3762,6 +3816,8 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </span>
                   </div>
 
+
+
                   <div className="flex justify-between items-center py-2 border-t border-slate-200">
                     <span className="text-slate-600 font-semibold">Balance</span>
                     <span className={`text-xl font-bold ${currentInvoice.balance > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
@@ -3781,6 +3837,34 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </div>
                   )}
                 </div>
+
+                {lastSavedId && (
+                  <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
+                    {currentInvoice.paid > 0 && (
+                      <div className="flex justify-between items-center text-sm mb-3">
+                        <span className="text-slate-600 font-semibold">Amount Paid</span>
+                        <span className="font-semibold text-emerald-600">₹{currentInvoice.paid.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {currentInvoice.balance > 0 && (
+                      <Button
+                        onClick={() => {
+                          setSelectedPaymentInvoiceId(lastSavedId);
+                          setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
+                          setIsRecordPaymentOpen(true);
+                        }}
+                        className="w-full bg-slate-950 text-white hover:bg-slate-800 rounded-xl py-6 font-bold"
+                      >
+                        <CreditCard className="h-5 w-5 mr-2" />
+                        Record Payment
+                      </Button>
+                    )}
+                    <Button onClick={printInvoice} variant="outline" className="w-full bg-white/60 border-slate-200 text-slate-700 hover:bg-slate-50 rounded-xl py-6 font-bold">
+                      <Printer className="h-5 w-5 mr-2" />
+                      Print Invoice
+                    </Button>
+                  </div>
+                )}
 
                 {/* Template Selection */}
                 <div className="mt-4 pt-4 border-t border-slate-200 space-y-1.5">
@@ -3831,31 +3915,14 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       className="h-12 rounded-xl bg-slate-950 font-semibold text-white transition-all duration-300 hover:bg-slate-800"
                     >
                       {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
-                      Save & Send
+                      Save Invoice
                     </Button>
                   </div>
 
-                  {lastSavedId && currentInvoice.balance > 0 && currentInvoice.status !== 'cancelled' && (
-                    <div className="pt-1">
-                      <Button
-                        onClick={() => {
-                          setSelectedPaymentInvoiceId(lastSavedId);
-                          setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
-                          setIsRecordPaymentOpen(true);
-                        }}
-                        className="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold w-full"
-                      >
-                        <CreditCard className="h-4 w-4 mr-1.5" />
-                        Record Payment
-                      </Button>
-                    </div>
-                  )}
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button onClick={printInvoice} variant="outline" className="h-10 rounded-xl bg-white/60 border-slate-200 text-slate-850 hover:bg-slate-50">
-                      <Printer className="h-4 w-4 mr-1.5" />
-                      Print
-                    </Button>
+
+
+                  <div className="grid grid-cols-1 gap-2">
                     <Button
                       onClick={() => {
                         resetForm();
@@ -3865,7 +3932,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       className="h-10 rounded-xl bg-white/60 border-slate-200 text-rose-700 hover:bg-rose-50 hover:border-rose-200 font-semibold"
                     >
                       <Trash2 className="h-4 w-4 mr-1.5" />
-                      Clear
+                      Clear Form
                     </Button>
                   </div>
 
@@ -4563,17 +4630,32 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              const id = (invoice as any).id || (invoice as any)._id;
-                              if (invoice.type === 'purchase') {
-                                window.open(`/purchase-invoice/view/${id}`, '_blank');
-                              } else {
-                                window.open(`/invoice/view/${id}`, '_blank');
-                              }
+                              generateInvoicePDF(invoice as any, false);
                             }}
                             className="rounded-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                           >
                             <Printer className="mr-1.5 h-4 w-4" />
-                            View
+                            Print
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              generateInvoicePDF(invoice as any, true);
+                            }}
+                            className="rounded-full border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                          >
+                            <Download className="mr-1.5 h-4 w-4" />
+                            Download PDF
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => shareOnWhatsApp(invoice)}
+                            className="rounded-full border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
+                          >
+                            <MessageCircle className="mr-1.5 h-4 w-4" />
+                            WhatsApp
                           </Button>
                           <Button
                             variant="outline"
