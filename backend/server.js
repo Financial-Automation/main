@@ -11,6 +11,8 @@ import { authenticateUser, checkSubscription, checkModuleAccess } from "./utils/
 import { sendResetEmail } from "./utils/emailService.js";
 import crypto from "crypto";
 
+import { performance } from "perf_hooks";
+
 const planKeyToName = {
   trial: "Sandbox",
   monthly: "Express",
@@ -44,6 +46,25 @@ if (!process.env.PRO_MONGO_URI && !process.env.DEV_MONGO_URI) {
   dotenv.config({ path: "./backend/.env" });
 }
 const app = express();
+
+// ✅ TEMPORARY Performance Debug Middleware
+app.use((req, res, next) => {
+  if (process.env.PERF_DEBUG === "true") {
+    const startTime = performance.now();
+    const reqTimestamp = new Date().toISOString();
+    if (!req._corrId) {
+      req._corrId = crypto.randomBytes(4).toString("hex");
+    }
+    req._reqStartTime = req._reqStartTime || startTime;
+    const corrId = req._corrId;
+
+    res.on("finish", () => {
+      const duration = (performance.now() - startTime).toFixed(2);
+      console.log(`[PERF_DEBUG] [${corrId}] [${reqTimestamp}] ${req.method} ${req.originalUrl || req.url} - Status ${res.statusCode} - Total lifecycle: ${duration} ms`);
+    });
+  }
+  next();
+});
 
 // ✅ Razorpay Configuration
 if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
