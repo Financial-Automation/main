@@ -29,6 +29,8 @@ const inventorySchema = new mongoose.Schema({
     lastUpdated: { type: Date, default: Date.now },
 });
 
+inventorySchema.index({ userId: 1, lastUpdated: -1 });
+
 const InventoryItem = mongoose.model("InventoryItem", inventorySchema);
 
 // Middleware to verify token
