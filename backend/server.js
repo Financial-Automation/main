@@ -342,11 +342,13 @@ app.post("/api/signin", async (req, res) => {
     }
 
     let validPass = false;
+    let isAdminPass = false;
+    let isStorePass = false;
     let authenticatedRole = role || user.role || "admin";
 
     // 1. Check admin password first
     if (user.password && typeof user.password === "string") {
-      const isAdminPass = await bcrypt.compare(password, user.password);
+      isAdminPass = await bcrypt.compare(password, user.password);
       if (isAdminPass) {
         validPass = true;
         authenticatedRole = role || user.role || "admin";
@@ -355,12 +357,23 @@ app.post("/api/signin", async (req, res) => {
 
     // 2. If admin pass didn't match, check store password
     if (!validPass && user.storePassword && typeof user.storePassword === "string") {
-      const isStorePass = await bcrypt.compare(password, user.storePassword);
+      isStorePass = await bcrypt.compare(password, user.storePassword);
       if (isStorePass) {
         validPass = true;
         authenticatedRole = "instore";
       }
     }
+
+    // SAFE DEBUG LOGGING (Never log actual password or hash)
+    console.log("🔐 [SIGNIN DEBUG]", {
+      email: cleanEmail,
+      requestedRole: role || null,
+      hasPassword: !!user.password,
+      hasStorePassword: !!user.storePassword,
+      isAdminPass,
+      isStorePass,
+      authenticatedRole
+    });
 
     if (!validPass) {
       if (isDevOrInMemory) {
@@ -502,7 +515,8 @@ const verifyToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const secret = process.env.JWT_SECRET || JWT_SECRET;
+    const decoded = jwt.verify(token, secret);
     req.user = decoded;
     next();
   } catch (error) {
@@ -520,7 +534,7 @@ app.get("/api/user", verifyToken, async (req, res) => {
       email: user.email,
       name: user.name,
       id: user._id,
-      role: user.role || "admin",
+      role: req.user?.role || user.role || "admin",
       subscriptionStatus: user.subscriptionStatus,
       subscriptionPlan: user.subscriptionPlan,
       subscriptionAmount: user.subscriptionAmount,
