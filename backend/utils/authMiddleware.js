@@ -2,6 +2,8 @@ import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import Plan from "../models/Plan.js";
 import Subscription from "../models/Subscription.js";
+import { performance } from "perf_hooks";
+import crypto from "crypto";
 
 const planKeyToName = {
   trial: "Sandbox",
@@ -16,15 +18,40 @@ const planKeyToName = {
   lifetime: "Premium"
 };
 
+const getPerfDebugConfig = (req) => {
+  if (process.env.PERF_DEBUG !== "true") return null;
+  if (!req._corrId) {
+    req._corrId = crypto.randomBytes(4).toString("hex");
+  }
+  if (!req._reqStartTime) {
+    req._reqStartTime = performance.now();
+  }
+  return {
+    corrId: req._corrId,
+    startTime: performance.now()
+  };
+};
+
+const logPerf = (perf, name) => {
+  if (perf) {
+    const duration = (performance.now() - perf.startTime).toFixed(2);
+    console.log(`[PERF_DEBUG] [${perf.corrId}] ${name} duration: ${duration} ms`);
+  }
+};
+
 // 1. Authenticate user from JWT token
 export const authenticateUser = async (req, res, next) => {
+  const perf = getPerfDebugConfig(req);
+
   // Public paths bypass auth
   if (req.path.startsWith("/public/")) {
+    logPerf(perf, "authenticateUser");
     return next();
   }
 
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) {
+    logPerf(perf, "authenticateUser");
     return res.status(401).json({ message: "Access denied. No token provided." });
   }
 
@@ -35,6 +62,7 @@ export const authenticateUser = async (req, res, next) => {
     const user = await User.findById(decoded.id).select("-password");
     
     if (!user) {
+      logPerf(perf, "authenticateUser");
       return res.status(401).json({ message: "User not found or account deleted." });
     }
 
@@ -66,8 +94,10 @@ export const authenticateUser = async (req, res, next) => {
     if (decoded.role) {
       req.user.role = decoded.role;
     }
+    logPerf(perf, "authenticateUser");
     next();
   } catch (error) {
+    logPerf(perf, "authenticateUser");
     if (error.name === "TokenExpiredError") {
       return res.status(401).json({ message: "Token expired. Please log in again." });
     }
@@ -77,16 +107,21 @@ export const authenticateUser = async (req, res, next) => {
 
 // 2. Validate user subscription status and date validity
 export const checkSubscription = async (req, res, next) => {
+  const perf = getPerfDebugConfig(req);
+
   // Public paths bypass subscription check
   if (req.path.startsWith("/public/")) {
+    logPerf(perf, "checkSubscription");
     return next();
   }
 
   if (!req.user) {
+    logPerf(perf, "checkSubscription");
     return res.status(401).json({ message: "User not authenticated." });
   }
 
   if (req.user.subscriptionStatus === "expired" || (req.user.subscriptionEndDate && new Date() > new Date(req.user.subscriptionEndDate))) {
+    logPerf(perf, "checkSubscription");
     return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
   }
 
@@ -126,6 +161,7 @@ export const checkSubscription = async (req, res, next) => {
     }
 
     if (!subscription) {
+      logPerf(perf, "checkSubscription");
       return res.status(403).json({ message: "No active subscription found. Please purchase a plan." });
     }
 
@@ -139,6 +175,7 @@ export const checkSubscription = async (req, res, next) => {
       const User = mongoose.model("User");
       await User.findByIdAndUpdate(req.user._id, { subscriptionStatus: "pending" }); // Reset status to pending
 
+      logPerf(perf, "checkSubscription");
       return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
     }
 
@@ -146,12 +183,15 @@ export const checkSubscription = async (req, res, next) => {
 
     // Admin bypasses module restriction check if subscription is valid
     if (req.user.role === "admin") {
+      logPerf(perf, "checkSubscription");
       return next();
     }
 
+    logPerf(perf, "checkSubscription");
     next();
   } catch (error) {
     console.error("Subscription check error:", error);
+    logPerf(perf, "checkSubscription");
     return res.status(500).json({ message: "Internal server error during subscription check." });
   }
 };
@@ -159,13 +199,17 @@ export const checkSubscription = async (req, res, next) => {
 // 3. Factory middleware to check permissions for a specific module
 export const checkModuleAccess = (moduleName) => {
   return (req, res, next) => {
+    const perf = getPerfDebugConfig(req);
+
     // Public paths bypass module check
     if (req.path.startsWith("/public/")) {
+      logPerf(perf, "checkModuleAccess");
       return next();
     }
 
     // Dashboard and Admin users always pass module check
     if (moduleName === "dashboard" || req.user?.role === "admin") {
+      logPerf(perf, "checkModuleAccess");
       return next();
     }
 
@@ -181,6 +225,7 @@ export const checkModuleAccess = (moduleName) => {
         req.path.includes("/overview")
       );
       if (!["invoice", "inventory"].includes(moduleName) && !isReadAggregation) {
+        logPerf(perf, "checkModuleAccess");
         return res.status(403).json({ message: "In-Store accounts only have access to Invoice and Inventory modules." });
       }
     }
@@ -188,13 +233,16 @@ export const checkModuleAccess = (moduleName) => {
     // Validate subscription plan allowed modules
     if (!req.subscription || !req.subscription.planId) {
       if (req.user?.subscriptionStatus === "active" || req.user?.subscriptionPlan) {
+        logPerf(perf, "checkModuleAccess");
         return next();
       }
+      logPerf(perf, "checkModuleAccess");
       return res.status(403).json({ message: "Subscription validation failed." });
     }
 
-     const allowedModules = req.subscription.planId.allowedModules || [];
+    const allowedModules = req.subscription.planId.allowedModules || [];
     if (!allowedModules.includes(moduleName)) {
+      logPerf(perf, "checkModuleAccess");
       return res.status(403).json({ 
         message: "Module not included in current subscription", 
         requiredModule: moduleName 
@@ -204,6 +252,7 @@ export const checkModuleAccess = (moduleName) => {
     // Centralized Report Export restrictions for export paths
     if (req.originalUrl && req.originalUrl.includes("/export")) {
       if (!allowedModules.includes("export")) {
+        logPerf(perf, "checkModuleAccess");
         return res.status(403).json({ 
           message: "Report exporting is not included in your current plan. Please upgrade to Professional or Enterprise.", 
           requiredModule: "export" 
@@ -211,6 +260,7 @@ export const checkModuleAccess = (moduleName) => {
       }
     }
 
+    logPerf(perf, "checkModuleAccess");
     next();
   };
 };

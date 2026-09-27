@@ -1,6 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
+import { performance } from "perf_hooks";
 import Sale from "../models/Sale.js";
 import Category from "../models/Category.js";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
@@ -103,11 +104,31 @@ router.post("/add", verifyToken, async (req, res) => {
 
 // ✅ GET route to fetch all inventory items (User Specific)
 router.get("/all", verifyToken, async (req, res) => {
+    const isPerfDebug = process.env.PERF_DEBUG === "true";
+    const corrId = req._corrId || (isPerfDebug ? Math.random().toString(36).substring(2, 10) : null);
+    const reqStartTime = req._reqStartTime || (isPerfDebug ? performance.now() : null);
+
     try {
+        const queryStart = isPerfDebug ? performance.now() : null;
         const items = await InventoryItem.find({ userId: req.user.id }).sort({ lastUpdated: -1 });
+
+        if (isPerfDebug) {
+            const queryDuration = (performance.now() - queryStart).toFixed(2);
+            console.log(`[PERF_DEBUG] [${corrId}] inventory GET /all Mongo query duration: ${queryDuration} ms`);
+
+            if (reqStartTime) {
+                const totalDuration = (performance.now() - reqStartTime).toFixed(2);
+                console.log(`[PERF_DEBUG] [${corrId}] total /api/inventory/all request duration: ${totalDuration} ms`);
+            }
+        }
+
         res.json(items);
     } catch (error) {
         console.error("Error fetching inventory:", error);
+        if (isPerfDebug && reqStartTime) {
+            const totalDuration = (performance.now() - reqStartTime).toFixed(2);
+            console.log(`[PERF_DEBUG] [${corrId}] total /api/inventory/all request duration: ${totalDuration} ms (error)`);
+        }
         res.status(500).json({ message: "Error fetching inventory" });
     }
 });
