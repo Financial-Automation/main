@@ -631,116 +631,151 @@ const AutomationInvoice = () => {
   const handleRecordPaymentSubmit = async () => {
     const targetId = selectedPaymentInvoiceId || lastSavedId;
 
+    if (!targetId) {
+      toast.error("No invoice selected to apply payment.");
+      return;
+    }
+
     const isCredit = paymentForm.paymentMethod === 'credit';
 
-    // For non-credit, amount must be > 0
-    if (!isCredit && paymentForm.amount <= 0) {
-      toast.error("Payment amount must be greater than zero.");
-      return;
+    // Locate target invoice from invoiceHistory
+    const targetInvoice = invoiceHistory.find((inv: any) =>
+      targetId && (
+        String(inv.id) === String(targetId) ||
+        String(inv._id) === String(targetId) ||
+        inv.invoiceNo === targetId
+      )
+    ) || (
+      (!selectedPaymentInvoiceId && lastSavedId) ? currentInvoice : null
+    );
+
+    const prevPaid = Number(targetInvoice?.paid ?? targetInvoice?.amountPaid ?? (targetInvoice ? 0 : (currentInvoice.paid || 0)));
+    const grandTotal = Number(targetInvoice?.total ?? targetInvoice?.grandTotal ?? (targetInvoice ? 0 : (currentInvoice.total || 0)));
+    const currentBalance = targetInvoice ? Number(targetInvoice.balance ?? targetInvoice.balanceDue ?? Math.max(0, grandTotal - prevPaid)) : Math.max(0, (currentInvoice.total || 0) - (currentInvoice.paid || 0));
+
+    // Validation
+    if (!isCredit) {
+      if (isNaN(paymentForm.amount) || paymentForm.amount <= 0) {
+        toast.error("Please enter a valid payment amount greater than zero.");
+        return;
+      }
+      if (paymentForm.amount > currentBalance + 0.01) {
+        toast.error(`Payment amount (₹${paymentForm.amount.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`);
+        return;
+      }
     }
 
     const actualAmount = isCredit ? 0 : paymentForm.amount;
 
     let updatedInvoiceData: any = null;
 
-    if (targetId) {
-      try {
-        const token = localStorage.getItem("token");
-        const res = await fetch(`${API_BASE_URL}/invoice/${targetId}/payment`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            amount: actualAmount,
-            amountPaid: actualAmount,
-            paymentMethod: paymentForm.paymentMethod,
-            paymentDate: paymentForm.paymentDate,
-            isCredit
-          })
-        });
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`${API_BASE_URL}/invoice/${targetId}/payment`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          amount: actualAmount,
+          amountPaid: actualAmount,
+          paymentMethod: paymentForm.paymentMethod,
+          paymentDate: paymentForm.paymentDate,
+          isCredit
+        })
+      });
 
-        if (res.ok) {
-          const data = await res.json();
-          updatedInvoiceData = data.invoice;
-        } else {
-          console.warn("Backend payment route warning");
-        }
-      } catch (error) {
-        console.warn("Error submitting payment to API:", error);
+      if (res.ok) {
+        const data = await res.json();
+        updatedInvoiceData = data.invoice;
+      } else {
+        console.warn("Backend payment route warning");
       }
+    } catch (error) {
+      console.warn("Error submitting payment to API:", error);
     }
 
-    // Always update localStorage & local history state
+    // Calculate new paid & balance amounts
+    let newPaid: number;
+    let newBalance: number;
+
+    if (isCredit) {
+      newPaid = prevPaid;
+      newBalance = Math.max(0, grandTotal - newPaid);
+    } else if (updatedInvoiceData) {
+      newPaid = Number(updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? (prevPaid + actualAmount));
+      newBalance = Number(updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? Math.max(0, grandTotal - newPaid));
+    } else {
+      newPaid = prevPaid + actualAmount;
+      newBalance = Math.max(0, grandTotal - newPaid);
+    }
+
+    const newPaymentStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+    const newStatus = isCredit ? (targetInvoice?.status || 'sent') : (newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending');
+
+    // 1. Update localStorage ('savedInvoices')
     const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
     const idx = savedList.findIndex((inv: any) =>
-      (targetId && (inv.id === targetId || inv._id === targetId)) ||
-      (currentInvoice.invoiceNo && inv.invoiceNo === currentInvoice.invoiceNo)
+      targetId && (
+        String(inv.id) === String(targetId) ||
+        String(inv._id) === String(targetId) ||
+        inv.invoiceNo === targetId ||
+        (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+      )
     );
 
-    let newPaid = 0;
-    let newBalance = 0;
-    let newStatus = 'paid';
-
     if (idx !== -1) {
-      const currentPaid = savedList[idx].paid || 0;
-      const currentTotal = savedList[idx].total || savedList[idx].grandTotal || 0;
-
-      if (isCredit) {
-        // Credit = no payment made now, keep balance as-is, mark unpaid
-        newPaid = currentPaid; // don't change paid
-        newBalance = currentTotal - newPaid; // keep balance
-        newStatus = 'pending'; // always unpaid for credit
-      } else if (updatedInvoiceData) {
-        newPaid = updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? 0;
-        newBalance = updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? 0;
-        newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
-      } else {
-        newPaid = currentPaid + paymentForm.amount;
-        newBalance = Math.max(0, currentTotal - newPaid);
-        newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
-      }
-
       savedList[idx].paid = newPaid;
+      savedList[idx].amountPaid = newPaid;
       savedList[idx].balance = newBalance;
-      savedList[idx].paymentStatus = newStatus;
-      savedList[idx].status = isCredit ? 'sent' : newStatus; // keep 'sent' for credit so it stays in history
+      savedList[idx].balanceDue = newBalance;
+      savedList[idx].paymentStatus = newPaymentStatus;
+      savedList[idx].status = isCredit ? (savedList[idx].status || 'sent') : newStatus;
       savedList[idx].isCredit = isCredit;
-
       localStorage.setItem('savedInvoices', JSON.stringify(savedList));
-      setInvoiceHistory(savedList);
     }
 
-    // Also update current active invoice if matching
-    if (!targetId || targetId === lastSavedId || (currentInvoice && idx !== -1)) {
-      const currentPaid = currentInvoice.paid || 0;
-      const currentTotal = currentInvoice.total || 0;
+    // 2. Update state ('invoiceHistory')
+    setInvoiceHistory(prevList => prevList.map((inv: any) => {
+      const isMatch = targetId && (
+        String(inv.id) === String(targetId) ||
+        String(inv._id) === String(targetId) ||
+        inv.invoiceNo === targetId ||
+        (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+      );
+      if (!isMatch) return inv;
+      return {
+        ...inv,
+        paid: newPaid,
+        amountPaid: newPaid,
+        balance: newBalance,
+        balanceDue: newBalance,
+        paymentStatus: newPaymentStatus as any,
+        status: isCredit ? (inv.status || 'sent') : newStatus as any,
+        isCredit
+      };
+    }));
 
-      let finalPaid: number;
-      let finalBalance: number;
-      let finalStatus: string;
+    // 3. Update active currentInvoice ONLY if it's the target invoice
+    const isCurrentInvoiceTarget = Boolean(
+      (targetId && (
+        String(currentInvoice.id) === String(targetId) ||
+        String((currentInvoice as any)._id) === String(targetId) ||
+        currentInvoice.invoiceNo === targetId
+      )) || (targetInvoice && currentInvoice.invoiceNo === targetInvoice.invoiceNo) ||
+      (!selectedPaymentInvoiceId && lastSavedId)
+    );
 
-      if (isCredit) {
-        finalPaid = currentPaid;
-        finalBalance = currentTotal - finalPaid;
-        finalStatus = 'pending';
-      } else if (updatedInvoiceData) {
-        finalPaid = updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? 0;
-        finalBalance = updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? 0;
-        finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
-      } else {
-        finalPaid = currentPaid + paymentForm.amount;
-        finalBalance = Math.max(0, currentTotal - finalPaid);
-        finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
-      }
-
+    if (isCurrentInvoiceTarget) {
       setCurrentInvoice(prev => ({
         ...prev,
-        paid: finalPaid,
-        balance: finalBalance,
-        paymentStatus: finalStatus as any,
-        status: isCredit ? prev.status : finalStatus as any
+        paid: newPaid,
+        amountPaid: newPaid,
+        balance: newBalance,
+        balanceDue: newBalance,
+        paymentStatus: newPaymentStatus as any,
+        status: isCredit ? prev.status : newStatus as any
       }));
     }
 
@@ -841,7 +876,6 @@ const AutomationInvoice = () => {
           const parsed = JSON.parse(saved);
           mergedInvoices = parsed.filter((inv: any) => {
             if (inv.type === 'purchase') return false;
-            if (inv.userId && user?.id && String(inv.userId) !== String(user.id)) return false;
             return true;
           });
         } catch (e) {
@@ -931,14 +965,36 @@ const AutomationInvoice = () => {
           }
         }
 
-        // Merge and de-duplicate by invoiceNo & id
-        const existingNos = new Set(mergedInvoices.map(inv => inv.invoiceNo).filter(Boolean));
-        const existingIds = new Set(mergedInvoices.map(inv => (inv as any).id || (inv as any)._id).filter(Boolean));
-        backendInvoices.forEach((inv: any) => {
-          if ((inv.invoiceNo && !existingNos.has(inv.invoiceNo)) && (inv.id && !existingIds.has(inv.id))) {
-            mergedInvoices.push(inv);
+        // Merge and de-duplicate by invoiceNo & id, prioritizing authoritative backend values
+        backendInvoices.forEach((bInv: any) => {
+          const matchIdx = mergedInvoices.findIndex((inv: any) =>
+            (inv.invoiceNo && bInv.invoiceNo && inv.invoiceNo === bInv.invoiceNo) ||
+            (inv.id && bInv.id && String(inv.id) === String(bInv.id)) ||
+            ((inv as any)._id && bInv._id && String((inv as any)._id) === String(bInv._id))
+          );
+
+          if (matchIdx !== -1) {
+            mergedInvoices[matchIdx] = {
+              ...mergedInvoices[matchIdx],
+              paid: bInv.paid,
+              amountPaid: bInv.paid,
+              balance: bInv.balance,
+              balanceDue: bInv.balance,
+              paymentStatus: bInv.paymentStatus,
+              status: bInv.status,
+              id: bInv.id || mergedInvoices[matchIdx].id,
+              _id: bInv._id || (mergedInvoices[matchIdx] as any)._id
+            };
+          } else {
+            mergedInvoices.push(bInv);
           }
         });
+
+        try {
+          localStorage.setItem('savedInvoices', JSON.stringify(mergedInvoices));
+        } catch (e) {
+          console.warn("Could not save merged invoices to localStorage", e);
+        }
       } catch (err) {
         console.warn("Failed to fetch backend invoices:", err);
       }

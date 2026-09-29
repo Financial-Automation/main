@@ -1372,6 +1372,12 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
 
     // Direct PDF download for Purchase Invoice matching official print view design
     const downloadPurchaseInvoicePDF = (inv: any) => {
+        const targetId = inv?._id || lastSavedPurchaseId;
+        if (targetId) {
+            const url = `${window.location.origin}/purchase-invoice/view/${targetId}?download=true`;
+            window.open(url, '_blank');
+            return;
+        }
         try {
             const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
 
@@ -1573,18 +1579,26 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
 
             const finalY = (doc as any).lastAutoTable?.finalY || 140;
 
-            // Summary Card Box (Bottom Right)
+            let currentYCalc = finalY + 8;
+            if (currentYCalc > 225) {
+                doc.addPage();
+                currentYCalc = 20;
+            }
+
             const summaryX = 120;
-            const summaryY = finalY + 8;
+            const summaryY = currentYCalc;
             const summaryWidth = 80;
 
+            // Summary Card Box (Right)
             doc.setFillColor(248, 250, 252);
             doc.setDrawColor(226, 232, 240);
-            doc.rect(summaryX, summaryY, summaryWidth, 36, "FD");
+            doc.rect(summaryX, summaryY, summaryWidth, 38, "FD");
 
             const subtotal = inv.subtotal || inv.total || 0;
-            const taxAmount = inv.totalTax || inv.gstAmount || 0;
+            const totalTax = inv.totalTax || inv.gstAmount || 0;
             const grandTotal = inv.total || 0;
+            const paidAmt = inv.paid || 0;
+            const balanceAmt = inv.balance ?? Math.max(0, grandTotal - paidAmt);
 
             doc.setFontSize(8.5);
             doc.setFont("helvetica", "normal");
@@ -1593,7 +1607,7 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
             doc.text(`Rs. ${subtotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 8, { align: "right" });
 
             doc.text("Tax Amount:", summaryX + 4, summaryY + 16);
-            doc.text(`Rs. ${taxAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 16, { align: "right" });
+            doc.text(`Rs. ${totalTax.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 16, { align: "right" });
 
             doc.setDrawColor(226, 232, 240);
             doc.line(summaryX + 4, summaryY + 20, summaryX + summaryWidth - 4, summaryY + 20);
@@ -1605,8 +1619,59 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
             doc.setTextColor(217, 119, 6);
             doc.text(`Rs. ${grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 29, { align: "right" });
 
+            // Payment Details Box (Left Side)
+            doc.setFillColor(240, 253, 244);
+            doc.setDrawColor(187, 247, 208);
+            doc.rect(10, currentYCalc, 105, 16, "FD");
+
+            doc.setFontSize(7.5);
+            doc.setFont("helvetica", "bold");
+            doc.setTextColor(22, 101, 52);
+            doc.text("PAYMENT STATUS", 14, currentYCalc + 5);
+
+            doc.setFontSize(8.5);
+            doc.setFont("helvetica", "normal");
+            doc.setTextColor(15, 23, 42);
+            doc.text(`Paid: Rs. ${paidAmt.toFixed(2)}  |  Balance: Rs. ${balanceAmt.toFixed(2)}  |  Mode: ${paymentMethod}`, 14, currentYCalc + 11);
+
+            // Banking Details Box (Left Side under Payment Box)
+            const bankY = currentYCalc + 19;
+            doc.setFillColor(248, 250, 252);
+            doc.setDrawColor(226, 232, 240);
+            doc.rect(10, bankY, 105, 22, "FD");
+
+            const bankName = inv.bankName || "ABC Bank";
+            const accountType = inv.accountType || "Current";
+            const accountNumber = inv.accountNumber || "123456789012";
+            const ifscCode = inv.ifscCode || "ABCD0001234";
+
+            doc.setFontSize(7.5);
+            doc.setFont("helvetica", "bold");
+            doc.setTextColor(100, 116, 139);
+            doc.text("BANKING DETAILS FOR PAYMENT", 14, bankY + 5);
+
+            doc.setFontSize(8);
+            doc.setFont("helvetica", "normal");
+            doc.setTextColor(51, 65, 85);
+            doc.text(`Bank Name: ${bankName} (${accountType})`, 14, bankY + 10);
+            doc.text(`A/C No: ${accountNumber}   |   IFSC: ${ifscCode}`, 14, bankY + 16);
+
+            // Signature area (Right side under summary)
+            const sigY = summaryY + 44;
+            const sigName = inv.authorisedSignature || "Store Manager / Stock Receiver";
+            doc.setFontSize(8.5);
+            doc.setFont("helvetica", "bold");
+            doc.setTextColor(15, 23, 42);
+            doc.text(sigName, 150, sigY);
+            doc.setDrawColor(148, 163, 184);
+            doc.line(150, sigY + 2, 195, sigY + 2);
+            doc.setFontSize(7.5);
+            doc.setFont("helvetica", "normal");
+            doc.setTextColor(100, 116, 139);
+            doc.text("Authorised Signature", 150, sigY + 6);
+
             // Footer
-            const footerY = 280;
+            const footerY = 282;
             doc.setDrawColor(226, 232, 240);
             doc.line(10, footerY - 5, 200, footerY - 5);
 

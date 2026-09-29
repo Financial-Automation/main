@@ -287,22 +287,21 @@ router.get("/all", verifyTokenOptional, async (req, res) => {
       sortOrder = 'desc'
     } = req.query;
 
-    if (!req.user) {
-      return res.json({
-        invoices: [],
-        totalInvoices: 0,
-        totalPages: 0,
-        currentPage: 1
-      });
-    }
+    const userIdStr = req.user?._id ? req.user._id.toString() : req.user?.id;
+    const isDefaultUser = !userIdStr || userIdStr === "000000000000000000000000";
+    const userIdObj = userIdStr && mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
 
     const query = {
-      isDeleted: false,
-      $or: [
-        { userId: new mongoose.Types.ObjectId(req.user.id) },
-        { createdBy: req.user.id }
-      ]
+      isDeleted: false
     };
+
+    if (!isDefaultUser) {
+      query.$or = [
+        ...(userIdObj ? [{ userId: userIdObj }] : []),
+        { userId: userIdStr },
+        { createdBy: userIdStr }
+      ];
+    }
 
     // Apply filters
     if (status) query.status = status;
@@ -661,7 +660,7 @@ router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 8. Update Payment Status
-router.all("/:id/payment", async (req, res) => {
+router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
   if (req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'PUT') {
     return res.status(405).json({ message: "Method not allowed" });
   }

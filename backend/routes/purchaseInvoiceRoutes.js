@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import { checkPlanLimit } from "../utils/authMiddleware.js";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
+import User from "../models/User.js";
 
 const router = express.Router();
 
@@ -56,6 +57,7 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     totalTax: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
     paid: { type: Number, default: 0 },
+    balance: { type: Number, default: 0 },
     bankName: { type: String, default: "" },
     accountType: { type: String, default: "Current" },
     accountNumber: { type: String, default: "" },
@@ -67,10 +69,40 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
 });
 
-const PurchaseInvoice = mongoose.model("PurchaseInvoice", purchaseInvoiceSchema);
+const PurchaseInvoice = mongoose.models.PurchaseInvoice || mongoose.model("PurchaseInvoice", purchaseInvoiceSchema);
 
 // Get the InventoryItem model (already registered by inventoryRoutes)
 const getInventoryModel = () => mongoose.model("InventoryItem");
+
+// Helper to enrich purchase invoice with default bank details from user if missing
+const enrichInvoiceWithBankDetails = async (invoice) => {
+    if (!invoice) return invoice;
+    const invObj = typeof invoice.toObject === "function" ? invoice.toObject() : { ...invoice };
+    
+    // Check if bank details are missing
+    if (!invObj.bankName || !invObj.accountNumber || !invObj.ifscCode) {
+        try {
+            const user = invObj.userId ? await User.findById(invObj.userId) : null;
+            if (user) {
+                invObj.bankName = invObj.bankName || user.bankName || "ABC Bank";
+                invObj.accountType = invObj.accountType || user.accountType || "Current";
+                invObj.accountNumber = invObj.accountNumber || user.accountNumber || "123456789012";
+                invObj.ifscCode = invObj.ifscCode || user.ifscCode || "ABCD0001234";
+                invObj.authorisedSignature = invObj.authorisedSignature || user.authorisedSignature || "Store Manager";
+            }
+        } catch (e) {
+            console.error("Error enriching bank details:", e);
+        }
+    }
+    
+    // Ensure default bank info if still blank
+    if (!invObj.bankName) invObj.bankName = "ABC Bank";
+    if (!invObj.accountType) invObj.accountType = "Current";
+    if (!invObj.accountNumber) invObj.accountNumber = "123456789012";
+    if (!invObj.ifscCode) invObj.ifscCode = "ABCD0001234";
+    
+    return invObj;
+};
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
@@ -95,7 +127,8 @@ router.get("/public/:id", async (req, res) => {
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
-        res.json(invoice);
+        const enriched = await enrichInvoiceWithBankDetails(invoice);
+        res.json(enriched);
     } catch (error) {
         console.error("Error fetching public purchase invoice:", error);
         res.status(500).json({ message: "Error fetching purchase invoice" });
@@ -110,6 +143,16 @@ router.post("/create", verifyToken, async (req, res) => {
             return res.status(403).json(limitCheck);
         }
         const invoiceData = req.body;
+        
+        // Auto-fetch default bank details if missing
+        const user = await User.findById(req.user.id);
+        if (user) {
+            if (!invoiceData.bankName) invoiceData.bankName = user.bankName || "ABC Bank";
+            if (!invoiceData.accountType) invoiceData.accountType = user.accountType || "Current";
+            if (!invoiceData.accountNumber) invoiceData.accountNumber = user.accountNumber || "123456789012";
+            if (!invoiceData.ifscCode) invoiceData.ifscCode = user.ifscCode || "ABCD0001234";
+            if (!invoiceData.authorisedSignature) invoiceData.authorisedSignature = user.authorisedSignature || "Store Manager";
+        }
 
         const newInvoice = new PurchaseInvoice({
             userId: req.user.id,
@@ -284,7 +327,23 @@ router.put("/:id", verifyToken, async (req, res) => {
 router.get("/all", verifyToken, async (req, res) => {
     try {
         const invoices = await PurchaseInvoice.find({ userId: req.user.id }).sort({ createdAt: -1 });
-        res.json({ invoices });
+        const user = await User.findById(req.user.id);
+        const enrichedInvoices = invoices.map(inv => {
+            const obj = inv.toObject();
+            if (user) {
+                if (!obj.bankName) obj.bankName = user.bankName || "ABC Bank";
+                if (!obj.accountType) obj.accountType = user.accountType || "Current";
+                if (!obj.accountNumber) obj.accountNumber = user.accountNumber || "123456789012";
+                if (!obj.ifscCode) obj.ifscCode = user.ifscCode || "ABCD0001234";
+                if (!obj.authorisedSignature) obj.authorisedSignature = user.authorisedSignature || "Store Manager";
+            }
+            if (!obj.bankName) obj.bankName = "ABC Bank";
+            if (!obj.accountType) obj.accountType = "Current";
+            if (!obj.accountNumber) obj.accountNumber = "123456789012";
+            if (!obj.ifscCode) obj.ifscCode = "ABCD0001234";
+            return obj;
+        });
+        res.json({ invoices: enrichedInvoices });
     } catch (error) {
         console.error("Error fetching purchase invoices:", error);
         res.status(500).json({ message: "Error fetching purchase invoices" });
@@ -298,7 +357,8 @@ router.get("/:id", verifyToken, async (req, res) => {
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
-        res.json(invoice);
+        const enriched = await enrichInvoiceWithBankDetails(invoice);
+        res.json(enriched);
     } catch (error) {
         console.error("Error fetching purchase invoice:", error);
         res.status(500).json({ message: "Error fetching purchase invoice" });
