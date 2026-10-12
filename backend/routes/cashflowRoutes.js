@@ -427,9 +427,12 @@ router.get("/planning", verifyToken, async (req, res) => {
     if (Payroll) {
       const pendingPayrolls = await Payroll.find({
         ...userFilter,
-        paymentStatus: { $ne: "Paid" }
+        status: { $ne: "paid" }
       }).lean();
-      payrollObligations = pendingPayrolls.reduce((sum, p) => sum + (p.netPay || p.totalSalary || 0), 0);
+      payrollObligations = pendingPayrolls.reduce((sum, p) => {
+        const salary = Number(p.netSalary);
+        return sum + (Number.isFinite(salary) && salary > 0 ? salary : 0);
+      }, 0);
 
       if (payrollObligations > 0) {
         outflowItems.push({
