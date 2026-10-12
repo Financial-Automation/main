@@ -62,10 +62,12 @@ export async function runBookkeepingRegression() {
     method: "PUT",
     headers: { Authorization: `Bearer ${token}` }
   }, {
-    grandTotal: 60000,
+    items: [{ productName: "Audit Consulting", quantity: 1, unitPrice: 60000, total: 60000 }],
     subtotal: 60000,
-    balanceDue: 10000,
-    amountPaid: 50000
+    taxAmount: 0,
+    grandTotal: 60000,
+    amountPaid: 50000,
+    balanceDue: 10000
   });
   assert.strictEqual(updateInvRes.status, 200, "Update invoice should return HTTP 200");
 

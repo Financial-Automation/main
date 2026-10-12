@@ -51,8 +51,8 @@ export async function runInventoryRegression() {
     quantity: 50
     // Missing required itemName and price
   });
-  assert.strictEqual(invalidRes.status, 500, "Missing required fields must fail with error");
-  console.log("   ✓ Invalid item creation correctly rejected");
+  assert.strictEqual(invalidRes.status, 400, "Missing required fields must fail with status 400 Bad Request");
+  console.log("   ✓ Invalid item creation correctly rejected with 400 Bad Request");
 
   // Step 4: OTC / Sell item test (Stock Reduction & Bookkeeping Entry Generation)
   console.log("\n3. Testing sale stock reduction & accounting propagation...");
