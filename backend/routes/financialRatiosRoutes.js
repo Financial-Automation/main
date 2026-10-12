@@ -6,26 +6,37 @@ import { resolvePeriod, getFinanceMetrics, getLiveBalanceSheet } from "../utils/
 const router = express.Router();
 
 const verifyToken = (req, res, next) => {
+    if (req.user && (req.user.id || req.user._id) && req.user.id !== "000000000000000000000000") {
+        return next();
+    }
     const token = req.headers.authorization?.split(" ")[1];
     const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
     if (!token || token === "null" || token === "undefined") {
-        req.user = { id: "000000000000000000000000" };
-        return next();
+        return res.status(401).json({ message: "Access denied. No token provided." });
     }
 
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = decoded;
+        req.user = {
+            ...decoded,
+            id: decoded.id || decoded._id?.toString()
+        };
+        if (!req.user.id || req.user.id === "000000000000000000000000") {
+            return res.status(401).json({ message: "Invalid authorization token." });
+        }
         next();
     } catch (error) {
-        req.user = { id: "000000000000000000000000" };
-        next();
+        if (error.name === "TokenExpiredError") {
+            return res.status(401).json({ message: "Token expired. Please log in again." });
+        }
+        return res.status(401).json({ message: "Invalid authorization token." });
     }
 };
 
 // Financial Ratios Schema
 const financialRatiosSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   companyName: { type: String, required: true },
   period: { type: String, required: true },
   currentAssets: { type: Number, required: true },
@@ -55,10 +66,12 @@ const financialRatiosSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+financialRatiosSchema.index({ userId: 1, createdAt: -1 });
+
 const FinancialRatios = mongoose.model("FinancialRatios", financialRatiosSchema);
 
 // POST route to calculate and store financial ratios
-router.post("/calculate", async (req, res) => {
+router.post("/calculate", verifyToken, async (req, res) => {
   try {
     const financialData = req.body;
     
@@ -78,6 +91,7 @@ router.post("/calculate", async (req, res) => {
 
     const financialRecord = new FinancialRatios({
       ...financialData,
+      userId: req.user.id,
       ratios: ratios
     });
 
@@ -93,9 +107,9 @@ router.post("/calculate", async (req, res) => {
 });
 
 // GET route to fetch financial ratios history
-router.get("/history", async (req, res) => {
+router.get("/history", verifyToken, async (req, res) => {
   try {
-    const financialRatios = await FinancialRatios.find().sort({ createdAt: -1 });
+    const financialRatios = await FinancialRatios.find({ userId: req.user.id }).sort({ createdAt: -1 }).lean();
     res.json(financialRatios);
   } catch (error) {
     console.error("Error fetching financial ratios:", error);
@@ -198,9 +212,9 @@ router.get("/generate", verifyToken, async (req, res) => {
 });
 
 // GET route to fetch specific financial ratios by ID
-router.get("/:id", async (req, res) => {
+router.get("/:id", verifyToken, async (req, res) => {
   try {
-    const financialRatio = await FinancialRatios.findById(req.params.id);
+    const financialRatio = await FinancialRatios.findOne({ _id: req.params.id, userId: req.user.id });
     if (!financialRatio) {
       return res.status(404).json({ message: "Financial ratios record not found" });
     }

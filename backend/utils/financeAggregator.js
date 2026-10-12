@@ -2,6 +2,30 @@ import mongoose from "mongoose";
 import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import Sale from "../models/Sale.js";
 
+// Safe 15-second max TTL tenant-isolated in-memory cache for read-only financial summaries
+const financeCache = new Map();
+const FINANCE_CACHE_TTL_MS = 15000;
+
+export function invalidateFinanceCache(userId) {
+    if (!userId) return;
+    const userIdStr = userId.toString();
+    for (const key of financeCache.keys()) {
+        if (key.startsWith(userIdStr + ":")) {
+            financeCache.delete(key);
+        }
+    }
+}
+
+const getCachedOrFetch = async (cacheKey, fetchFn) => {
+    const cached = financeCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < FINANCE_CACHE_TTL_MS)) {
+        return cached.data;
+    }
+    const data = await fetchFn();
+    financeCache.set(cacheKey, { data, timestamp: Date.now() });
+    return data;
+};
+
 // Helper to get models registered inline in routes
 const getInvoiceModel = () => {
     try {
@@ -55,9 +79,11 @@ export function resolvePeriod(period) {
  * Calculates central financial metrics strictly using BookkeepingEntry as the single financial source of truth.
  */
 export async function getFinanceMetrics(userId, start, end) {
-    const startDate = new Date(start);
-    const endDate = new Date(end);
-    const userObjectId = new mongoose.Types.ObjectId(userId);
+    const cacheKey = `${userId}:metrics:${start}:${end}`;
+    return getCachedOrFetch(cacheKey, async () => {
+        const startDate = new Date(start);
+        const endDate = new Date(end);
+        const userObjectId = new mongoose.Types.ObjectId(userId);
 
     const userFilter = {
         $or: [
@@ -66,12 +92,28 @@ export async function getFinanceMetrics(userId, start, end) {
         ]
     };
 
-    // 1. Fetch Bookkeeping Entries for the period
-    const bookkeepingEntries = await BookkeepingEntry.find({
-        ...userFilter,
-        isDeleted: { $ne: true },
-        date: { $gte: startDate, $lte: endDate }
-    });
+    const Invoice = getInvoiceModel();
+    const PurchaseInvoice = getPurchaseInvoiceModel();
+
+    // Parallelize independent database queries with selective field projections and .lean()
+    const [bookkeepingEntries, salesInvoices, purchaseInvoices] = await Promise.all([
+        BookkeepingEntry.find({
+            ...userFilter,
+            isDeleted: { $ne: true },
+            date: { $gte: startDate, $lte: endDate }
+        }).select("type amount category date").lean(),
+        Invoice ? Invoice.find({
+            ...userFilter,
+            isDeleted: { $ne: true },
+            sourceInvoiceType: { $ne: "purchase" },
+            invoiceDate: { $lte: endDate }
+        }).select("paymentStatus status balanceDue taxAmount totalTax").lean() : Promise.resolve([]),
+        PurchaseInvoice ? PurchaseInvoice.find({
+            ...userFilter,
+            isDeleted: { $ne: true },
+            createdAt: { $lte: endDate }
+        }).select("balance totalTax").lean() : Promise.resolve([])
+    ]);
 
     const bkIncomeEntries = bookkeepingEntries.filter(e => e.type === "income" || e.type === "Income");
     const bkExpenseEntries = bookkeepingEntries.filter(e => e.type === "expense" || e.type === "Expense");
@@ -99,32 +141,11 @@ export async function getFinanceMetrics(userId, start, end) {
     const profitMargin = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0;
 
     // Accounts Receivable and Accounts Payable
-    const Invoice = getInvoiceModel();
-    let salesInvoiceOutstanding = 0;
-    let salesInvoices = [];
-    if (Invoice) {
-        salesInvoices = await Invoice.find({
-            ...userFilter,
-            isDeleted: { $ne: true },
-            sourceInvoiceType: { $ne: "purchase" },
-            invoiceDate: { $lte: endDate }
-        });
-        salesInvoiceOutstanding = salesInvoices
-            .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
-            .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
-    }
+    const salesInvoiceOutstanding = salesInvoices
+        .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
+        .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
 
-    const PurchaseInvoice = getPurchaseInvoiceModel();
-    let purchaseInvoiceOutstanding = 0;
-    let purchaseInvoices = [];
-    if (PurchaseInvoice) {
-        purchaseInvoices = await PurchaseInvoice.find({
-            ...userFilter,
-            isDeleted: { $ne: true },
-            createdAt: { $lte: endDate }
-        });
-        purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
-    }
+    const purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
 
     const totalCashInflow = totalRevenue;
     const totalCashOutflow = totalExpenses;
@@ -164,12 +185,15 @@ export async function getFinanceMetrics(userId, start, end) {
             gstPayable: Math.max(0, salesInvoices.reduce((sum, inv) => sum + (inv.taxAmount || 0), 0) - purchaseInvoices.reduce((sum, inv) => sum + (inv.totalTax || 0), 0))
         }
     };
+});
 }
 
 /**
  * Calculates live Balance Sheet using BookkeepingEntry as the central transaction ledger.
  */
 export async function getLiveBalanceSheet(userId, period = "this-month") {
+    const cacheKey = `${userId}:bs:${period}`;
+    return getCachedOrFetch(cacheKey, async () => {
     const { startDate, endDate } = resolvePeriod(period);
     const userObjectId = new mongoose.Types.ObjectId(userId);
 
@@ -180,12 +204,33 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
         ]
     };
 
-    // Cumulative Bookkeeping Entries up to period end
-    const cumulativeEntries = await BookkeepingEntry.find({
-        ...userFilter,
-        isDeleted: { $ne: true },
-        date: { $lte: endDate }
-    });
+    const Invoice = getInvoiceModel();
+    const PurchaseInvoice = getPurchaseInvoiceModel();
+    const InventoryItem = getInventoryItemModel();
+
+    // Parallelize independent database queries with selective field projections and .lean()
+    const [cumulativeEntries, salesInvoices, purchaseInvoices, inventoryItems] = await Promise.all([
+        BookkeepingEntry.find({
+            ...userFilter,
+            isDeleted: { $ne: true },
+            date: { $lte: endDate }
+        }).select("type amount category date").lean(),
+        Invoice ? Invoice.find({
+            ...userFilter,
+            isDeleted: { $ne: true },
+            sourceInvoiceType: { $ne: "purchase" },
+            invoiceDate: { $lte: endDate }
+        }).select("paymentStatus status balanceDue").lean() : Promise.resolve([]),
+        PurchaseInvoice ? PurchaseInvoice.find({
+            ...userFilter,
+            isDeleted: { $ne: true },
+            createdAt: { $lte: endDate }
+        }).select("balance").lean() : Promise.resolve([]),
+        InventoryItem ? InventoryItem.find({
+            ...userFilter,
+            isDeleted: { $ne: true }
+        }).select("quantity price costPrice").lean() : Promise.resolve([])
+    ]);
 
     const cumulativeIncome = cumulativeEntries
         .filter(e => e.type === "income" || e.type === "Income")
@@ -195,42 +240,13 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
         .filter(e => e.type === "expense" || e.type === "Expense")
         .reduce((sum, e) => sum + (e.amount || 0), 0);
 
-    // Accounts Receivable & Accounts Payable
-    const Invoice = getInvoiceModel();
-    let accountsReceivable = 0;
-    if (Invoice) {
-        const salesInvoices = await Invoice.find({
-            ...userFilter,
-            isDeleted: { $ne: true },
-            sourceInvoiceType: { $ne: "purchase" },
-            invoiceDate: { $lte: endDate }
-        });
-        accountsReceivable = salesInvoices
-            .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
-            .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
-    }
+    const accountsReceivable = salesInvoices
+        .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
+        .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
 
-    const PurchaseInvoice = getPurchaseInvoiceModel();
-    let accountsPayable = 0;
-    if (PurchaseInvoice) {
-        const purchaseInvoices = await PurchaseInvoice.find({
-            ...userFilter,
-            isDeleted: { $ne: true },
-            createdAt: { $lte: endDate }
-        });
-        accountsPayable = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
-    }
+    const accountsPayable = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
 
-    // Current Inventory Stock Valuation
-    const InventoryItem = getInventoryItemModel();
-    let currentInventoryValuation = 0;
-    if (InventoryItem) {
-        const inventoryItems = await InventoryItem.find({
-            ...userFilter,
-            isDeleted: { $ne: true }
-        });
-        currentInventoryValuation = inventoryItems.reduce((sum, item) => sum + ((item.quantity || 0) * (item.price || item.costPrice || 0)), 0);
-    }
+    const currentInventoryValuation = inventoryItems.reduce((sum, item) => sum + ((item.quantity || 0) * (item.price || item.costPrice || 0)), 0);
 
     // Cash and Bank Balance: Total Inflows - Total Outflows
     const cashAndBank = cumulativeIncome - cumulativeExpense;
@@ -298,9 +314,12 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
             ]
         }
     };
+});
 }
 
 export async function getGstAnalytics(userId, period = "this-month") {
+    const cacheKey = `${userId}:gst:${period}`;
+    return getCachedOrFetch(cacheKey, async () => {
     const { startDate, endDate } = resolvePeriod(period);
     const userObjectId = new mongoose.Types.ObjectId(userId);
 
@@ -320,7 +339,7 @@ export async function getGstAnalytics(userId, period = "this-month") {
             isDeleted: { $ne: true },
             sourceInvoiceType: { $ne: "purchase" },
             invoiceDate: { $gte: startDate, $lte: endDate }
-        });
+        }).select("subtotal items cgst sgst igst taxAmount totalTax").lean();
     }
 
     // 2. Fetch POS / Inventory Sales
@@ -328,7 +347,7 @@ export async function getGstAnalytics(userId, period = "this-month") {
         ...userFilter,
         isDeleted: { $ne: true },
         saleDate: { $gte: startDate, $lte: endDate }
-    });
+    }).select("subtotal cgstAmount sgstAmount igstAmount cgst sgst igst gstAmount taxAmount").lean();
 
     // 3. Fetch Purchase Invoices
     const PurchaseInvoice = getPurchaseInvoiceModel();
@@ -338,7 +357,7 @@ export async function getGstAnalytics(userId, period = "this-month") {
             ...userFilter,
             isDeleted: { $ne: true },
             createdAt: { $gte: startDate, $lte: endDate }
-        });
+        }).select("subtotal totalCgst totalSgst totalIgst cgst sgst igst totalTax taxAmount items").lean();
     }
 
     // Calculate Sales-side Taxable & GST Amounts
@@ -440,4 +459,5 @@ export async function getGstAnalytics(userId, period = "this-month") {
             purchaseGst: inputGst
         }
     };
+});
 }

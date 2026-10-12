@@ -5,28 +5,38 @@ import { getLiveBalanceSheet } from "../utils/financeAggregator.js";
 
 const router = express.Router();
 
-const verifyTokenOptional = (req, res, next) => {
+const verifyToken = (req, res, next) => {
+  if (req.user && (req.user.id || req.user._id) && req.user.id !== "000000000000000000000000") {
+    return next();
+  }
   const token = req.headers.authorization?.split(" ")[1];
   const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
   if (!token || token === "null" || token === "undefined") {
-    req.user = { id: "000000000000000000000000" };
-    return next();
+    return res.status(401).json({ message: "Access denied. No token provided." });
   }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      id: decoded.id || decoded._id?.toString()
+    };
+    if (!req.user.id || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Invalid authorization token." });
+    }
     next();
   } catch (error) {
-    req.user = { id: "000000000000000000000000" };
-    next();
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Token expired. Please log in again." });
+    }
+    return res.status(401).json({ message: "Invalid authorization token." });
   }
 };
 
 // ✅ Define Balance Sheet Schema - Updated to match Python file structure
 const balanceSheetSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   companyName: { type: String },
   financialYear: { type: String },
   // Assets
@@ -59,16 +69,18 @@ const balanceSheetSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
+balanceSheetSchema.index({ userId: 1, createdAt: -1 });
+
 const BalanceSheet = mongoose.model("BalanceSheet", balanceSheetSchema);
 
 // ✅ POST route — Save balance sheet data
-router.post("/add", verifyTokenOptional, async (req, res) => {
+router.post("/add", verifyToken, async (req, res) => {
   try {
     const balanceData = req.body;
 
     // Fill missing fields with 0 to avoid validation errors
     const dataToSave = {
-      userId: req.user ? req.user.id : undefined,
+      userId: req.user.id,
       companyName: balanceData.companyName || "",
       financialYear: balanceData.financialYear || "",
       // Assets
@@ -111,18 +123,15 @@ router.post("/add", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ GET route — Fetch all balance sheets for authenticated user
-router.get("/", verifyTokenOptional, async (req, res) => {
+router.get("/", verifyToken, async (req, res) => {
   try {
-    if (!req.user || !req.user.id) {
-      return res.status(200).json([]);
-    }
     const userObjectId = new mongoose.Types.ObjectId(req.user.id);
     const sheets = await BalanceSheet.find({
       $or: [
         { userId: userObjectId },
         { userId: req.user.id }
       ]
-    }).sort({ createdAt: -1 });
+    }).sort({ createdAt: -1 }).lean();
     res.status(200).json(sheets);
   } catch (error) {
     console.error("Error fetching balance sheets:", error);
@@ -134,11 +143,8 @@ router.get("/", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ GET route — Fetch balance sheet summary for authenticated user
-router.get("/summary", verifyTokenOptional, async (req, res) => {
+router.get("/summary", verifyToken, async (req, res) => {
   try {
-    if (!req.user || !req.user.id) {
-      return res.json({ totalAssets: 0, totalLiabilities: 0, totalEquity: 0, balancedCount: 0, totalRecords: 0 });
-    }
     const userObjectId = new mongoose.Types.ObjectId(req.user.id);
     const summary = await BalanceSheet.aggregate([
       {
@@ -174,21 +180,8 @@ router.get("/summary", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ GET route — Generate Live Balance Sheet connected to centralized finance flow
-router.get("/generate", verifyTokenOptional, async (req, res) => {
+router.get("/generate", verifyToken, async (req, res) => {
   try {
-    if (!req.user || !req.user.id) {
-      return res.status(200).json({
-        companyName: "Your Company",
-        financialYear: `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`,
-        period: req.query.period || "this-month",
-        assets: { cashAndBank: 0, accountsReceivable: 0, inventory: 0, currentAssets: 0, fixedAssets: 0, totalAssets: 0 },
-        liabilities: { accountsPayable: 0, currentLiabilities: 0, nonCurrentLiabilities: 0, totalLiabilities: 0 },
-        equity: { ownerEquity: 0, retainedEarnings: 0, totalEquity: 0 },
-        totalLiabilitiesEquity: 0,
-        balanced: true,
-        breakdown: { assets: { currentAssets: [], nonCurrentAssets: [] }, liabilities: { currentLiabilities: [], nonCurrentLiabilities: [] }, equity: [] }
-      });
-    }
     const period = req.query.period || "this-month";
     const liveBS = await getLiveBalanceSheet(req.user.id, period);
     res.status(200).json(liveBS);

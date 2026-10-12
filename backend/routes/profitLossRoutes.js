@@ -6,21 +6,31 @@ import { resolvePeriod, getFinanceMetrics } from "../utils/financeAggregator.js"
 const router = express.Router();
 
 const verifyToken = (req, res, next) => {
+    if (req.user && (req.user.id || req.user._id) && req.user.id !== "000000000000000000000000") {
+        return next();
+    }
     const token = req.headers.authorization?.split(" ")[1];
     const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
     if (!token || token === "null" || token === "undefined") {
-        req.user = { id: "000000000000000000000000" };
-        return next();
+        return res.status(401).json({ message: "Access denied. No token provided." });
     }
 
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = decoded;
+        req.user = {
+            ...decoded,
+            id: decoded.id || decoded._id?.toString()
+        };
+        if (!req.user.id || req.user.id === "000000000000000000000000") {
+            return res.status(401).json({ message: "Invalid authorization token." });
+        }
         next();
     } catch (error) {
-        req.user = { id: "000000000000000000000000" };
-        next();
+        if (error.name === "TokenExpiredError") {
+            return res.status(401).json({ message: "Token expired. Please log in again." });
+        }
+        return res.status(401).json({ message: "Invalid authorization token." });
     }
 };
 
@@ -58,6 +68,8 @@ const profitLossSchema = new mongoose.Schema({
   
   createdAt: { type: Date, default: Date.now },
 });
+
+profitLossSchema.index({ userId: 1, createdAt: -1 });
 
 const ProfitLoss = mongoose.model("ProfitLoss", profitLossSchema);
 
@@ -107,7 +119,7 @@ function generateAIInsights(revenue, expenses, netProfit, profitMargin, cogs) {
 }
 
 // ✅ POST route to store Profit & Loss data for authenticated user
-router.post("/add", async (req, res) => {
+router.post("/add", verifyToken, async (req, res) => {
   try {
     const plData = req.body;
 
@@ -171,9 +183,9 @@ router.post("/add", async (req, res) => {
 });
 
 // ✅ GET route to fetch all P&L records for authenticated user
-router.get("/all", async (req, res) => {
+router.get("/all", verifyToken, async (req, res) => {
   try {
-    const records = await ProfitLoss.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    const records = await ProfitLoss.find({ userId: req.user.id }).sort({ createdAt: -1 }).lean();
     res.json(records);
   } catch (error) {
     console.error("❌ Error fetching P&L data:", error);
@@ -182,7 +194,7 @@ router.get("/all", async (req, res) => {
 });
 
 // ✅ GET route to fetch P&L summary for authenticated user
-router.get("/summary", async (req, res) => {
+router.get("/summary", verifyToken, async (req, res) => {
   try {
     const summary = await ProfitLoss.aggregate([
       { $match: { userId: new mongoose.Types.ObjectId(req.user.id) } },
@@ -209,7 +221,7 @@ router.get("/summary", async (req, res) => {
 });
 
 // ✅ GET route to fetch AI insights for a specific record for authenticated user
-router.get("/insights/:id", async (req, res) => {
+router.get("/insights/:id", verifyToken, async (req, res) => {
   try {
     const record = await ProfitLoss.findOne({ _id: req.params.id, userId: req.user.id });
     if (!record) {
@@ -228,7 +240,7 @@ router.get("/insights/:id", async (req, res) => {
 });
 
 // ✅ GET route to dynamically generate Profit & Loss statement based on all modules
-router.get("/generate", async (req, res) => {
+router.get("/generate", verifyToken, async (req, res) => {
   try {
     const { period, startDate: startQuery, endDate: endQuery, companyName, financialYear } = req.query;
     let start, end;
@@ -256,13 +268,15 @@ router.get("/generate", async (req, res) => {
       metrics.expense.cogs
     );
 
+    const otherIncome = Math.max(0, metrics.revenue.total - metrics.revenue.sales);
+
     res.json({
       companyName: companyName || "Your Company",
       financialYear: financialYear || `${start.getFullYear()}-${end.getFullYear()}`,
       sales: metrics.revenue.sales,
       serviceIncome: 0,
       interestIncome: 0,
-      otherIncome: metrics.revenue.bookkeepingIncome + metrics.revenue.inventorySales,
+      otherIncome: otherIncome,
       totalRevenue: metrics.revenue.total,
       
       costOfMaterials: metrics.expense.costOfMaterials + metrics.expense.cogs,

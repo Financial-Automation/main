@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -12,6 +13,8 @@ import { sendResetEmail } from "./utils/emailService.js";
 import crypto from "crypto";
 
 import { performance } from "perf_hooks";
+import { initMongoAPM } from "./utils/inventoryInstrumentation.js";
+import { getFinanceMetrics, getLiveBalanceSheet, resolvePeriod } from "./utils/financeAggregator.js";
 
 const planKeyToName = {
   trial: "Sandbox",
@@ -39,16 +42,35 @@ import purchaseInvoiceRoutes from "./routes/purchaseInvoiceRoutes.js";
 import scannedDocRoutes from "./routes/scannedDocRoutes.js";
 import civilEngineeringRoutes from "./routes/civilEngineeringRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
+import vendorRoutes from "./routes/vendorRoutes.js";
+import budgetRoutes from "./routes/budgetRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
 
 dotenv.config();
 if (!process.env.PRO_MONGO_URI && !process.env.DEV_MONGO_URI) {
   dotenv.config({ path: "./backend/.env" });
 }
-const app = express();
 
-// ✅ TEMPORARY Performance Debug Middleware
+// Enforce production environment variable validation
+if (process.env.NODE_ENV === "production") {
+  const missingEnvs = [];
+  if (!process.env.PRO_MONGO_URI) missingEnvs.push("PRO_MONGO_URI");
+  if (!process.env.JWT_SECRET) missingEnvs.push("JWT_SECRET");
+  if (missingEnvs.length > 0) {
+    console.error(`❌ FATAL PRODUCTION CONFIG ERROR: Missing required environment variables: ${missingEnvs.join(", ")}`);
+    console.error("💡 Please configure these variables in your deployment environment or backend/.env file.");
+    process.exit(1);
+  }
+}
+
+const isDevModeAllowed = () => process.env.NODE_ENV !== "production" && process.env.DEV_MODE === "true";
+
+const app = express();
+app.use(compression());
+
+// ✅ Request arrival timestamp & Performance Debug Middleware
 app.use((req, res, next) => {
+  req._t_arrival = performance.now();
   if (process.env.PERF_DEBUG === "true") {
     const startTime = performance.now();
     const reqTimestamp = new Date().toISOString();
@@ -133,8 +155,18 @@ console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud D
 
 // Connect to MongoDB with fallback mechanism
 const connectToMongoDB = async () => {
+  initMongoAPM(mongoose);
+  const mongoOptions = {
+    maxPoolSize: Number(process.env.MAX_POOL_SIZE) || 100,
+    minPoolSize: 20,
+    maxIdleTimeMS: 30000,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    monitorCommands: true,
+  };
+
   try {
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(mongoUri, mongoOptions);
     console.log("✅ MongoDB Connected Successfully");
     console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
   } catch (err) {
@@ -143,7 +175,7 @@ const connectToMongoDB = async () => {
     if (isDevelopment) {
       console.log("🔄 Falling back to Cloud Database...");
       try {
-        await mongoose.connect(process.env.PRO_MONGO_URI);
+        await mongoose.connect(process.env.PRO_MONGO_URI, mongoOptions);
         console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
         console.log("📍 Database: Cloud Atlas (Fallback)");
       } catch (fallbackErr) {
@@ -202,10 +234,10 @@ const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 app.post("/api/signup", async (req, res) => {
   try {
     const { email, password, storePassword, role = "admin" } = req.body;
-    const cleanEmail = email ? email.trim().toLowerCase() : "";
-
-    if (!cleanEmail || !password)
-      return res.status(400).json({ success: false, message: "Email and password are required" });
+    if (typeof email !== "string" || typeof password !== "string" || !email.trim() || !password) {
+      return res.status(400).json({ success: false, message: "Email and password must be valid strings" });
+    }
+    const cleanEmail = email.trim().toLowerCase();
 
     const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     if (existingUser)
@@ -214,7 +246,7 @@ app.post("/api/signup", async (req, res) => {
     const allowedRoles = ["admin", "instore"];
     const userRole = allowedRoles.includes(role) ? role : "admin";
     const hashedPassword = await bcrypt.hash(password, 10);
-    const hashedStorePassword = storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
+    const hashedStorePassword = typeof storePassword === "string" && storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
     const newUser = new User({ email: cleanEmail, password: hashedPassword, storePassword: hashedStorePassword, role: userRole });
     await newUser.save();
 
@@ -234,11 +266,10 @@ app.post("/api/signup", async (req, res) => {
 app.post("/api/signup-trial", async (req, res) => {
   try {
     const { email, password, storePassword, name, role = "admin" } = req.body;
-    const cleanEmail = email ? email.trim().toLowerCase() : "";
-
-    if (!cleanEmail || !password) {
-      return res.status(400).json({ success: false, message: "Email and password are required" });
+    if (typeof email !== "string" || typeof password !== "string" || !email.trim() || !password) {
+      return res.status(400).json({ success: false, message: "Email and password must be valid strings" });
     }
+    const cleanEmail = email.trim().toLowerCase();
 
     const existingUser = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     if (existingUser) {
@@ -252,10 +283,10 @@ app.post("/api/signup-trial", async (req, res) => {
     const allowedRoles = ["admin", "instore"];
     const userRole = allowedRoles.includes(role) ? role : "admin";
     const hashedPassword = await bcrypt.hash(password, 10);
-    const hashedStorePassword = storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
+    const hashedStorePassword = typeof storePassword === "string" && storePassword ? await bcrypt.hash(storePassword, 10) : undefined;
     const newUser = new User({
       email: cleanEmail,
-      name: name || cleanEmail.split("@")[0],
+      name: typeof name === "string" ? name : cleanEmail.split("@")[0],
       password: hashedPassword,
       storePassword: hashedStorePassword,
       subscriptionStatus: "active",
@@ -319,8 +350,9 @@ app.post("/api/signin", async (req, res) => {
   try {
     const { email, password, role } = req.body;
 
-    if (!email || !password)
-      return res.status(400).json({ success: false, message: "Email and password are required" });
+    if (typeof email !== "string" || typeof password !== "string" || !email.trim() || !password) {
+      return res.status(400).json({ success: false, message: "Email and password must be valid strings" });
+    }
 
     const cleanEmail = email.trim().toLowerCase();
     let user = await User.findOne({ email: cleanEmail });
@@ -328,7 +360,7 @@ app.post("/api/signin", async (req, res) => {
       user = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     }
 
-    const isDevOrInMemory = !process.env.PRO_MONGO_URI || process.env.DEV_MODE === "true";
+    const isDevOrInMemory = process.env.NODE_ENV !== "production" && (!process.env.PRO_MONGO_URI || process.env.DEV_MODE === "true");
 
     if (!user) {
       if (isDevOrInMemory) {
@@ -470,8 +502,10 @@ app.post("/api/forgot-password", async (req, res) => {
     const appUrl = process.env.APP_URL || "http://localhost:5173";
     const resetUrl = `${appUrl}/reset-password?token=${resetToken}`;
 
-    // Send email
-    await sendResetEmail(user.email, resetUrl);
+    // Send email asynchronously without blocking HTTP response
+    sendResetEmail(user.email, resetUrl).catch(err => {
+      console.error("Async email dispatch error:", err.message);
+    });
 
     res.json(genericResponse);
   } catch (error) {
@@ -682,7 +716,7 @@ app.post("/api/create-order", async (req, res) => {
 
     const selectedPlan = subscriptionPlans[plan];
 
-    if (process.env.DEV_MODE === "true") {
+    if (isDevModeAllowed()) {
       return res.json({
         orderId: `dev_order_${Date.now()}`,
         amount: selectedPlan.totalAmount * 100, // Convert to paise for consistency
@@ -809,7 +843,7 @@ app.post("/api/verify-payment", async (req, res) => {
     }
 
     // Dev Mode Check
-    const isDevOrder = process.env.DEV_MODE === "true" || razorpay_order_id?.startsWith("dev_order_");
+    const isDevOrder = isDevModeAllowed() && (process.env.DEV_MODE === "true" || razorpay_order_id?.startsWith("dev_order_"));
     const paymentIdToCheck = razorpay_payment_id || (isDevOrder ? `dev_payment_${Date.now()}` : undefined);
     const orderIdToCheck = razorpay_order_id || `dev_order_${Date.now()}`;
 
@@ -967,8 +1001,7 @@ app.post("/api/upgrade-subscription", authenticateUser, async (req, res) => {
     }
 
     // Dev Mode Check
-    // Dev Mode Check
-    const isDevOrder = process.env.DEV_MODE === "true" || razorpay_order_id?.startsWith("dev_order_");
+    const isDevOrder = isDevModeAllowed() && (process.env.DEV_MODE === "true" || razorpay_order_id?.startsWith("dev_order_"));
     const paymentIdToCheck = razorpay_payment_id || (isDevOrder ? `dev_payment_${Date.now()}` : undefined);
     const orderIdToCheck = razorpay_order_id || `dev_order_${Date.now()}`;
     // Duplicate/Replay check
@@ -1173,7 +1206,7 @@ app.post("/api/webhooks/razorpay", async (req, res) => {
       .digest('hex');
 
     // For testing/fallback in local env where stringifying req.body might differ slightly, we check both signature validation and dev mode
-    if (expectedSignature !== signature && process.env.DEV_MODE !== "true") {
+    if (expectedSignature !== signature && !isDevModeAllowed()) {
       return res.status(400).json({ message: "Invalid webhook signature." });
     }
 
@@ -1287,7 +1320,84 @@ app.use("/api/purchase-invoice", authenticateUser, checkSubscription, checkModul
 app.use("/api/scanned-docs", authenticateUser, checkSubscription, checkModuleAccess("invoice"), scannedDocRoutes);
 app.use("/api/civil-engineering", authenticateUser, checkSubscription, checkModuleAccess("civil-engineering"), civilEngineeringRoutes);
 app.use("/api/customers", authenticateUser, checkSubscription, checkModuleAccess("invoice"), customerRoutes);
+app.use("/api/vendors", authenticateUser, checkSubscription, checkModuleAccess("invoice"), vendorRoutes);
+app.use("/api/budgets", authenticateUser, checkSubscription, checkModuleAccess("bookkeeping"), budgetRoutes);
 app.use("/api/invoice-templates", authenticateUser, checkSubscription, checkModuleAccess("invoice"), invoiceTemplateRoutes);
+
+// ✅ DASHBOARD OVERVIEW - Unified Financial & Operational Metrics API
+app.get("/api/dashboard/overview", authenticateUser, checkSubscription, async (req, res) => {
+  try {
+    const period = req.query.period || "this-month";
+    const { startDate, endDate } = resolvePeriod(period);
+    const userId = req.user.id || req.user._id?.toString();
+
+    const [metrics, balanceSheet] = await Promise.all([
+      getFinanceMetrics(userId, startDate, endDate),
+      getLiveBalanceSheet(userId, period)
+    ]);
+
+    // Inventory low stock check
+    const InventoryItem = mongoose.models.InventoryItem || mongoose.model("InventoryItem");
+    let lowStockCount = 0;
+    let totalInventoryValuation = 0;
+    if (InventoryItem) {
+      const items = await InventoryItem.find({ userId }).select("quantity price costPrice buyPrice minStockLevel").lean();
+      lowStockCount = items.filter(i => (i.quantity || 0) <= (i.minStockLevel !== undefined ? i.minStockLevel : 5)).length;
+      totalInventoryValuation = items.reduce((s, i) => s + ((i.quantity || 0) * (i.price || i.costPrice || i.buyPrice || 0)), 0);
+    }
+
+    // Invoice overdue check
+    const Invoice = mongoose.models.Invoice || mongoose.model("Invoice");
+    let overdueInvoiceCount = 0;
+    if (Invoice) {
+      overdueInvoiceCount = await Invoice.countDocuments({
+        $or: [{ userId }, { createdBy: userId }],
+        isDeleted: false,
+        paymentStatus: { $ne: "paid" },
+        status: { $ne: "paid" },
+        dueDate: { $lt: new Date() }
+      });
+    }
+
+    // Build financial warnings & alerts
+    const warnings = [];
+    if (lowStockCount > 0) {
+      warnings.push({ type: "warning", code: "LOW_STOCK", message: `Low Stock Alert: ${lowStockCount} product(s) are at or below reorder threshold.` });
+    }
+    if (metrics.cashFlow.receivables > 50000) {
+      warnings.push({ type: "warning", code: "HIGH_RECEIVABLES", message: `High Receivables: ₹${metrics.cashFlow.receivables.toLocaleString('en-IN')} outstanding from customers.` });
+    }
+    if (metrics.netProfit < 0) {
+      warnings.push({ type: "danger", code: "NET_LOSS", message: `Profit Alert: Operating at a net loss of ₹${Math.abs(metrics.netProfit).toLocaleString('en-IN')} for this period.` });
+    }
+    if (overdueInvoiceCount > 0) {
+      warnings.push({ type: "warning", code: "OVERDUE_INVOICES", message: `Payment Alert: ${overdueInvoiceCount} invoice(s) are past due.` });
+    }
+    if (warnings.length === 0) {
+      warnings.push({ type: "info", code: "HEALTHY", message: "Financial status healthy. Cashflow and receivables within standard limits." });
+    }
+
+    res.json({
+      period,
+      metrics,
+      balanceSheetSummary: {
+        totalAssets: balanceSheet.assets?.totalAssets || 0,
+        totalLiabilities: balanceSheet.liabilities?.totalLiabilities || 0,
+        totalEquity: balanceSheet.equity?.totalEquity || 0,
+        balanced: balanceSheet.balanced
+      },
+      inventorySummary: {
+        lowStockCount,
+        totalValuation: totalInventoryValuation
+      },
+      overdueInvoiceCount,
+      warnings
+    });
+  } catch (error) {
+    console.error("Error fetching dashboard overview:", error);
+    res.status(500).json({ message: "Error fetching dashboard overview data", error: error.message });
+  }
+});
 
 const seedPlans = async () => {
   const plans = [
@@ -1392,7 +1502,32 @@ const startServer = async () => {
     console.log(`🚀 Financial Backend running on http://${HOST}:${PORT}`);
     console.log(`🌐 Production URL: https://software.saaiss.in`);
     console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
+    if (process.send) {
+      process.send('ready');
+    }
   });
+
+  const gracefulShutdown = (signal) => {
+    console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
+    server.close(async () => {
+      console.log("🏽 HTTP server closed. Closing MongoDB connection...");
+      try {
+        await mongoose.connection.close(false);
+        console.log("🏽 MongoDB connection closed successfully.");
+      } catch (err) {
+        console.error("⚠️ Error closing MongoDB connection during shutdown:", err);
+      }
+      process.exit(0);
+    });
+
+    setTimeout(() => {
+      console.error("⚠️ Forcefully shutting down after 10s timeout.");
+      process.exit(1);
+    }, 10000).unref();
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {

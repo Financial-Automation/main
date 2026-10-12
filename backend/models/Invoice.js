@@ -12,10 +12,10 @@ const invoiceItemSchema = new mongoose.Schema({
   sacCode: { type: String, default: "" },
   unit: { type: String, default: "Pcs" },
   priceWithTax: { type: Boolean, default: false },
-  quantity: { type: Number, required: true },
-  unitPrice: { type: Number, required: true },
-  taxRate: { type: Number, default: 0 },
-  discount: { type: Number, default: 0 }, // Discount percentage or flat amount per item
+  quantity: { type: Number, required: [true, 'Quantity is required'], min: [0, 'Quantity cannot be negative'] },
+  unitPrice: { type: Number, required: [true, 'Unit price is required'], min: [0, 'Unit price cannot be negative'] },
+  taxRate: { type: Number, default: 0, min: [0, 'Tax rate cannot be negative'] },
+  discount: { type: Number, default: 0, min: [0, 'Discount cannot be negative'] },
   total: { type: Number, required: true }
 });
 
@@ -141,10 +141,35 @@ const invoiceSchema = new mongoose.Schema({
 });
 
 // Index declarations for performance and security scoping
-invoiceSchema.index({ userId: 1, invoiceNumber: 1 }, { unique: true });
+invoiceSchema.index(
+  { userId: 1, invoiceNumber: 1 },
+  { unique: true, partialFilterExpression: { isDeleted: false } }
+);
 invoiceSchema.index({ userId: 1, invoiceDate: -1 });
-invoiceSchema.index({ customerId: 1 });
-
+invoiceSchema.index({ userId: 1, isDeleted: 1, invoiceDate: -1 });
+invoiceSchema.index({ createdBy: 1 });
 const Invoice = mongoose.models.Invoice || mongoose.model("Invoice", invoiceSchema);
+
+const syncInvoiceIndexes = async () => {
+  try {
+    if (Invoice.collection) {
+      const indexes = await Invoice.collection.indexes();
+      const legacyIndex = indexes.find(idx => idx.name === "userId_1_invoiceNumber_1");
+      if (legacyIndex && !legacyIndex.partialFilterExpression) {
+        console.log("🔄 Dropping legacy index userId_1_invoiceNumber_1 without partial filter...");
+        await Invoice.collection.dropIndex("userId_1_invoiceNumber_1");
+      }
+      await Invoice.syncIndexes();
+    }
+  } catch (err) {
+    console.log("Index sync note:", err.message);
+  }
+};
+
+if (mongoose.connection.readyState === 1) {
+  syncInvoiceIndexes();
+} else {
+  mongoose.connection.once("open", syncInvoiceIndexes);
+}
 
 export default Invoice;

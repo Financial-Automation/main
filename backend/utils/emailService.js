@@ -15,11 +15,15 @@ export const sendResetEmail = async (email, resetUrl) => {
   const smtpFrom = process.env.SMTP_FROM || smtpUser || "noreply@shreeandalai.com";
 
   if (!smtpUser || !smtpPass) {
+    if (process.env.NODE_ENV === "production") {
+      console.warn("⚠️ SMTP credentials not configured in production environment. Email delivery skipped.");
+      return { success: false, message: "SMTP service unconfigured." };
+    }
     console.log("\n=========================================");
-    console.log(`📧 PASSWORD RESET LINK FOR: ${email}`);
-    console.log(`🔗 Reset URL: ${resetUrl}`);
+    console.log(`[DEV ONLY] 📧 PASSWORD RESET LINK FOR: ${email}`);
+    console.log(`[DEV ONLY] 🔗 Reset URL: ${resetUrl}`);
     console.log("=========================================\n");
-    console.warn("⚠️ SMTP credentials not configured in backend/.env. Reset link printed to console above.");
+    console.warn("⚠️ SMTP credentials not configured in development environment. Reset link printed to console above.");
     return { success: true, printedToConsole: true };
   }
 
@@ -85,14 +89,18 @@ export const sendLeadEmail = async ({ fullName, email, phone, business }) => {
   const plainTextBody = `New Website Lead\n\nName: ${fullName}\nEmail: ${email}\nPhone: ${phone}\nBusiness: ${business || "N/A"}`;
 
   if (!smtpUser || !smtpPass) {
+    if (process.env.NODE_ENV === "production") {
+      console.warn("⚠️ SMTP credentials not configured in production environment. Lead email delivery skipped.");
+      return { success: false, message: "SMTP service unconfigured." };
+    }
     console.log("\n=========================================");
-    console.log(`📧 NEW WEBSITE LEAD NOTIFICATION FOR: ${targetRecipient}`);
-    console.log(`👤 Name: ${fullName}`);
-    console.log(`✉️ Email: ${email}`);
-    console.log(`📞 Phone: ${phone}`);
-    console.log(`🏢 Business: ${business || "N/A"}`);
+    console.log(`[DEV ONLY] 📧 NEW WEBSITE LEAD NOTIFICATION FOR: ${targetRecipient}`);
+    console.log(`[DEV ONLY] 👤 Name: ${fullName}`);
+    console.log(`[DEV ONLY] ✉️ Email: ${email}`);
+    console.log(`[DEV ONLY] 📞 Phone: ${phone}`);
+    console.log(`[DEV ONLY] 🏢 Business: ${business || "N/A"}`);
     console.log("=========================================\n");
-    console.warn("⚠️ SMTP credentials not configured in backend/.env. Lead notification printed to console above.");
+    console.warn("⚠️ SMTP credentials not configured in development environment. Lead notification printed to console above.");
     return { success: true, printedToConsole: true };
   }
 

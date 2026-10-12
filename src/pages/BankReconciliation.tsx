@@ -1,1077 +1,943 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useEffect, useRef } from "react";
-import { VoiceButton } from "@/components/ui/VoiceButton";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+import { useSubscription } from "@/contexts/SubscriptionContext";
+import {
+  Landmark,
+  Upload,
+  CheckCircle,
+  AlertTriangle,
+  ArrowLeft,
+  Search,
+  Filter,
+  Download,
+  Plus,
+  RefreshCw,
+  Loader2,
+  FileSpreadsheet,
+  Building2,
+  Users,
+  BookOpen,
+  DollarSign,
+  ChevronRight,
+  ExternalLink,
+  ShieldCheck,
+  FileText,
+  XCircle,
+  Link as LinkIcon,
+  HelpCircle,
+  Calendar,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, Upload, RefreshCw, CheckCircle, XCircle, AlertCircle, Download, FileText, BanknoteIcon, TrendingUp, Plus, Loader2 } from "lucide-react";
-import { toast } from "sonner";
-import { API_BASE_URL } from "@/lib/api";
-import { DEFAULT_REPORT_COMPANY_NAME, REPORT_FOOTER_COMPANY, getReportCompanyName } from "@/lib/reportBranding";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { API_BASE_URL, apiRequest } from "@/lib/api";
+import { DEFAULT_REPORT_COMPANY_NAME, getReportCompanyName } from "@/lib/reportBranding";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
-interface LedgerEntry {
-    id: string;
-    date: string;
+interface BankReconciliationSummary {
+  openingBalance: number;
+  latestBankBalance: number;
+  systemLedgerBalance: number;
+  difference: number;
+  totalTransactions: number;
+  matchedCount: number;
+  suggestedCount: number;
+  reconciledCount: number;
+  unmatchedCount: number;
+  reconciliationPercentage: number;
+  lastReconciliationDate: string;
+  status: "balanced" | "needs_attention";
+  warningMessage: string;
+  totalInflow: number;
+  totalOutflow: number;
+}
+
+interface BankTxItem {
+  _id: string;
+  date: string;
+  description: string;
+  referenceNumber?: string;
+  type: "credit" | "debit";
+  amount: number;
+  status: "unmatched" | "matched" | "reconciled" | "ignored";
+  matchScore: number;
+  matchType: string;
+  matchReasons?: string[];
+  matchedCustomerName?: string;
+  matchedVendorName?: string;
+  matchedBookkeepingId?: {
+    _id: string;
     description: string;
     amount: number;
-    type: 'Income' | 'Expense';
-    reference?: string;
+    category: string;
+    type: string;
+  } | null;
+  matchedInvoiceId?: {
+    _id: string;
+    invoiceNumber: string;
+    customerName: string;
+    grandTotal: number;
+  } | null;
 }
 
-interface BankEntry {
-    id: string;
-    date: string;
-    description: string;
-    amount: number;
-    type: 'Credit' | 'Debit';
-    reference?: string;
-}
+export const BankReconciliation = () => {
+  const navigate = useNavigate();
+  const { hasAccess } = useSubscription();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-interface ReconciliationResult {
-    id: string;
-    ledgerEntry: LedgerEntry | null;
-    bankEntry: BankEntry | null;
-    status: 'Matched' | 'Unmatched Ledger' | 'Unmatched Bank' | 'Pending';
-    matchScore: number;
-    notes?: string;
-    reconciledAt: string;
-}
+  const [summary, setSummary] = useState<BankReconciliationSummary | null>(null);
+  const [transactions, setTransactions] = useState<BankTxItem[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [uploading, setUploading] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [startDateFilter, setStartDateFilter] = useState<string>("");
+  const [endDateFilter, setEndDateFilter] = useState<string>("");
 
-interface ReconciliationSummary {
-    totalLedgerEntries: number;
-    totalBankEntries: number;
-    matchedEntries: number;
-    unmatchedLedger: number;
-    unmatchedBank: number;
-    reconciliationRate: string;
-}
+  // Create Bookkeeping Entry Modal
+  const [selectedTxForEntry, setSelectedTxForEntry] = useState<BankTxItem | null>(null);
+  const [isEntryModalOpen, setIsEntryModalOpen] = useState<boolean>(false);
+  const [entryCategory, setEntryCategory] = useState<string>("General");
+  const [entryDescription, setEntryDescription] = useState<string>("");
+  const [submittingEntry, setSubmittingEntry] = useState<boolean>(false);
 
-const BankReconciliation = () => {
-    const navigate = useNavigate();
-    const [activeTab, setActiveTab] = useState("reconcile");
-    const [companyName, setCompanyName] = useState(DEFAULT_REPORT_COMPANY_NAME);
-    const [isReconciling, setIsReconciling] = useState(false);
+  // Manual Ledger Search / Linking Modal
+  const [selectedTxForSearch, setSelectedTxForSearch] = useState<BankTxItem | null>(null);
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState<boolean>(false);
+  const [ledgerSearchQuery, setLedgerSearchQuery] = useState<string>("");
+  const [searchResults, setSearchResults] = useState<{ bookkeepingEntries: any[]; invoices: any[] }>({
+    bookkeepingEntries: [],
+    invoices: [],
+  });
+  const [loadingSearch, setLoadingSearch] = useState<boolean>(false);
 
-    // File upload refs
-    const ledgerFileRef = useRef<HTMLInputElement>(null);
-    const bankFileRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    fetchSummaryAndTransactions();
+  }, [statusFilter, typeFilter, searchQuery, startDateFilter, endDateFilter]);
 
-    // File state
-    const [ledgerFile, setLedgerFile] = useState<File | null>(null);
-    const [bankFile, setBankFile] = useState<File | null>(null);
-    const [isUploading, setIsUploading] = useState(false);
+  const fetchSummaryAndTransactions = async () => {
+    try {
+      setLoading(true);
+      let queryParams = `status=${statusFilter}&type=${typeFilter}&q=${encodeURIComponent(searchQuery)}`;
+      if (startDateFilter) queryParams += `&startDate=${startDateFilter}`;
+      if (endDateFilter) queryParams += `&endDate=${endDateFilter}`;
 
-    // Session state
-    const [sessionId, setSessionId] = useState<string | null>(null);
+      const [sumData, txRes] = await Promise.all([
+        apiRequest(`${API_BASE_URL}/api/bank-reconciliation/summary?${queryParams}`),
+        apiRequest(`${API_BASE_URL}/api/bank-reconciliation/transactions?${queryParams}`),
+      ]);
+      setSummary(sumData);
+      setTransactions(Array.isArray(txRes) ? txRes : txRes.transactions || []);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to load bank reconciliation data.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    // Sample Data State (will be replaced by uploaded data)
-    const [ledgerData, setLedgerData] = useState<LedgerEntry[]>([]);
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-    const [bankData, setBankData] = useState<BankEntry[]>([]);
+    const formData = new FormData();
+    formData.append("file", file);
 
-    // Reconciliation Results
-    const [reconciliationResults, setReconciliationResults] = useState<ReconciliationResult[]>([]);
-    const [summary, setSummary] = useState<ReconciliationSummary>({
-        totalLedgerEntries: 0,
-        totalBankEntries: 0,
-        matchedEntries: 0,
-        unmatchedLedger: 0,
-        unmatchedBank: 0,
-        reconciliationRate: "0.00"
+    try {
+      setUploading(true);
+      const token = localStorage.getItem("token");
+      const response = await fetch(`${API_BASE_URL}/api/bank-reconciliation/upload-statement`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+
+      const resData = await response.json();
+      if (response.ok) {
+        toast.success(resData.message || "Bank statement uploaded and matched with ledger!");
+        fetchSummaryAndTransactions();
+      } else {
+        toast.error(resData.message || "Failed to upload bank statement.");
+      }
+    } catch (error: any) {
+      toast.error("Error uploading statement file: " + error.message);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleReconcileItem = async (bankTransactionId: string, bookkeepingId?: string, invoiceId?: string) => {
+    try {
+      await apiRequest(`${API_BASE_URL}/api/bank-reconciliation/reconcile-item`, {
+        method: "POST",
+        body: JSON.stringify({ bankTransactionId, bookkeepingId, invoiceId }),
+      });
+      toast.success("Transaction reconciled!");
+      fetchSummaryAndTransactions();
+    } catch (error: any) {
+      toast.error(error.message || "Failed to reconcile transaction.");
+    }
+  };
+
+  const handleUnmatchItem = async (bankTransactionId: string) => {
+    try {
+      await apiRequest(`${API_BASE_URL}/api/bank-reconciliation/unmatch-item`, {
+        method: "POST",
+        body: JSON.stringify({ bankTransactionId }),
+      });
+      toast.success("Match rejected & marked as unmatched.");
+      fetchSummaryAndTransactions();
+    } catch (error: any) {
+      toast.error(error.message || "Failed to unmatch transaction.");
+    }
+  };
+
+  const handleOpenCreateEntryModal = (tx: BankTxItem) => {
+    setSelectedTxForEntry(tx);
+    setEntryDescription(tx.description);
+    setEntryCategory(tx.type === "credit" ? "Sales" : "Utilities");
+    setIsEntryModalOpen(true);
+  };
+
+  const handleCreateBookkeepingEntry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTxForEntry || !entryCategory.trim()) return;
+
+    try {
+      setSubmittingEntry(true);
+      await apiRequest(`${API_BASE_URL}/api/bank-reconciliation/create-bookkeeping-entry`, {
+        method: "POST",
+        body: JSON.stringify({
+          bankTransactionId: selectedTxForEntry._id,
+          category: entryCategory.trim(),
+          description: entryDescription.trim(),
+        }),
+      });
+      toast.success("Matching bookkeeping entry created & transaction reconciled!");
+      setIsEntryModalOpen(false);
+      fetchSummaryAndTransactions();
+    } catch (error: any) {
+      toast.error(error.message || "Failed to create bookkeeping entry.");
+    } finally {
+      setSubmittingEntry(false);
+    }
+  };
+
+  const handleOpenSearchModal = async (tx: BankTxItem) => {
+    setSelectedTxForSearch(tx);
+    setIsSearchModalOpen(true);
+    fetchLedgerSearchResults(tx.description, tx.type);
+  };
+
+  const fetchLedgerSearchResults = async (queryStr: string, type: string) => {
+    try {
+      setLoadingSearch(true);
+      const res = await apiRequest(
+        `${API_BASE_URL}/api/bank-reconciliation/search-ledger?q=${encodeURIComponent(queryStr)}&type=${type}`
+      );
+      setSearchResults(res || { bookkeepingEntries: [], invoices: [] });
+    } catch (error: any) {
+      toast.error(error.message || "Failed to search ledger.");
+    } finally {
+      setLoadingSearch(false);
+    }
+  };
+
+  const downloadAuditReport = () => {
+    if (!summary) return;
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    let y = 20;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(14);
+    doc.text(getReportCompanyName(DEFAULT_REPORT_COMPANY_NAME), pageWidth / 2, y, { align: "center" });
+
+    y += 8;
+    doc.setFontSize(18);
+    doc.text("BANK RECONCILIATION AUDIT REPORT", pageWidth / 2, y, { align: "center" });
+
+    y += 10;
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Generated: ${new Date().toLocaleString()}`, pageWidth / 2, y, { align: "center" });
+
+    y += 15;
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.text("RECONCILIATION SUMMARY", 15, y);
+
+    y += 8;
+    const summaryTable = [
+      ["Opening Statement Balance", `Rs. ${summary.openingBalance.toLocaleString("en-IN")}`],
+      ["Closing Bank Statement Balance", `Rs. ${summary.latestBankBalance.toLocaleString("en-IN")}`],
+      ["System Ledger Balance", `Rs. ${summary.systemLedgerBalance.toLocaleString("en-IN")}`],
+      ["Reconciliation Difference", `Rs. ${summary.difference.toLocaleString("en-IN")}`],
+      ["Total Statement Items", summary.totalTransactions.toString()],
+      ["Reconciled Items", summary.reconciledCount.toString()],
+      ["Suggested Matches", summary.suggestedCount.toString()],
+      ["Unreconciled Items", summary.unmatchedCount.toString()],
+      ["Reconciliation Percentage", `${summary.reconciliationPercentage}%`],
+    ];
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Audit Metric", "Value"]],
+      body: summaryTable,
+      theme: "grid",
     });
 
-    // Filter State
-    const [filterStatus, setFilterStatus] = useState<string>("all");
-    const [filteredResults, setFilteredResults] = useState<ReconciliationResult[]>([]);
+    y = (doc as any).lastAutoTable.finalY + 15;
 
-    // Manual entries
-    const [manualLedgerEntry, setManualLedgerEntry] = useState({
-        date: "",
-        description: "",
-        amount: "",
-        type: "Expense" as 'Income' | 'Expense',
-        reference: ""
+    doc.setFontSize(12);
+    doc.text("TRANSACTION AUDIT LIST", 15, y);
+    y += 8;
+
+    const txRows = transactions.slice(0, 40).map((t) => [
+      new Date(t.date).toLocaleDateString(),
+      t.description,
+      t.type.toUpperCase(),
+      `Rs. ${t.amount.toLocaleString("en-IN")}`,
+      t.status.toUpperCase(),
+    ]);
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Date", "Description", "Type", "Amount", "Status"]],
+      body: txRows.length > 0 ? txRows : [["-", "No transactions", "-", "-", "-"]],
+      theme: "grid",
     });
 
-    const [manualBankEntry, setManualBankEntry] = useState({
-        date: "",
-        description: "",
-        amount: "",
-        type: "Debit" as 'Credit' | 'Debit',
-        reference: ""
-    });
-
-    // Filter results
-    useEffect(() => {
-        let filtered = reconciliationResults;
-
-        if (filterStatus !== "all") {
-            filtered = filtered.filter(result => result.status === filterStatus);
-        }
-
-        setFilteredResults(filtered);
-    }, [reconciliationResults, filterStatus]);
-
-    // Summary is set directly from API response in performReconciliation()
-
-    // Handle ledger file selection
-    const handleLedgerFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (file) {
-            const fileType = file.name.split('.').pop()?.toLowerCase();
-            if (!['csv', 'xlsx', 'xls'].includes(fileType || '')) {
-                toast.error("Please upload CSV or Excel files only");
-                return;
-            }
-            setLedgerFile(file);
-            toast.success(`Ledger file selected: ${file.name}`);
-        }
-    };
-
-    // Handle bank file selection
-    const handleBankFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (file) {
-            const fileType = file.name.split('.').pop()?.toLowerCase();
-            if (!['csv', 'xlsx', 'xls'].includes(fileType || '')) {
-                toast.error("Please upload CSV or Excel files only");
-                return;
-            }
-            setBankFile(file);
-            toast.success(`Bank statement selected: ${file.name}`);
-        }
-    };
-
-    // Reconciliation function using backend API
-    const performReconciliation = async () => {
-        if (!ledgerFile || !bankFile) {
-            toast.error("Please upload both ledger and bank statement files");
-            return;
-        }
-
-        setIsReconciling(true);
-
-        try {
-            // Create FormData with both files
-            const formData = new FormData();
-            formData.append('ledgerFile', ledgerFile);
-            formData.append('bankFile', bankFile);
-            formData.append('dateToleranceDays', '3');
-            formData.append('matchingTolerance', '0');
-
-            const response = await fetch(`${API_BASE_URL}/bank-reconciliation/reconcile`, {
-                method: 'POST',
-                body: formData
-            });
-
-            const data = await response.json();
-
-            if (response.ok) {
-                // Map API response to frontend format
-                const results: ReconciliationResult[] = [];
-
-                // Matched transactions
-                data.matched?.forEach((match: any, index: number) => {
-                    results.push({
-                        id: `M${index + 1}`,
-                        ledgerEntry: {
-                            id: match.ledger.id,
-                            date: match.ledger.date,
-                            description: match.ledger.description,
-                            amount: match.ledger.amount,
-                            type: match.ledger.amount >= 0 ? 'Income' : 'Expense',
-                            reference: match.ledger.reference
-                        },
-                        bankEntry: {
-                            id: match.bank.id,
-                            date: match.bank.date,
-                            description: match.bank.description,
-                            amount: match.bank.amount,
-                            type: match.bank.amount >= 0 ? 'Credit' : 'Debit',
-                            reference: match.bank.reference
-                        },
-                        status: 'Matched',
-                        matchScore: match.matchScore,
-                        reconciledAt: new Date().toLocaleDateString()
-                    });
-                });
-
-                // Ledger only (unmatched)
-                data.ledgerOnly?.forEach((tx: any, index: number) => {
-                    results.push({
-                        id: `L${index + 1}`,
-                        ledgerEntry: {
-                            id: tx.id,
-                            date: tx.date,
-                            description: tx.description,
-                            amount: tx.amount,
-                            type: tx.amount >= 0 ? 'Income' : 'Expense',
-                            reference: tx.reference
-                        },
-                        bankEntry: null,
-                        status: 'Unmatched Ledger',
-                        matchScore: 0,
-                        notes: tx.possibleReason,
-                        reconciledAt: new Date().toLocaleDateString()
-                    });
-                });
-
-                // Bank only (unmatched)
-                data.bankOnly?.forEach((tx: any, index: number) => {
-                    results.push({
-                        id: `B${index + 1}`,
-                        ledgerEntry: null,
-                        bankEntry: {
-                            id: tx.id,
-                            date: tx.date,
-                            description: tx.description,
-                            amount: tx.amount,
-                            type: tx.amount >= 0 ? 'Credit' : 'Debit',
-                            reference: tx.reference
-                        },
-                        status: 'Unmatched Bank',
-                        matchScore: 0,
-                        notes: tx.possibleReason,
-                        reconciledAt: new Date().toLocaleDateString()
-                    });
-                });
-
-                // Update summary from API response
-                if (data.summary) {
-                    setSummary({
-                        totalLedgerEntries: data.summary.totalLedgerRecords || 0,
-                        totalBankEntries: data.summary.totalBankRecords || 0,
-                        matchedEntries: data.summary.matchedCount || 0,
-                        unmatchedLedger: data.summary.ledgerOnlyCount || 0,
-                        unmatchedBank: data.summary.bankOnlyCount || 0,
-                        reconciliationRate: data.summary.matchRate?.replace('%', '') || '0.00'
-                    });
-                }
-
-                setReconciliationResults(results);
-                toast.success(`Reconciliation completed! Found ${data.summary?.matchedCount || 0} matches.`);
-                setActiveTab('results');
-            } else {
-                toast.error(data.message || "Reconciliation failed");
-            }
-        } catch (error) {
-            console.error("Reconciliation error:", error);
-            toast.error("Failed to connect to server");
-        } finally {
-            setIsReconciling(false);
-        }
-    };
-
-    // Add manual ledger entry
-    const addManualLedgerEntry = () => {
-        if (!manualLedgerEntry.date || !manualLedgerEntry.description || !manualLedgerEntry.amount) {
-            alert("Please fill in all required fields");
-            return;
-        }
-
-        const newEntry: LedgerEntry = {
-            id: `L${ledgerData.length + 1}`,
-            date: manualLedgerEntry.date,
-            description: manualLedgerEntry.description,
-            amount: parseFloat(manualLedgerEntry.amount),
-            type: manualLedgerEntry.type,
-            reference: manualLedgerEntry.reference
-        };
-
-        setLedgerData(prev => [...prev, newEntry]);
-        setManualLedgerEntry({
-            date: "",
-            description: "",
-            amount: "",
-            type: "Expense",
-            reference: ""
-        });
-
-        alert("Ledger entry added successfully!");
-    };
-
-    // Add manual bank entry
-    const addManualBankEntry = () => {
-        if (!manualBankEntry.date || !manualBankEntry.description || !manualBankEntry.amount) {
-            alert("Please fill in all required fields");
-            return;
-        }
-
-        const newEntry: BankEntry = {
-            id: `B${bankData.length + 1}`,
-            date: manualBankEntry.date,
-            description: manualBankEntry.description,
-            amount: parseFloat(manualBankEntry.amount),
-            type: manualBankEntry.type,
-            reference: manualBankEntry.reference
-        };
-
-        setBankData(prev => [...prev, newEntry]);
-        setManualBankEntry({
-            date: "",
-            description: "",
-            amount: "",
-            type: "Debit",
-            reference: ""
-        });
-
-        alert("Bank entry added successfully!");
-    };
-
-    // Export reconciliation report
-    const exportReport = () => {
-        const reportContent = `
-BANK RECONCILIATION REPORT
-Company: ${getReportCompanyName(companyName)}
-Generated: ${new Date().toLocaleString()}
-
-SUMMARY:
-Total Ledger Entries: ${summary.totalLedgerEntries}
-Total Bank Entries: ${summary.totalBankEntries}
-Matched Entries: ${summary.matchedEntries}
-Unmatched Ledger Entries: ${summary.unmatchedLedger}
-Unmatched Bank Entries: ${summary.unmatchedBank}
-Reconciliation Rate: ${summary.reconciliationRate}%
-
-RECONCILIATION RESULTS:
-${reconciliationResults.map(result => `
-${result.status === 'Matched' ? '✅ MATCHED' : result.status === 'Unmatched Ledger' ? '⚠️ UNMATCHED LEDGER' : '⚠️ UNMATCHED BANK'}
-${result.ledgerEntry ? `Ledger: ${result.ledgerEntry.date} | ${result.ledgerEntry.description} | ₹${result.ledgerEntry.amount}` : 'No ledger entry'}
-${result.bankEntry ? `Bank: ${result.bankEntry.date} | ${result.bankEntry.description} | ₹${result.bankEntry.amount}` : 'No bank entry'}
-Match Score: ${result.matchScore}%
----`).join('\n')}
-
-Generated by ${REPORT_FOOTER_COMPANY}
-Powered by Bank Reconciliation Engine
-    `.trim();
-
-        const blob = new Blob([reportContent], { type: "text/plain" });
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `reconciliation_report_${new Date().toISOString().split('T')[0]}.txt`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(url);
-    };
-
-    const handleBackToDashboard = () => {
-        navigate("/dashboard");
-    };
+    doc.save(`bank_reconciliation_report_${Date.now()}.pdf`);
+    toast.success("Reconciliation audit PDF downloaded.");
+  };
 
   return (
-    <div className="liquid-page module-ink min-h-screen overflow-hidden text-slate-950">
-      <div className="liquid-backdrop fixed inset-0 pointer-events-none" />
-
-      <header className="sticky top-0 z-20 border-b border-white/40 bg-white/24 backdrop-blur-2xl">
-        <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-slate-50 p-4 sm:p-6 lg:p-8 space-y-6">
+      {/* Top Header */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div className="flex items-center gap-3">
           <Button
-            variant="ghost"
-            onClick={handleBackToDashboard}
-            className="mb-4 rounded-full border border-white/60 bg-white/45 text-slate-700 hover:bg-white/70 hover:text-slate-950"
+            variant="outline"
+            size="icon"
+            onClick={() => navigate("/dashboard")}
+            className="rounded-xl border-slate-200"
           >
-                        <ArrowLeft className="mr-2 h-4 w-4" />
-                        Back to Dashboard
-                    </Button>
-                    <div className="flex items-center gap-4">
-            <div className="liquid-icon flex h-16 w-16 items-center justify-center rounded-[22px]">
-              <BanknoteIcon className="h-8 w-8 text-slate-900" />
-            </div>
-            <div>
-              <h1 className="text-4xl font-semibold tracking-tight text-slate-950">
-                Bank Reconciliation
-              </h1>
-              <p className="mt-1 text-slate-600">Match ledger entries with bank statements automatically</p>
-            </div>
+            <ArrowLeft className="h-4 w-4 text-slate-600" />
+          </Button>
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+              <Landmark className="h-7 w-7 text-indigo-600" />
+              Bank Reconciliation & Financial Control Center
+            </h1>
+            <p className="text-sm text-slate-500">
+              Import bank statements, match against system bookkeeping & audit cash accuracy.
+            </p>
           </div>
         </div>
-      </header>
 
-      <main className="relative z-10 mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-        <Card className="liquid-panel mb-8 rounded-[28px] border-white/55 bg-white/40">
-          <CardContent className="p-5">
-            <div className="space-y-2">
-              <Label htmlFor="companyName" className="font-semibold text-slate-700">Enter Your Company Name</Label>
-              <Input
-                id="companyName"
-                placeholder="Enter your company name"
-                value={companyName}
-                onChange={(e) => setCompanyName(e.target.value)}
-                className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:ring-0"
-              />
-            </div>
-          </CardContent>
-        </Card>
+        <div className="flex items-center gap-3 w-full sm:w-auto">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            accept=".csv,.xlsx,.xls"
+            className="hidden"
+          />
+          <Button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-md gap-2"
+          >
+            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+            Import Bank Statement
+          </Button>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-8">
-          <TabsList className="grid w-full grid-cols-3 rounded-[24px] border border-white/55 bg-white/42 p-1 shadow-[0_16px_42px_rgba(15,23,42,0.08)] backdrop-blur-2xl">
-            <TabsTrigger
-              value="reconcile"
-              className="flex items-center gap-2 rounded-[18px] text-slate-600 data-[state=active]:bg-slate-950 data-[state=active]:text-white transition-all duration-300"
-            >
-                            <RefreshCw className="h-4 w-4" />
-                            Reconcile
-                        </TabsTrigger>
-                        <TabsTrigger
-                            value="results"
-              className="flex items-center gap-2 rounded-[18px] text-slate-600 data-[state=active]:bg-slate-950 data-[state=active]:text-white transition-all duration-300"
-                        >
-                            <FileText className="h-4 w-4" />
-                            Results
-                        </TabsTrigger>
-                        <TabsTrigger
-                            value="add"
-              className="flex items-center gap-2 rounded-[18px] text-slate-600 data-[state=active]:bg-slate-950 data-[state=active]:text-white transition-all duration-300"
-                        >
-                            <Upload className="h-4 w-4" />
-                            Add Entries
-                        </TabsTrigger>
-                    </TabsList>
-
-                    <TabsContent value="reconcile">
-            <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 transition-all duration-500">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-slate-950">
-                  <RefreshCw className="h-5 w-5 text-sky-700" />
-                  Bank Reconciliation
-                </CardTitle>
-                <CardDescription className="text-slate-600">
-                  Upload ledger and bank statements to automatically match transactions
-                </CardDescription>
-              </CardHeader>
-
-                            <CardContent className="space-y-8">
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                    <Card className="bg-gradient-to-br from-cyan-500/20 to-teal-500/20 backdrop-blur-xl border border-cyan-400/30 rounded-2xl">
-                                        <CardContent className="pt-6">
-                                            <div className="flex items-center gap-3 mb-2">
-                                                <div className="p-2 bg-cyan-500/30 rounded-lg">
-                                                    <FileText className="h-5 w-5 text-cyan-300" />
-                                                </div>
-                                                <span className="text-cyan-300 text-sm font-medium">Ledger Entries</span>
-                                            </div>
-                                            <p className="text-3xl font-bold text-cyan-100">{summary.totalLedgerEntries}</p>
-                                            <p className="text-cyan-300/60 text-sm mt-1">Total entries to reconcile</p>
-                                        </CardContent>
-                                    </Card>
-
-                                    <Card className="bg-gradient-to-br from-blue-500/20 to-indigo-500/20 backdrop-blur-xl border border-blue-400/30 rounded-2xl">
-                                        <CardContent className="pt-6">
-                                            <div className="flex items-center gap-3 mb-2">
-                                                <div className="p-2 bg-blue-500/30 rounded-lg">
-                                                    <BanknoteIcon className="h-5 w-5 text-blue-300" />
-                                                </div>
-                                                <span className="text-blue-300 text-sm font-medium">Bank Entries</span>
-                                            </div>
-                                            <p className="text-3xl font-bold text-blue-100">{summary.totalBankEntries}</p>
-                                            <p className="text-blue-300/60 text-sm mt-1">Bank statement entries</p>
-                                        </CardContent>
-                                    </Card>
-
-                                    <Card className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 backdrop-blur-xl border border-green-400/30 rounded-2xl">
-                                        <CardContent className="pt-6">
-                                            <div className="flex items-center gap-3 mb-2">
-                                                <div className="p-2 bg-green-500/30 rounded-lg">
-                                                    <TrendingUp className="h-5 w-5 text-green-300" />
-                                                </div>
-                                                <span className="text-green-300 text-sm font-medium">Reconciliation Rate</span>
-                                            </div>
-                                            <p className="text-3xl font-bold text-green-100">{summary.reconciliationRate}%</p>
-                                            <p className="text-green-300/60 text-sm mt-1">Successfully matched</p>
-                                        </CardContent>
-                                    </Card>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <Card className="backdrop-blur-xl bg-white/5 border border-cyan-400/20 rounded-2xl">
-                                        <CardHeader>
-                                            <CardTitle className="text-lg font-bold text-cyan-100">Ledger Data</CardTitle>
-                                            <CardDescription className="text-cyan-300/60">
-                                                Upload company ledger CSV/Excel file
-                                            </CardDescription>
-                                        </CardHeader>
-                                        <CardContent>
-                                            <div className="space-y-4">
-                                                <input
-                                                    type="file"
-                                                    ref={ledgerFileRef}
-                                                    onChange={handleLedgerFileChange}
-                                                    accept=".csv,.xlsx,.xls"
-                                                    className="hidden"
-                                                />
-                                                <div
-                                                    className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors duration-300 cursor-pointer ${
-                                                        ledgerFile
-                                                            ? 'border-green-400/50 bg-green-500/10'
-                                                            : 'border-cyan-400/30 hover:border-cyan-400/50'
-                                                    }`}
-                                                    onClick={() => ledgerFileRef.current?.click()}
-                                                >
-                                                    {ledgerFile ? (
-                                                        <>
-                                                            <CheckCircle className="h-12 w-12 text-green-400 mx-auto mb-4" />
-                                                            <p className="text-green-300 font-medium">{ledgerFile.name}</p>
-                                                            <p className="text-green-400/60 text-sm">Click to change file</p>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <Upload className="h-12 w-12 text-cyan-400 mx-auto mb-4" />
-                                                            <p className="text-cyan-200 font-medium">Upload Ledger File</p>
-                                                            <p className="text-cyan-300/60 text-sm">CSV or Excel format</p>
-                                                        </>
-                                                    )}
-                                                    <Button
-                                                        className="mt-4 bg-cyan-600 hover:bg-cyan-500 text-white"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            ledgerFileRef.current?.click();
-                                                        }}
-                                                    >
-                                                        <Upload className="h-4 w-4 mr-2" />
-                                                        {ledgerFile ? 'Change File' : 'Choose File'}
-                                                    </Button>
-                                                </div>
-                                                <div className="text-sm text-cyan-300/80">
-                                                    <p className="font-medium">Required Columns:</p>
-                                                    <p className="text-xs">Date, Amount, Description</p>
-                                                </div>
-                                            </div>
-                                        </CardContent>
-                                    </Card>
-
-                                    <Card className="backdrop-blur-xl bg-white/5 border border-blue-400/20 rounded-2xl">
-                                        <CardHeader>
-                                            <CardTitle className="text-lg font-bold text-blue-100">Bank Statement</CardTitle>
-                                            <CardDescription className="text-blue-300/60">
-                                                Upload bank statement CSV/Excel file
-                                            </CardDescription>
-                                        </CardHeader>
-                                        <CardContent>
-                                            <div className="space-y-4">
-                                                <input
-                                                    type="file"
-                                                    ref={bankFileRef}
-                                                    onChange={handleBankFileChange}
-                                                    accept=".csv,.xlsx,.xls"
-                                                    className="hidden"
-                                                />
-                                                <div
-                                                    className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors duration-300 cursor-pointer ${
-                                                        bankFile
-                                                            ? 'border-green-400/50 bg-green-500/10'
-                                                            : 'border-blue-400/30 hover:border-blue-400/50'
-                                                    }`}
-                                                    onClick={() => bankFileRef.current?.click()}
-                                                >
-                                                    {bankFile ? (
-                                                        <>
-                                                            <CheckCircle className="h-12 w-12 text-green-400 mx-auto mb-4" />
-                                                            <p className="text-green-300 font-medium">{bankFile.name}</p>
-                                                            <p className="text-green-400/60 text-sm">Click to change file</p>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <BanknoteIcon className="h-12 w-12 text-blue-400 mx-auto mb-4" />
-                                                            <p className="text-blue-200 font-medium">Upload Bank Statement</p>
-                                                            <p className="text-blue-300/60 text-sm">CSV or Excel format</p>
-                                                        </>
-                                                    )}
-                                                    <Button
-                                                        className="mt-4 bg-blue-600 hover:bg-blue-500 text-white"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            bankFileRef.current?.click();
-                                                        }}
-                                                    >
-                                                        <Upload className="h-4 w-4 mr-2" />
-                                                        {bankFile ? 'Change File' : 'Choose File'}
-                                                    </Button>
-                                                </div>
-                                                <div className="text-sm text-blue-300/80">
-                                                    <p className="font-medium">Required Columns:</p>
-                                                    <p className="text-xs">Date, Amount, Description</p>
-                                                </div>
-                                            </div>
-                                        </CardContent>
-                                    </Card>
-                                </div>
-
-                                <div className="text-center">
-                                    <Button
-                                        onClick={performReconciliation}
-                                        disabled={isReconciling || !ledgerFile || !bankFile}
-                                        className="h-16 px-12 bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white font-bold text-lg rounded-2xl shadow-2xl shadow-cyan-500/50 transition-all duration-300 hover:scale-105 hover:shadow-cyan-500/70 disabled:opacity-50 disabled:cursor-not-allowed"
-                                    >
-                                        {isReconciling ? (
-                                            <>
-                                                <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                                                Reconciling...
-                                            </>
-                                        ) : (
-                                            <>
-                                                <RefreshCw className="mr-2 h-5 w-5" />
-                                                Start Reconciliation
-                                            </>
-                                        )}
-                                    </Button>
-                                    <p className="text-cyan-300/60 text-sm mt-2">
-                                        {!ledgerFile && !bankFile
-                                            ? "Upload both files to start reconciliation"
-                                            : !ledgerFile
-                                            ? "Upload ledger file to continue"
-                                            : !bankFile
-                                            ? "Upload bank statement to continue"
-                                            : "AI-powered matching based on amount, date, and description"}
-                                    </p>
-                                </div>
-                            </CardContent>
-                        </Card>
-                    </TabsContent>
-
-                    <TabsContent value="results">
-                        <Card
-                            className="backdrop-blur-2xl bg-white/10 border border-cyan-400/20 shadow-2xl shadow-cyan-500/20 rounded-3xl overflow-hidden transition-all duration-500 hover:shadow-cyan-500/40 hover:-translate-y-2"
-                        >
-                            <CardHeader>
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                                    <div>
-                                        <CardTitle className="text-2xl font-bold text-cyan-100 flex items-center gap-2">
-                                            <FileText className="h-5 w-5 text-teal-400" />
-                                            Reconciliation Results
-                                        </CardTitle>
-                                        <CardDescription className="text-cyan-300/70">
-                                            {reconciliationResults.length} transactions analyzed
-                                        </CardDescription>
-                                    </div>
-
-                                    <div className="flex flex-wrap gap-3">
-                                        <Select value={filterStatus} onValueChange={setFilterStatus}>
-                                            <SelectTrigger className="w-[160px] bg-white/5 border-cyan-400/30 text-cyan-100">
-                                                <SelectValue placeholder="Filter by status" />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                <SelectItem value="all">All Status</SelectItem>
-                                                <SelectItem value="Matched">Matched</SelectItem>
-                                                <SelectItem value="Unmatched Ledger">Unmatched Ledger</SelectItem>
-                                                <SelectItem value="Unmatched Bank">Unmatched Bank</SelectItem>
-                                            </SelectContent>
-                                        </Select>
-
-                                        <Button
-                                            onClick={exportReport}
-                                            className="bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white"
-                                        >
-                                            <Download className="h-4 w-4 mr-2" />
-                                            Export Report
-                                        </Button>
-                                    </div>
-                                </div>
-                            </CardHeader>
-
-                            <CardContent>
-                                {filteredResults.length > 0 ? (
-                                    <div className="space-y-4">
-                                        {filteredResults.map((result) => (
-                                            <Card
-                                                key={result.id}
-                                                className="backdrop-blur-xl bg-white/5 border border-cyan-400/10 rounded-2xl hover:border-cyan-400/30 transition-all duration-300 hover:bg-white/10"
-                                            >
-                                                <CardContent className="pt-6">
-                                                    <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-                                                        <div className="flex-1">
-                                                            <div className="flex items-center gap-3 mb-4">
-                                                                {result.status === "Matched" ? (
-                                                                    <Badge className="bg-gradient-to-r from-green-500/80 to-emerald-500/80 text-white px-3 py-1">
-                                                                        <CheckCircle className="h-3 w-3 mr-1" />
-                                                                        Matched ({result.matchScore}%)
-                                                                    </Badge>
-                                                                ) : result.status === "Unmatched Ledger" ? (
-                                                                    <Badge className="bg-gradient-to-r from-yellow-500/80 to-amber-500/80 text-white px-3 py-1">
-                                                                        <AlertCircle className="h-3 w-3 mr-1" />
-                                                                        Unmatched Ledger
-                                                                    </Badge>
-                                                                ) : (
-                                                                    <Badge className="bg-gradient-to-r from-red-500/80 to-pink-500/80 text-white px-3 py-1">
-                                                                        <XCircle className="h-3 w-3 mr-1" />
-                                                                        Unmatched Bank
-                                                                    </Badge>
-                                                                )}
-                                                                <span className="text-cyan-300/60 text-sm">
-                                                                    Reconciled: {result.reconciledAt}
-                                                                </span>
-                                                            </div>
-
-                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                                <div className="p-3 bg-cyan-500/5 rounded-xl border border-cyan-400/10">
-                                                                    <div className="flex items-center gap-2 mb-2">
-                                                                        <FileText className="h-4 w-4 text-cyan-400" />
-                                                                        <span className="font-medium text-cyan-100">Ledger Entry</span>
-                                                                    </div>
-                                                                    {result.ledgerEntry ? (
-                                                                        <div className="space-y-1">
-                                                                            <p className="text-cyan-200">
-                                                                                {result.ledgerEntry.description}
-                                                                            </p>
-                                                                            <div className="grid grid-cols-2 gap-2 text-sm">
-                                                                                <div>
-                                                                                    <span className="text-cyan-300/60">Date:</span>
-                                                                                    <p className="text-cyan-200">{result.ledgerEntry.date}</p>
-                                                                                </div>
-                                                                                <div>
-                                                                                    <span className="text-cyan-300/60">Amount:</span>
-                                                                                    <p className={`font-bold ${result.ledgerEntry.type === 'Income'
-                                                                                        ? 'text-green-400'
-                                                                                        : 'text-red-400'
-                                                                                        }`}>
-                                                                                        ₹{result.ledgerEntry.amount.toFixed(2)}
-                                                                                    </p>
-                                                                                </div>
-                                                                                <div>
-                                                                                    <span className="text-cyan-300/60">Type:</span>
-                                                                                    <Badge
-                                                                                        variant="outline"
-                                                                                        className="border-cyan-400/30 text-cyan-300 text-xs"
-                                                                                    >
-                                                                                        {result.ledgerEntry.type}
-                                                                                    </Badge>
-                                                                                </div>
-                                                                                {result.ledgerEntry.reference && (
-                                                                                    <div>
-                                                                                        <span className="text-cyan-300/60">Ref:</span>
-                                                                                        <p className="text-cyan-200">{result.ledgerEntry.reference}</p>
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
-                                                                        </div>
-                                                                    ) : (
-                                                                        <p className="text-cyan-300/60 italic">No ledger entry</p>
-                                                                    )}
-                                                                </div>
-
-                                                                <div className="p-3 bg-blue-500/5 rounded-xl border border-blue-400/10">
-                                                                    <div className="flex items-center gap-2 mb-2">
-                                                                        <BanknoteIcon className="h-4 w-4 text-blue-400" />
-                                                                        <span className="font-medium text-blue-100">Bank Entry</span>
-                                                                    </div>
-                                                                    {result.bankEntry ? (
-                                                                        <div className="space-y-1">
-                                                                            <p className="text-blue-200">
-                                                                                {result.bankEntry.description}
-                                                                            </p>
-                                                                            <div className="grid grid-cols-2 gap-2 text-sm">
-                                                                                <div>
-                                                                                    <span className="text-blue-300/60">Date:</span>
-                                                                                    <p className="text-blue-200">{result.bankEntry.date}</p>
-                                                                                </div>
-                                                                                <div>
-                                                                                    <span className="text-blue-300/60">Amount:</span>
-                                                                                    <p className={`font-bold ${result.bankEntry.type === 'Credit'
-                                                                                        ? 'text-green-400'
-                                                                                        : 'text-red-400'
-                                                                                        }`}>
-                                                                                        ₹{result.bankEntry.amount.toFixed(2)}
-                                                                                    </p>
-                                                                                </div>
-                                                                                <div>
-                                                                                    <span className="text-blue-300/60">Type:</span>
-                                                                                    <Badge
-                                                                                        variant="outline"
-                                                                                        className="border-blue-400/30 text-blue-300 text-xs"
-                                                                                    >
-                                                                                        {result.bankEntry.type}
-                                                                                    </Badge>
-                                                                                </div>
-                                                                                {result.bankEntry.reference && (
-                                                                                    <div>
-                                                                                        <span className="text-blue-300/60">Ref:</span>
-                                                                                        <p className="text-blue-200">{result.bankEntry.reference}</p>
-                                                                                    </div>
-                                                                                )}
-                                                                            </div>
-                                                                        </div>
-                                                                    ) : (
-                                                                        <p className="text-blue-300/60 italic">No bank entry</p>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </CardContent>
-                                            </Card>
-                                        ))}
-                                    </div>
-                                ) : (
-                                    <div className="text-center py-12">
-                                        <div className="p-6 rounded-full bg-gradient-to-br from-cyan-500/20 to-teal-500/20 backdrop-blur-xl border border-cyan-400/30 inline-block mb-4">
-                                            <RefreshCw className="h-12 w-12 text-cyan-300" />
-                                        </div>
-                                        <p className="text-cyan-300/80 text-lg font-medium">No reconciliation results found</p>
-                                        <p className="text-cyan-400/60 text-sm">Run reconciliation first to see results</p>
-                                        <Button
-                                            onClick={() => setActiveTab("reconcile")}
-                                            className="mt-4 bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white"
-                                        >
-                                            Go to Reconcile
-                                        </Button>
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
-                    </TabsContent>
-
-                    <TabsContent value="add">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                            <Card
-                                className="backdrop-blur-2xl bg-white/10 border border-cyan-400/20 shadow-2xl shadow-cyan-500/20 rounded-3xl overflow-hidden transition-all duration-500 hover:shadow-cyan-500/40 hover:-translate-y-2"
-                            >
-                                <CardHeader>
-                                    <CardTitle className="text-xl font-bold text-cyan-100 flex items-center gap-2">
-                                        <FileText className="h-5 w-5 text-teal-400" />
-                                        Add Ledger Entry
-                                    </CardTitle>
-                                    <CardDescription className="text-cyan-300/70">
-                                        Manually add ledger transactions
-                                    </CardDescription>
-                                </CardHeader>
-
-                                <CardContent className="space-y-4">
-                                    <div className="space-y-3">
-                                        <Label htmlFor="ledgerDate" className="text-cyan-100 font-bold">
-                                            Date
-                                        </Label>
-                                        <Input
-                                            id="ledgerDate"
-                                            type="date"
-                                            value={manualLedgerEntry.date}
-                                            onChange={(e) => setManualLedgerEntry(prev => ({ ...prev, date: e.target.value }))}
-                                            className="bg-white/5 border-cyan-400/30 text-cyan-100"
-                                        />
-                                    </div>
-
-                                    <div className="space-y-3">
-                                        <Label htmlFor="ledgerDescription" className="text-cyan-100 font-bold">
-                                            Description *
-                                        </Label>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                id="ledgerDescription"
-                                                placeholder="Enter transaction description"
-                                                value={manualLedgerEntry.description}
-                                                onChange={(e) => setManualLedgerEntry(prev => ({ ...prev, description: e.target.value }))}
-                                                className="bg-white/5 border-cyan-400/30 text-cyan-100"
-                                            />
-                                            <VoiceButton
-                                                onTranscript={(text) => setManualLedgerEntry(prev => ({ ...prev, description: text }))}
-                                                onClear={() => setManualLedgerEntry(prev => ({ ...prev, description: "" }))}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-3">
-                                            <Label htmlFor="ledgerAmount" className="text-cyan-100 font-bold">
-                                                Amount *
-                                            </Label>
-                                            <div className="flex items-center gap-2">
-                                                <Input
-                                                    id="ledgerAmount"
-                                                    type="number"
-                                                    placeholder="0.00"
-                                                    value={manualLedgerEntry.amount}
-                                                    onChange={(e) => setManualLedgerEntry(prev => ({ ...prev, amount: e.target.value }))}
-                                                    className="bg-white/5 border-cyan-400/30 text-cyan-100"
-                                                />
-                                                <VoiceButton
-                                                    onTranscript={(text) => setManualLedgerEntry(prev => ({ ...prev, amount: text }))}
-                                                    onClear={() => setManualLedgerEntry(prev => ({ ...prev, amount: "" }))}
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div className="space-y-3">
-                                            <Label htmlFor="ledgerType" className="text-cyan-100 font-bold">
-                                                Type
-                                            </Label>
-                                            <Select
-                                                value={manualLedgerEntry.type}
-                                                onValueChange={(value: 'Income' | 'Expense') =>
-                                                    setManualLedgerEntry(prev => ({ ...prev, type: value }))
-                                                }
-                                            >
-                                                <SelectTrigger className="bg-white/5 border-cyan-400/30 text-cyan-100">
-                                                    <SelectValue placeholder="Select type" />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="Income">Income</SelectItem>
-                                                    <SelectItem value="Expense">Expense</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                    </div>
-
-                                    <div className="space-y-3">
-                                        <Label htmlFor="ledgerReference" className="text-cyan-100 font-bold">
-                                            Reference
-                                        </Label>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                id="ledgerReference"
-                                                placeholder="Optional reference number"
-                                                value={manualLedgerEntry.reference}
-                                                onChange={(e) => setManualLedgerEntry(prev => ({ ...prev, reference: e.target.value }))}
-                                                className="bg-white/5 border-cyan-400/30 text-cyan-100"
-                                            />
-                                            <VoiceButton
-                                                onTranscript={(text) => setManualLedgerEntry(prev => ({ ...prev, reference: text }))}
-                                                onClear={() => setManualLedgerEntry(prev => ({ ...prev, reference: "" }))}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <Button
-                                        onClick={addManualLedgerEntry}
-                                        className="w-full bg-gradient-to-r from-cyan-600 to-teal-600 hover:from-cyan-500 hover:to-teal-500 text-white"
-                                    >
-                                        <Plus className="h-4 w-4 mr-2" />
-                                        Add Ledger Entry
-                                    </Button>
-                                </CardContent>
-                            </Card>
-
-                            <Card
-                                className="backdrop-blur-2xl bg-white/10 border border-blue-400/20 shadow-2xl shadow-blue-500/20 rounded-3xl overflow-hidden transition-all duration-500 hover:shadow-blue-500/40 hover:-translate-y-2"
-                            >
-                                <CardHeader>
-                                    <CardTitle className="text-xl font-bold text-blue-100 flex items-center gap-2">
-                                        <BanknoteIcon className="h-5 w-5 text-indigo-400" />
-                                        Add Bank Entry
-                                    </CardTitle>
-                                    <CardDescription className="text-blue-300/70">
-                                        Manually add bank statement transactions
-                                    </CardDescription>
-                                </CardHeader>
-
-                                <CardContent className="space-y-4">
-                                    <div className="space-y-3">
-                                        <Label htmlFor="bankDate" className="text-blue-100 font-bold">
-                                            Date
-                                        </Label>
-                                        <Input
-                                            id="bankDate"
-                                            type="date"
-                                            value={manualBankEntry.date}
-                                            onChange={(e) => setManualBankEntry(prev => ({ ...prev, date: e.target.value }))}
-                                            className="bg-white/5 border-blue-400/30 text-blue-100"
-                                        />
-                                    </div>
-
-                                    <div className="space-y-3">
-                                        <Label htmlFor="bankDescription" className="text-blue-100 font-bold">
-                                            Description *
-                                        </Label>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                id="bankDescription"
-                                                placeholder="Enter bank description"
-                                                value={manualBankEntry.description}
-                                                onChange={(e) => setManualBankEntry(prev => ({ ...prev, description: e.target.value }))}
-                                                className="bg-white/5 border-blue-400/30 text-blue-100"
-                                            />
-                                            <VoiceButton
-                                                onTranscript={(text) => setManualBankEntry(prev => ({ ...prev, description: text }))}
-                                                onClear={() => setManualBankEntry(prev => ({ ...prev, description: "" }))}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-3">
-                                            <Label htmlFor="bankAmount" className="text-blue-100 font-bold">
-                                                Amount *
-                                            </Label>
-                                            <div className="flex items-center gap-2">
-                                                <Input
-                                                    id="bankAmount"
-                                                    type="number"
-                                                    placeholder="0.00"
-                                                    value={manualBankEntry.amount}
-                                                    onChange={(e) => setManualBankEntry(prev => ({ ...prev, amount: e.target.value }))}
-                                                    className="bg-white/5 border-blue-400/30 text-blue-100"
-                                                />
-                                                <VoiceButton
-                                                    onTranscript={(text) => setManualBankEntry(prev => ({ ...prev, amount: text }))}
-                                                    onClear={() => setManualBankEntry(prev => ({ ...prev, amount: "" }))}
-                                                />
-                                            </div>
-                                        </div>
-
-                                        <div className="space-y-3">
-                                            <Label htmlFor="bankType" className="text-blue-100 font-bold">
-                                                Type
-                                            </Label>
-                                            <Select
-                                                value={manualBankEntry.type}
-                                                onValueChange={(value: 'Credit' | 'Debit') =>
-                                                    setManualBankEntry(prev => ({ ...prev, type: value }))
-                                                }
-                                            >
-                                                <SelectTrigger className="bg-white/5 border-blue-400/30 text-blue-100">
-                                                    <SelectValue placeholder="Select type" />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="Credit">Credit</SelectItem>
-                                                    <SelectItem value="Debit">Debit</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                    </div>
-
-                                    <div className="space-y-3">
-                                        <Label htmlFor="bankReference" className="text-blue-100 font-bold">
-                                            Reference
-                                        </Label>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                id="bankReference"
-                                                placeholder="Optional transaction ID"
-                                                value={manualBankEntry.reference}
-                                                onChange={(e) => setManualBankEntry(prev => ({ ...prev, reference: e.target.value }))}
-                                                className="bg-white/5 border-blue-400/30 text-blue-100"
-                                            />
-                                            <VoiceButton
-                                                onTranscript={(text) => setManualBankEntry(prev => ({ ...prev, reference: text }))}
-                                                onClear={() => setManualBankEntry(prev => ({ ...prev, reference: "" }))}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <Button
-                                        onClick={addManualBankEntry}
-                                        className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white"
-                                    >
-                                        <Plus className="h-4 w-4 mr-2" />
-                                        Add Bank Entry
-                                    </Button>
-                                </CardContent>
-                            </Card>
-                        </div>
-                    </TabsContent>
-                </Tabs>
-                <div className="mt-8 text-center pb-8">
-                    <p className="text-slate-500 text-sm backdrop-blur-md inline-block px-6 py-2 rounded-full border border-white/40">
-                        Powered by SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED ✨
-                    </p>
-                </div>
-            </main>
+          <Button
+            onClick={downloadAuditReport}
+            disabled={!summary}
+            variant="outline"
+            className="rounded-xl border-slate-200 gap-2"
+          >
+            <Download className="h-4 w-4" />
+            Audit PDF
+          </Button>
         </div>
-    );
+      </div>
+
+      {loading ? (
+        <div className="p-16 text-center text-slate-500 flex flex-col items-center gap-2">
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+          <p>Loading bank statement & ledger reconciliation data...</p>
+        </div>
+      ) : summary ? (
+        <>
+          {/* Attention Banner */}
+          {summary.status === "needs_attention" && (
+            <Card className="rounded-2xl border-amber-300 bg-amber-50/90 shadow-sm overflow-hidden">
+              <CardContent className="p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="h-10 w-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 mt-0.5">
+                    <AlertTriangle className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-amber-900">{summary.warningMessage}</h3>
+                    <p className="text-xs text-amber-800 mt-0.5">
+                      Review unmatched items below to accept suggested matches or create bookkeeping records.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    onClick={() => setStatusFilter("unmatched")}
+                    size="sm"
+                    className="bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs"
+                  >
+                    Filter Unmatched Items ({summary.unmatchedCount})
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* 4 Core Summary KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Bank Statement Balance */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Bank Statement Balance
+                  </p>
+                  <h3 className="text-2xl font-bold text-slate-900 mt-1">
+                    ₹{summary.latestBankBalance.toLocaleString("en-IN")}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">Closing statement balance</p>
+                </div>
+                <div className="h-12 w-12 rounded-2xl bg-indigo-50 flex items-center justify-center text-indigo-600">
+                  <Landmark className="h-6 w-6" />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* System Ledger Balance */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    System Ledger Balance
+                  </p>
+                  <h3 className="text-2xl font-bold text-slate-900 mt-1">
+                    ₹{summary.systemLedgerBalance.toLocaleString("en-IN")}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">Bookkeeping source of truth</p>
+                </div>
+                <div className="h-12 w-12 rounded-2xl bg-blue-50 flex items-center justify-center text-blue-600">
+                  <BookOpen className="h-6 w-6" />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Difference */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Difference</p>
+                  <h3
+                    className={`text-2xl font-bold mt-1 ${
+                      summary.difference > 0 ? "text-amber-600" : "text-emerald-600"
+                    }`}
+                  >
+                    ₹{summary.difference.toLocaleString("en-IN")}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {summary.difference === 0 ? "Perfect zero discrepancy" : "Unreconciled gap"}
+                  </p>
+                </div>
+                <div
+                  className={`h-12 w-12 rounded-2xl flex items-center justify-center ${
+                    summary.difference > 0 ? "bg-amber-50 text-amber-600" : "bg-emerald-50 text-emerald-600"
+                  }`}
+                >
+                  {summary.difference > 0 ? <AlertTriangle className="h-6 w-6" /> : <ShieldCheck className="h-6 w-6" />}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Reconciliation Progress % */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Reconciled Progress
+                  </p>
+                  <h3 className="text-2xl font-bold text-slate-900 mt-1">
+                    {summary.reconciliationPercentage}%
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {summary.reconciledCount} of {summary.totalTransactions} items reconciled
+                  </p>
+                </div>
+                <div className="h-12 w-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-600">
+                  <CheckCircle className="h-6 w-6" />
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Search & Filter Controls */}
+          <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+            <CardContent className="p-4 flex flex-col lg:flex-row gap-4 items-center justify-between">
+              <div className="relative w-full lg:w-72">
+                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                <Input
+                  placeholder="Search description or ref #..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9 rounded-xl border-slate-200 focus-visible:ring-indigo-500"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                  <SelectTrigger className="w-full sm:w-40 rounded-xl border-slate-200">
+                    <SelectValue placeholder="Status Filter" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Statuses</SelectItem>
+                    <SelectItem value="matched">Suggested Matches ({summary.suggestedCount})</SelectItem>
+                    <SelectItem value="unmatched">Unmatched Only ({summary.unmatchedCount})</SelectItem>
+                    <SelectItem value="reconciled">Reconciled ({summary.reconciledCount})</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select value={typeFilter} onValueChange={setTypeFilter}>
+                  <SelectTrigger className="w-full sm:w-36 rounded-xl border-slate-200">
+                    <SelectValue placeholder="Direction" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Directions</SelectItem>
+                    <SelectItem value="credit">Inflows / Credits</SelectItem>
+                    <SelectItem value="debit">Outflows / Debits</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="date"
+                    value={startDateFilter}
+                    onChange={(e) => setStartDateFilter(e.target.value)}
+                    className="w-36 rounded-xl border-slate-200 text-xs"
+                  />
+                  <span className="text-slate-400 text-xs">to</span>
+                  <Input
+                    type="date"
+                    value={endDateFilter}
+                    onChange={(e) => setEndDateFilter(e.target.value)}
+                    className="w-36 rounded-xl border-slate-200 text-xs"
+                  />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Statement Transaction Audit Table */}
+          <Card className="rounded-2xl border-slate-200 shadow-sm bg-white overflow-hidden">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-150 px-6 py-4">
+              <CardTitle className="text-base font-semibold text-slate-900">
+                Bank Statement Transactions ({transactions.length})
+              </CardTitle>
+              <CardDescription>
+                Compare uploaded bank items with system bookkeeping & invoice records.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              {transactions.length === 0 ? (
+                <div className="p-12 text-center text-slate-500 space-y-3">
+                  <Landmark className="h-8 w-8 text-slate-400 mx-auto" />
+                  <p className="font-semibold text-slate-900">No Statement Transactions Found</p>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    Upload your bank statement (CSV/XLSX) to start matching with your bookkeeping ledger.
+                  </p>
+                  <Button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs gap-2"
+                  >
+                    <Upload className="h-4 w-4" />
+                    Upload Statement File
+                  </Button>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-slate-600 uppercase text-xs font-semibold tracking-wider border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-3.5">Date & Ref #</th>
+                        <th className="px-6 py-3.5">Bank Description</th>
+                        <th className="px-6 py-3.5 text-right">Bank Amount</th>
+                        <th className="px-6 py-3.5">Suggested Ledger / Invoice Match</th>
+                        <th className="px-6 py-3.5">Confidence & Reasons</th>
+                        <th className="px-6 py-3.5 text-center">Status & Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-150 text-slate-800">
+                      {transactions.map((tx) => (
+                        <tr key={tx._id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="font-semibold text-slate-900">
+                              {new Date(tx.date).toLocaleDateString("en-IN", {
+                                day: "numeric",
+                                month: "short",
+                                year: "numeric",
+                              })}
+                            </div>
+                            {tx.referenceNumber && (
+                              <div className="text-xs font-mono text-slate-500">{tx.referenceNumber}</div>
+                            )}
+                          </td>
+                          <td className="px-6 py-4 max-w-xs font-medium text-slate-900">
+                            {tx.description}
+                          </td>
+                          <td
+                            className={`px-6 py-4 text-right font-semibold ${
+                              tx.type === "credit" ? "text-emerald-600" : "text-red-600"
+                            }`}
+                          >
+                            {tx.type === "credit" ? "+" : "-"} ₹{tx.amount.toLocaleString("en-IN")}
+                          </td>
+                          <td className="px-6 py-4">
+                            {tx.matchedBookkeepingId ? (
+                              <div>
+                                <div className="font-semibold text-slate-900 text-xs">
+                                  {tx.matchedBookkeepingId.description}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                  Category: {tx.matchedBookkeepingId.category} | ₹
+                                  {tx.matchedBookkeepingId.amount.toLocaleString("en-IN")}
+                                </div>
+                              </div>
+                            ) : tx.matchedInvoiceId ? (
+                              <div>
+                                <div className="font-semibold text-indigo-900 text-xs flex items-center gap-1">
+                                  <FileText className="h-3 w-3 text-indigo-600" />
+                                  Invoice #{tx.matchedInvoiceId.invoiceNumber}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                  Customer: {tx.matchedInvoiceId.customerName} | ₹
+                                  {tx.matchedInvoiceId.grandTotal.toLocaleString("en-IN")}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400 italic">No suggested match</span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4">
+                            {tx.matchScore >= 80 ? (
+                              <div className="space-y-1">
+                                <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100 border-none font-semibold">
+                                  {tx.matchScore}% ({tx.matchType})
+                                </Badge>
+                                {tx.matchReasons && tx.matchReasons.length > 0 && (
+                                  <div className="text-[11px] text-slate-500">
+                                    {tx.matchReasons.join(" • ")}
+                                  </div>
+                                )}
+                              </div>
+                            ) : tx.matchScore >= 60 ? (
+                              <div className="space-y-1">
+                                <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100 border-none font-semibold">
+                                  {tx.matchScore}% (possible)
+                                </Badge>
+                                {tx.matchReasons && tx.matchReasons.length > 0 && (
+                                  <div className="text-[11px] text-slate-500">
+                                    {tx.matchReasons.join(" • ")}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <Badge variant="secondary" className="text-slate-500">
+                                Unmatched
+                              </Badge>
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            {tx.status === "reconciled" ? (
+                              <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100 border-none font-semibold">
+                                Reconciled
+                              </Badge>
+                            ) : (
+                              <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                {(tx.matchedBookkeepingId || tx.matchedInvoiceId) && (
+                                  <Button
+                                    size="sm"
+                                    onClick={() =>
+                                      handleReconcileItem(
+                                        tx._id,
+                                        tx.matchedBookkeepingId?._id,
+                                        tx.matchedInvoiceId?._id
+                                      )
+                                    }
+                                    className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs gap-1"
+                                  >
+                                    <CheckCircle className="h-3.5 w-3.5" />
+                                    Accept Match
+                                  </Button>
+                                )}
+
+                                {tx.status === "matched" && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleUnmatchItem(tx._id)}
+                                    title="Reject suggested match"
+                                    className="text-red-500 hover:bg-red-50 rounded-xl text-xs"
+                                  >
+                                    Reject
+                                  </Button>
+                                )}
+
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => handleOpenSearchModal(tx)}
+                                  className="border-slate-200 text-slate-700 hover:bg-slate-100 rounded-xl text-xs gap-1"
+                                >
+                                  <LinkIcon className="h-3.5 w-3.5" />
+                                  Link Entry
+                                </Button>
+
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => handleOpenCreateEntryModal(tx)}
+                                  className="border-indigo-200 text-indigo-700 hover:bg-indigo-50 rounded-xl text-xs gap-1"
+                                >
+                                  <Plus className="h-3.5 w-3.5" />
+                                  Create Entry
+                                </Button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      ) : null}
+
+      {/* Manual Search & Link Modal */}
+      <Dialog open={isSearchModalOpen} onOpenChange={setIsSearchModalOpen}>
+        <DialogContent className="sm:max-w-xl rounded-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Link Bank Transaction to Ledger / Invoice</DialogTitle>
+            <DialogDescription>
+              Search existing bookkeeping entries or invoices to explicitly link and reconcile.
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedTxForSearch && (
+            <div className="space-y-4 py-2">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="text-xs text-slate-500 uppercase font-semibold">Bank Item</div>
+                <div className="text-sm font-bold text-slate-900">{selectedTxForSearch.description}</div>
+                <div className="text-xs text-slate-600">
+                  Amount: ₹{selectedTxForSearch.amount.toLocaleString("en-IN")} ({selectedTxForSearch.type.toUpperCase()})
+                </div>
+              </div>
+
+              <div className="relative">
+                <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                <Input
+                  placeholder="Search ledger by description, category, or invoice #..."
+                  value={ledgerSearchQuery}
+                  onChange={(e) => {
+                    setLedgerSearchQuery(e.target.value);
+                    fetchLedgerSearchResults(e.target.value, selectedTxForSearch.type);
+                  }}
+                  className="pl-9 rounded-xl"
+                />
+              </div>
+
+              <Tabs defaultValue="bookkeeping" className="w-full">
+                <TabsList className="grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+                  <TabsTrigger value="bookkeeping" className="rounded-lg text-xs font-semibold">
+                    Bookkeeping Entries ({searchResults.bookkeepingEntries.length})
+                  </TabsTrigger>
+                  <TabsTrigger value="invoices" className="rounded-lg text-xs font-semibold">
+                    Invoices ({searchResults.invoices.length})
+                  </TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="bookkeeping" className="pt-3 space-y-2">
+                  {loadingSearch ? (
+                    <div className="p-6 text-center text-slate-400">
+                      <Loader2 className="h-6 w-6 animate-spin mx-auto" />
+                    </div>
+                  ) : searchResults.bookkeepingEntries.length === 0 ? (
+                    <div className="p-6 text-center text-slate-400 text-xs">
+                      No matching bookkeeping entries found.
+                    </div>
+                  ) : (
+                    searchResults.bookkeepingEntries.map((bk) => (
+                      <div
+                        key={bk._id}
+                        className="p-3 rounded-xl border border-slate-200 bg-white flex items-center justify-between hover:bg-slate-50 cursor-pointer"
+                        onClick={() => {
+                          handleReconcileItem(selectedTxForSearch._id, bk._id);
+                          setIsSearchModalOpen(false);
+                        }}
+                      >
+                        <div>
+                          <div className="font-semibold text-slate-900 text-xs">{bk.description}</div>
+                          <div className="text-xs text-slate-500">
+                            Category: {bk.category} | Date: {new Date(bk.date).toLocaleDateString()}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-bold text-slate-900 text-xs">
+                            ₹{bk.amount.toLocaleString("en-IN")}
+                          </div>
+                          <Button size="sm" variant="ghost" className="text-indigo-600 text-xs h-7 px-2">
+                            Select & Link
+                          </Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </TabsContent>
+
+                <TabsContent value="invoices" className="pt-3 space-y-2">
+                  {loadingSearch ? (
+                    <div className="p-6 text-center text-slate-400">
+                      <Loader2 className="h-6 w-6 animate-spin mx-auto" />
+                    </div>
+                  ) : searchResults.invoices.length === 0 ? (
+                    <div className="p-6 text-center text-slate-400 text-xs">
+                      No matching invoices found.
+                    </div>
+                  ) : (
+                    searchResults.invoices.map((inv) => (
+                      <div
+                        key={inv._id}
+                        className="p-3 rounded-xl border border-slate-200 bg-white flex items-center justify-between hover:bg-slate-50 cursor-pointer"
+                        onClick={() => {
+                          handleReconcileItem(selectedTxForSearch._id, undefined, inv._id);
+                          setIsSearchModalOpen(false);
+                        }}
+                      >
+                        <div>
+                          <div className="font-semibold text-slate-900 text-xs">
+                            Invoice #{inv.invoiceNumber}
+                          </div>
+                          <div className="text-xs text-slate-500">Customer: {inv.customerName}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-bold text-slate-900 text-xs">
+                            ₹{inv.grandTotal.toLocaleString("en-IN")}
+                          </div>
+                          <Button size="sm" variant="ghost" className="text-indigo-600 text-xs h-7 px-2">
+                            Select & Link
+                          </Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </TabsContent>
+              </Tabs>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Create Bookkeeping Entry Dialog Modal */}
+      <Dialog open={isEntryModalOpen} onOpenChange={setIsEntryModalOpen}>
+        <DialogContent className="sm:max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>Create Bookkeeping Entry from Bank Item</DialogTitle>
+            <DialogDescription>
+              Record an explicit bookkeeping transaction for this bank statement item.
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedTxForEntry && (
+            <form onSubmit={handleCreateBookkeepingEntry} className="space-y-4 py-2">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="text-xs text-slate-500 uppercase font-semibold">Bank Item Details</div>
+                <div className="text-sm font-bold text-slate-900">{selectedTxForEntry.description}</div>
+                <div className="text-xs text-slate-600">
+                  Amount:{" "}
+                  <span className="font-bold">₹{selectedTxForEntry.amount.toLocaleString("en-IN")}</span> (
+                  {selectedTxForEntry.type.toUpperCase()})
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="entryCategory">Category *</Label>
+                <Input
+                  id="entryCategory"
+                  placeholder="e.g. Sales, Rent, Utilities, Salaries, Marketing, Software"
+                  value={entryCategory}
+                  onChange={(e) => setEntryCategory(e.target.value)}
+                  required
+                  className="rounded-xl"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="entryDescription">Description *</Label>
+                <Input
+                  id="entryDescription"
+                  value={entryDescription}
+                  onChange={(e) => setEntryDescription(e.target.value)}
+                  required
+                  className="rounded-xl"
+                />
+              </div>
+
+              <DialogFooter className="gap-2 pt-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setIsEntryModalOpen(false)}
+                  className="rounded-xl"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={submittingEntry}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl gap-2"
+                >
+                  {submittingEntry && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Create & Reconcile
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
 };
 
 export default BankReconciliation;

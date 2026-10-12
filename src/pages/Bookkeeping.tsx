@@ -737,6 +737,14 @@ const Bookkeeping = () => {
                                                                         >
                                                                             {entry.category}
                                                                         </Badge>
+                                                                        {((entry as any).isAutomated || (entry as any).referenceId) && (
+                                                                            <Badge
+                                                                                variant="outline"
+                                                                                className="border-indigo-200 bg-indigo-50 text-indigo-700 flex items-center gap-1 font-semibold"
+                                                                            >
+                                                                                <Lock className="h-3 w-3" /> System Entry
+                                                                            </Badge>
+                                                                        )}
                                                                         <span className="text-slate-500 text-xs hidden sm:inline-block">
                                                                             {format(new Date(entry.createdAt), 'h:mm a')}
                                                                         </span>
@@ -752,14 +760,20 @@ const Bookkeeping = () => {
                                                                         {entry.type === 'Income' ? '+' : '-'}₹{entry.amount.toLocaleString()}
                                                                     </div>
 
-                                                                    <Button
-                                                                        variant="ghost"
-                                                                        size="sm"
-                                                                        onClick={() => handleDeleteClick(entry.id)}
-                                                                        className="text-slate-400 hover:text-red-600 hover:bg-red-50/50 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                                    >
-                                                                        <Trash2 className="h-4 w-4" />
-                                                                    </Button>
+                                                                    {((entry as any).isAutomated || (entry as any).referenceId) ? (
+                                                                        <span className="text-indigo-600 text-xs font-semibold flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded" title="Automated entry synced from Invoice/Inventory module">
+                                                                            <Lock className="h-3 w-3" /> Protected
+                                                                        </span>
+                                                                    ) : (
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="sm"
+                                                                            onClick={() => handleDeleteClick(entry.id)}
+                                                                            className="text-slate-400 hover:text-red-600 hover:bg-red-50/50 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                                        >
+                                                                            <Trash2 className="h-4 w-4" />
+                                                                        </Button>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -773,8 +787,14 @@ const Bookkeeping = () => {
                                         <div className="p-6 rounded-full bg-white/60 border border-white/80 inline-block mb-4">
                                             <FileText className="h-12 w-12 text-slate-700" />
                                         </div>
-                                        <p className="text-slate-800 text-lg font-medium">No entries found</p>
-                                        <p className="text-slate-600 text-sm">Try adjusting your filters or add a new entry</p>
+                                        <p className="text-slate-800 text-lg font-medium">No bookkeeping entries found</p>
+                                        <p className="text-slate-600 text-sm max-w-sm mx-auto mb-4">Record your income and expenses or issue sales invoices to populate your automated ledger.</p>
+                                        <Button
+                                            onClick={() => setActiveTab("add")}
+                                            className="rounded-full bg-slate-950 font-semibold text-white hover:bg-slate-800 transition-colors shadow-md"
+                                        >
+                                            <Plus className="mr-2 h-4 w-4" /> Add Your First Transaction
+                                        </Button>
                                     </div>
                                 )}
                             </CardContent>

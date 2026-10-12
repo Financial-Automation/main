@@ -6,6 +6,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
+import Invoice from "../models/Invoice.js";
+import { calculateAndValidateInvoice } from "../utils/invoiceCalculator.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,7 +16,9 @@ const router = express.Router();
 
 const verifyToken = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ message: "Access denied. No token provided." });
+  if (!token || token === "null" || token === "undefined") {
+    return res.status(401).json({ message: "Access denied. No token provided." });
+  }
 
   try {
     const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
@@ -22,11 +26,12 @@ const verifyToken = (req, res, next) => {
     req.user = decoded;
     next();
   } catch (error) {
-    res.status(400).json({ message: "Invalid token" });
+    res.status(401).json({ message: "Invalid token" });
   }
 };
 
 const verifyTokenOptional = (req, res, next) => {
+  if (process.env.SKIP_DUPLICATE_JWT !== "false" && req.user && req.user.id !== "000000000000000000000000") return next();
   const token = req.headers.authorization?.split(" ")[1];
   const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
@@ -45,118 +50,6 @@ const verifyTokenOptional = (req, res, next) => {
   }
 };
 
-// ✅ Invoice Schema
-const invoiceSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  // Invoice Details
-  invoiceNumber: { type: String, required: true, unique: true },
-  invoiceDate: { type: Date, required: true },
-  dueDate: { type: Date, required: true },
-
-  // Customer Details
-  customerName: { type: String, required: true },
-  customerEmail: { type: String },
-  customerPhone: { type: String },
-  customerAddress: { type: String },
-  customerGSTIN: { type: String },
-
-  // Business Details
-  businessName: { type: String, required: true },
-  businessEmail: { type: String },
-  businessPhone: { type: String },
-  businessAddress: { type: String },
-  businessGSTIN: { type: String },
-
-  // Invoice Items
-  items: [{
-    productName: { type: String, required: true },
-    description: { type: String },
-    codeType: { type: String, enum: ['HSN', 'SAC'], default: 'HSN' },
-    hsnCode: { type: String },
-    sacCode: { type: String },
-    unit: { type: String },
-    priceWithTax: { type: Boolean, default: false },
-    quantity: { type: Number, required: true },
-    unitPrice: { type: Number, required: true },
-    taxRate: { type: Number, default: 0 },
-    discount: { type: Number, default: 0 },
-    total: { type: Number, required: true }
-  }],
-
-  // Calculations
-  subtotal: { type: Number, required: true },
-  taxAmount: { type: Number, required: true },
-  discountAmount: { type: Number, default: 0 },
-  shippingCharges: { type: Number, default: 0 },
-  grandTotal: { type: Number, required: true },
-
-  // Tax Breakdown
-  sgst: { type: Number, default: 0 },
-  cgst: { type: Number, default: 0 },
-  igst: { type: Number, default: 0 },
-
-  // Payment Details
-  paymentMethod: {
-    type: String,
-    enum: ['cash', 'credit', 'card', 'credit_card', 'bank_transfer', 'upi', 'gpay', 'netbanking', 'cheque', 'paypal', 'stripe', 'other'],
-    default: 'cash'
-  },
-  paymentStatus: {
-    type: String,
-    enum: ['pending', 'partial', 'paid', 'overdue', 'cancelled'],
-    default: 'pending'
-  },
-  amountPaid: { type: Number, default: 0 },
-  balanceDue: { type: Number, required: true },
-
-  // Additional Information
-  notes: { type: String },
-  termsAndConditions: { type: String },
-  invoiceType: {
-    type: String,
-    enum: ['proforma', 'tax', 'commercial', 'retail'],
-    default: 'tax'
-  },
-  sourceInvoiceType: {
-    type: String,
-    enum: ['sales', 'purchase'],
-    default: 'sales'
-  },
-  transactionType: {
-    type: String,
-    enum: ['B2B', 'B2C'],
-    default: 'B2C'
-  },
-  invoiceSize: {
-    type: String,
-    enum: ['A4', 'QUARTER_A4', 'A6'],
-    default: 'A4'
-  },
-  dueReminderDays: { type: Number, default: 0 },
-  dueReminderDate: { type: Date },
-  eWayBillNo: { type: String },
-  stateOfSupply: { type: String },
-  gstPortalJson: { type: mongoose.Schema.Types.Mixed },
-
-  // Template Design Fields
-  templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'InvoiceTemplate' },
-  templateSnapshot: { type: mongoose.Schema.Types.Mixed },
-
-  // System Fields
-  status: {
-    type: String,
-    enum: ['draft', 'sent', 'viewed', 'paid', 'overdue', 'cancelled'],
-    default: 'draft'
-  },
-  createdBy: { type: String },
-  updatedBy: { type: String },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-  isDeleted: { type: Boolean, default: false }
-});
-
-const Invoice = mongoose.model("Invoice", invoiceSchema);
-
 const getInvoiceIdFilter = (idParam) => {
   if (mongoose.Types.ObjectId.isValid(idParam)) {
     return { _id: idParam };
@@ -165,18 +58,16 @@ const getInvoiceIdFilter = (idParam) => {
 };
 
 const getUserFilter = (req) => {
-  if (!req || !req.user) return {};
+  if (!req || !req.user) return { userId: null, createdBy: null };
   const userIdStr = req.user._id ? req.user._id.toString() : req.user.id;
-  if (!userIdStr || userIdStr === "000000000000000000000000") return {};
+  if (!userIdStr || userIdStr === "000000000000000000000000") return { userId: null, createdBy: null };
   const userIdObj = mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
-  return userIdObj ? {
+  const userIds = userIdObj ? [userIdObj, userIdStr] : [userIdStr];
+  return {
     $or: [
-      { userId: userIdObj },
-      { userId: userIdStr },
-      { createdBy: userIdStr }
+      { userId: { $in: userIds } },
+      { createdBy: { $in: userIds } }
     ]
-  } : {
-    createdBy: userIdStr
   };
 };
 
@@ -200,36 +91,46 @@ router.get("/public/:id", async (req, res) => {
 });
 
 // ✅ 1. Create New Invoice
-router.post("/create", verifyTokenOptional, async (req, res) => {
+router.post("/create", verifyToken, async (req, res) => {
   try {
-    console.log("📥 Received Invoice Data:", JSON.stringify(req.body, null, 2));
     const invoiceData = req.body;
 
-    if (req.user && req.user.id !== "000000000000000000000000") {
-      const limitCheck = await checkPlanLimit(req.user.id, req.user.role, "invoice");
-      if (!limitCheck.allowed) {
-        return res.status(403).json(limitCheck);
-      }
-      invoiceData.userId = req.user.id;
-      if (!invoiceData.createdBy) {
-        invoiceData.createdBy = req.user.id;
-      }
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
+
+    const limitCheck = await checkPlanLimit(req.user.id, req.user.role, "invoice");
+    if (!limitCheck.allowed) {
+      return res.status(403).json(limitCheck);
+    }
+    invoiceData.userId = req.user.id;
+    if (!invoiceData.createdBy) {
+      invoiceData.createdBy = req.user.id;
+    }
+
+    // Authoritative Server-Side Calculation & Validation (DEF-INV-03 & DEF-INV-05)
+    const calcResult = calculateAndValidateInvoice(invoiceData);
+    if (!calcResult.valid) {
+      return res.status(calcResult.statusCode || 400).json({
+        message: calcResult.error,
+        error: "Invoice calculation validation failed"
+      });
+    }
+
+    // Merge authoritative server calculations
+    Object.assign(invoiceData, calcResult.data);
 
     // Generate invoice number if not provided
     if (!invoiceData.invoiceNumber) {
-      const count = await Invoice.countDocuments();
+      const count = await Invoice.countDocuments({ userId: req.user.id, isDeleted: false });
       invoiceData.invoiceNumber = `INV-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, '0')}`;
     }
-
-    // Calculate balance due
-    invoiceData.balanceDue = invoiceData.grandTotal - (invoiceData.amountPaid || 0);
 
     const newInvoice = new Invoice(invoiceData);
     await newInvoice.save();
 
     // Automatically generate Bookkeeping Entry for sales invoice
-    const invUserId = newInvoice.userId || req.user?.id;
+    const invUserId = newInvoice.userId || req.user.id;
     if (invUserId && invUserId !== "000000000000000000000000") {
       await upsertAutomatedBookkeepingEntry({
         userId: invUserId,
@@ -240,6 +141,45 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
         type: "income",
         referenceId: `invoice_${newInvoice._id}`
       });
+    }
+
+    // Link customer or auto-create Customer document if needed
+    const CustomerModel = mongoose.models.Customer || mongoose.model("Customer");
+    if (CustomerModel && invUserId) {
+      try {
+        let customerDoc = null;
+        if (newInvoice.customerId) {
+          customerDoc = await CustomerModel.findById(newInvoice.customerId);
+        }
+        if (!customerDoc && newInvoice.customerName) {
+          customerDoc = await CustomerModel.findOne({
+            $or: [{ userId: invUserId }, { userId: new mongoose.Types.ObjectId(invUserId) }],
+            name: { $regex: new RegExp(`^${newInvoice.customerName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+          });
+        }
+        if (!customerDoc && newInvoice.customerName) {
+          customerDoc = new CustomerModel({
+            userId: invUserId,
+            name: newInvoice.customerName.trim(),
+            email: newInvoice.customerEmail || "",
+            phone: newInvoice.customerPhone || "",
+            billingAddress: newInvoice.customerAddress || "",
+            gstin: newInvoice.customerGSTIN || ""
+          });
+          await customerDoc.save();
+        }
+        if (customerDoc && !newInvoice.customerId) {
+          newInvoice.customerId = customerDoc._id;
+          await newInvoice.save();
+        }
+        if (customerDoc) {
+          customerDoc.outstandingBalance = (customerDoc.outstandingBalance || 0) + (newInvoice.balanceDue || 0);
+          customerDoc.updatedAt = new Date();
+          await customerDoc.save();
+        }
+      } catch (custErr) {
+        console.warn("⚠️ Customer sync warning during invoice creation:", custErr.message);
+      }
     }
 
     res.status(201).json({
@@ -274,7 +214,7 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 2. Get All Invoices
-router.get("/all", verifyTokenOptional, async (req, res) => {
+router.get("/all", verifyToken, async (req, res) => {
   try {
     const {
       page = 1,
@@ -287,21 +227,14 @@ router.get("/all", verifyTokenOptional, async (req, res) => {
       sortOrder = 'desc'
     } = req.query;
 
-    if (!req.user) {
-      return res.json({
-        invoices: [],
-        totalInvoices: 0,
-        totalPages: 0,
-        currentPage: 1
-      });
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
 
+    const userFilter = getUserFilter(req);
     const query = {
       isDeleted: false,
-      $or: [
-        { userId: new mongoose.Types.ObjectId(req.user.id) },
-        { createdBy: req.user.id }
-      ]
+      ...userFilter
     };
 
     // Apply filters
@@ -322,27 +255,27 @@ router.get("/all", verifyTokenOptional, async (req, res) => {
     const sort = {};
     sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
 
-    // Execute query
-    const invoices = await Invoice.find(query)
-      .sort(sort)
-      .skip(skip)
-      .limit(parseInt(limit))
-      .select('-isDeleted'); // Exclude isDeleted field
-
-    const total = await Invoice.countDocuments(query);
-
-    // Calculate summary statistics
-    const summary = await Invoice.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: null,
-          totalInvoices: { $sum: 1 },
-          totalAmount: { $sum: "$grandTotal" },
-          totalPaid: { $sum: "$amountPaid" },
-          totalDue: { $sum: "$balanceDue" }
+    // Execute queries in parallel with lean() for maximum throughput
+    const [invoices, total, summary] = await Promise.all([
+      Invoice.find(query)
+        .sort(sort)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .select('-isDeleted')
+        .lean(),
+      Invoice.countDocuments(query),
+      Invoice.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            totalInvoices: { $sum: 1 },
+            totalAmount: { $sum: "$grandTotal" },
+            totalPaid: { $sum: "$amountPaid" },
+            totalDue: { $sum: "$balanceDue" }
+          }
         }
-      }
+      ])
     ]);
 
     res.json({
@@ -369,8 +302,94 @@ router.get("/all", verifyTokenOptional, async (req, res) => {
   }
 });
 
+// ✅ Receivables & Payables Breakdown API
+router.get("/receivables-payables", verifyToken, async (req, res) => {
+  try {
+    const userFilter = getUserFilter(req);
+    const userIdStr = req.user.id || req.user._id?.toString();
+    const userObjectId = mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
+
+    const PurchaseInvoice = mongoose.models.PurchaseInvoice || mongoose.model("PurchaseInvoice");
+
+    // Fetch unpaid sales invoices (Receivables) and purchase invoices (Payables) in parallel with .lean()
+    const [salesInvoices, purchaseInvoices] = await Promise.all([
+      Invoice.find({
+        ...userFilter,
+        isDeleted: false,
+        sourceInvoiceType: { $ne: "purchase" },
+        paymentStatus: { $ne: "paid" }
+      }).select("invoiceNumber customerName grandTotal amountPaid balanceDue invoiceDate dueDate paymentStatus status").lean(),
+      PurchaseInvoice ? PurchaseInvoice.find({
+        $or: [{ userId: userObjectId }, { userId: userIdStr }],
+        isDeleted: { $ne: true }
+      }).select("billNo supplierName total paid balance createdAt").lean() : Promise.resolve([])
+    ]);
+
+    const now = new Date();
+
+    // Group Receivables by Customer
+    const customerBreakdownMap = new Map();
+    let totalReceivables = 0;
+    let overdueReceivables = 0;
+    let overdueCount = 0;
+
+    salesInvoices.forEach(inv => {
+      const balance = inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, (inv.grandTotal || 0) - (inv.amountPaid || 0));
+      if (balance <= 0) return;
+
+      totalReceivables += balance;
+      const isOverdue = inv.dueDate && new Date(inv.dueDate) < now;
+      if (isOverdue) {
+        overdueReceivables += balance;
+        overdueCount++;
+      }
+
+      const custName = inv.customerName || "Unassigned Customer";
+      const existing = customerBreakdownMap.get(custName) || { customerName: custName, totalOutstanding: 0, invoiceCount: 0, overdueAmount: 0 };
+      existing.totalOutstanding += balance;
+      existing.invoiceCount += 1;
+      if (isOverdue) existing.overdueAmount += balance;
+      customerBreakdownMap.set(custName, existing);
+    });
+
+    // Group Payables by Supplier
+    const supplierBreakdownMap = new Map();
+    let totalPayables = 0;
+
+    purchaseInvoices.forEach(inv => {
+      const balance = inv.balance !== undefined ? inv.balance : Math.max(0, (inv.total || 0) - (inv.paid || 0));
+      if (balance <= 0) return;
+
+      totalPayables += balance;
+      const suppName = inv.supplierName || "General Supplier";
+      const existing = supplierBreakdownMap.get(suppName) || { supplierName: suppName, totalOutstanding: 0, billCount: 0 };
+      existing.totalOutstanding += balance;
+      existing.billCount += 1;
+      supplierBreakdownMap.set(suppName, existing);
+    });
+
+    res.json({
+      receivables: {
+        totalReceivables,
+        overdueReceivables,
+        outstandingInvoiceCount: salesInvoices.length,
+        overdueInvoiceCount: overdueCount,
+        customerBreakdown: Array.from(customerBreakdownMap.values()).sort((a, b) => b.totalOutstanding - a.totalOutstanding)
+      },
+      payables: {
+        totalPayables,
+        outstandingBillCount: purchaseInvoices.filter(p => (p.balance || 0) > 0).length,
+        supplierBreakdown: Array.from(supplierBreakdownMap.values()).sort((a, b) => b.totalOutstanding - a.totalOutstanding)
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching receivables-payables breakdown:", error);
+    res.status(500).json({ message: "Error fetching receivables and payables breakdown", error: error.message });
+  }
+});
+
 // ✅ Search Invoices - keep before "/:id" so Express does not treat "search" as an invoice id
-router.get("/search", verifyTokenOptional, async (req, res) => {
+router.get("/search", verifyToken, async (req, res) => {
   try {
     const {
       query,
@@ -385,21 +404,14 @@ router.get("/search", verifyTokenOptional, async (req, res) => {
       });
     }
 
-    if (!req.user) {
-      return res.json({
-        invoices: [],
-        totalInvoices: 0,
-        totalPages: 0,
-        currentPage: 1
-      });
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
 
+    const userFilter = getUserFilter(req);
     const searchQuery = {
       isDeleted: false,
-      $or: [
-        { userId: new mongoose.Types.ObjectId(req.user.id) },
-        { createdBy: req.user.id }
-      ]
+      ...userFilter
     };
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -427,12 +439,14 @@ router.get("/search", verifyTokenOptional, async (req, res) => {
       searchQuery['items.productName'] = { $regex: query, $options: 'i' };
     }
 
-    const invoices = await Invoice.find(searchQuery)
-      .sort({ invoiceDate: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await Invoice.countDocuments(searchQuery);
+    const [invoices, total] = await Promise.all([
+      Invoice.find(searchQuery)
+        .sort({ invoiceDate: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Invoice.countDocuments(searchQuery)
+    ]);
 
     res.json({
       invoices,
@@ -453,7 +467,7 @@ router.get("/search", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 3. Get Single Invoice by ID
-router.get("/:id", verifyTokenOptional, async (req, res) => {
+router.get("/:id", verifyToken, async (req, res) => {
   try {
     const userFilter = getUserFilter(req);
 
@@ -461,7 +475,7 @@ router.get("/:id", verifyTokenOptional, async (req, res) => {
       ...getInvoiceIdFilter(req.params.id),
       isDeleted: false,
       ...userFilter
-    });
+    }).lean();
 
     if (!invoice) {
       return res.status(404).json({
@@ -480,7 +494,7 @@ router.get("/:id", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 4. Get Invoice by Invoice Number
-router.get("/number/:invoiceNumber", verifyTokenOptional, async (req, res) => {
+router.get("/number/:invoiceNumber", verifyToken, async (req, res) => {
   try {
     const userFilter = getUserFilter(req);
 
@@ -507,28 +521,49 @@ router.get("/number/:invoiceNumber", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 5. Update Invoice
-router.put("/:id", verifyTokenOptional, async (req, res) => {
+router.put("/:id", verifyToken, async (req, res) => {
   try {
     const updateData = req.body;
     const userFilter = getUserFilter(req);
 
-    // Recalculate balance due if payment is updated
-    if (updateData.amountPaid !== undefined) {
-      const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
-      if (currentInvoice) {
-        updateData.balanceDue = currentInvoice.grandTotal - updateData.amountPaid;
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
+    }
 
-        // Update payment status based on balance
-        if (updateData.balanceDue === 0) {
-          updateData.paymentStatus = 'paid';
-          updateData.status = 'paid';
-        } else if (updateData.amountPaid > 0) {
-          updateData.paymentStatus = 'partial';
-        }
+    const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter }).lean();
+    if (!currentInvoice) {
+      return res.status(404).json({
+        message: "Invoice not found"
+      });
+    }
+
+    // Authoritative Server-Side Calculation & Validation on update if items or financial totals are present (DEF-INV-03 & DEF-INV-05)
+    if (updateData.items || updateData.grandTotal !== undefined || updateData.subtotal !== undefined) {
+      const mergedData = {
+        ...(currentInvoice.toObject ? currentInvoice.toObject() : currentInvoice),
+        ...updateData
+      };
+      const calcResult = calculateAndValidateInvoice(mergedData);
+      if (!calcResult.valid) {
+        return res.status(calcResult.statusCode || 400).json({
+          message: calcResult.error,
+          error: "Invoice calculation validation failed"
+        });
+      }
+      Object.assign(updateData, calcResult.data);
+    } else if (updateData.amountPaid !== undefined) {
+      updateData.balanceDue = Math.max(0, currentInvoice.grandTotal - updateData.amountPaid);
+      if (updateData.balanceDue === 0) {
+        updateData.paymentStatus = 'paid';
+        updateData.status = 'paid';
+      } else if (updateData.amountPaid > 0) {
+        updateData.paymentStatus = 'partial';
       }
     }
 
-    // Set updated timestamp
+    // Strip protected identity fields
+    delete updateData.userId;
+    delete updateData.createdBy;
     updateData.updatedAt = new Date();
 
     const updatedInvoice = await Invoice.findOneAndUpdate(
@@ -544,7 +579,7 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
     }
 
     // Sync automated Bookkeeping Entry
-    const invUserId = updatedInvoice.userId || req.user?.id;
+    const invUserId = updatedInvoice.userId || req.user.id;
     if (invUserId && invUserId !== "000000000000000000000000") {
       if (updatedInvoice.status === 'cancelled' || updatedInvoice.isDeleted) {
         await removeAutomatedBookkeepingEntry({
@@ -578,7 +613,7 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 6. Delete Invoice (Soft Delete)
-router.delete("/:id", verifyTokenOptional, async (req, res) => {
+router.delete("/:id", verifyToken, async (req, res) => {
   try {
     const userFilter = getUserFilter(req);
 
@@ -620,7 +655,7 @@ router.delete("/:id", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 7. Update Invoice Status
-router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
+router.patch("/:id/status", verifyToken, async (req, res) => {
   try {
     const { status } = req.body;
     const userFilter = getUserFilter(req);
@@ -661,7 +696,7 @@ router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 8. Update Payment Status
-router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
+router.all("/:id/payment", verifyToken, async (req, res) => {
   if (req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'PUT') {
     return res.status(405).json({ message: "Method not allowed" });
   }
@@ -669,15 +704,7 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
     const { amount, amountPaid, paymentMethod, paymentDate, paymentStatus } = req.body;
     const payAmt = parseFloat(amount || amountPaid || 0);
 
-    const userIdStr = req.user?._id ? req.user._id.toString() : req.user?.id;
-    const userIdObj = userIdStr && mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
-    const userFilter = userIdObj ? {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    } : {};
+    const userFilter = getUserFilter(req);
 
     const invoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
     if (!invoice) {
@@ -700,6 +727,24 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
 
     await invoice.save();
 
+    // Recalculate customer's outstanding balance
+    const CustomerModel = mongoose.models.Customer || mongoose.model("Customer");
+    if (CustomerModel && invoice.customerName) {
+      try {
+        const custFilter = invoice.customerId ? { _id: invoice.customerId } : { ...userFilter, name: { $regex: new RegExp(`^${invoice.customerName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } };
+        const customerDoc = await CustomerModel.findOne(custFilter);
+        if (customerDoc) {
+          const userInvoices = await Invoice.find({ ...userFilter, isDeleted: false, $or: [{ customerId: customerDoc._id }, { customerName: customerDoc.name }] }).select("balanceDue grandTotal amountPaid").lean();
+          const totalRemaining = userInvoices.reduce((sum, inv) => sum + (inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, (inv.grandTotal || 0) - (inv.amountPaid || 0))), 0);
+          customerDoc.outstandingBalance = totalRemaining;
+          customerDoc.updatedAt = new Date();
+          await customerDoc.save();
+        }
+      } catch (cErr) {
+        console.warn("⚠️ Customer balance update warning on payment:", cErr.message);
+      }
+    }
+
     res.json({
       message: "Payment status updated successfully!",
       invoice
@@ -714,25 +759,18 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 10. Get Invoice Statistics
-router.get("/stats/overview", verifyTokenOptional, async (req, res) => {
+router.get("/stats/overview", verifyToken, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
 
-    if (!req.user) {
-      return res.json({
-        overall: { totalInvoices: 0, totalAmount: 0, totalPaid: 0, totalDue: 0, avgInvoiceAmount: 0 },
-        byStatus: [],
-        byPaymentStatus: [],
-        monthlyTrend: []
-      });
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
 
+    const userFilter = getUserFilter(req);
     const matchQuery = {
       isDeleted: false,
-      $or: [
-        { userId: new mongoose.Types.ObjectId(req.user.id) },
-        { createdBy: req.user.id }
-      ]
+      ...userFilter
     };
 
     // Add date filter if provided
@@ -881,7 +919,7 @@ router.get("/stats/overview", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 11. Generate Invoice Report
-router.get("/reports/generate", verifyTokenOptional, async (req, res) => {
+router.get("/reports/generate", verifyToken, async (req, res) => {
   try {
     const {
       format = 'json',
@@ -891,16 +929,14 @@ router.get("/reports/generate", verifyTokenOptional, async (req, res) => {
       paymentStatus
     } = req.query;
 
-    if (!req.user) {
-      return res.json({ reportGenerated: new Date(), totalRecords: 0, data: [] });
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
 
+    const userFilter = getUserFilter(req);
     const query = {
       isDeleted: false,
-      $or: [
-        { userId: new mongoose.Types.ObjectId(req.user.id) },
-        { createdBy: req.user.id }
-      ]
+      ...userFilter
     };
 
     // Apply filters
@@ -956,23 +992,21 @@ router.get("/reports/generate", verifyTokenOptional, async (req, res) => {
 });
 
 // ✅ 12. Get Overdue Invoices
-router.get("/overdue", verifyTokenOptional, async (req, res) => {
+router.get("/overdue", verifyToken, async (req, res) => {
   try {
     const today = new Date();
 
-    if (!req.user) {
-      return res.json({ totalOverdueInvoices: 0, totalOverdueAmount: 0, overdueInvoices: [] });
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
 
+    const userFilter = getUserFilter(req);
     const overdueInvoices = await Invoice.find({
       isDeleted: false,
       paymentStatus: { $ne: 'paid' },
       dueDate: { $lt: today },
       balanceDue: { $gt: 0 },
-      $or: [
-        { userId: new mongoose.Types.ObjectId(req.user.id) },
-        { createdBy: req.user.id }
-      ]
+      ...userFilter
     })
       .sort({ dueDate: 1 })
       .limit(50);
@@ -994,10 +1028,14 @@ router.get("/overdue", verifyTokenOptional, async (req, res) => {
   }
 });
 
-// ✅ 13. Bulk Update Invoices
-router.post("/bulk/update", async (req, res) => {
+// ✅ 13. Bulk Update Invoices (DEF-INV-01)
+router.post("/bulk/update", verifyToken, async (req, res) => {
   try {
     const { invoiceIds, updateData } = req.body;
+
+    if (!req.user || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
+    }
 
     if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
       return res.status(400).json({
@@ -1005,12 +1043,19 @@ router.post("/bulk/update", async (req, res) => {
       });
     }
 
-    // Add updated timestamp
-    updateData.updatedAt = new Date();
+    const userFilter = getUserFilter(req);
+    if (!userFilter || userFilter.userId === null) {
+      return res.status(401).json({ message: "Access denied. Valid user token required." });
+    }
+
+    const sanitizedUpdate = { ...updateData };
+    delete sanitizedUpdate.userId;
+    delete sanitizedUpdate.createdBy;
+    sanitizedUpdate.updatedAt = new Date();
 
     const result = await Invoice.updateMany(
-      { _id: { $in: invoiceIds }, isDeleted: false },
-      updateData
+      { _id: { $in: invoiceIds }, isDeleted: false, ...userFilter },
+      sanitizedUpdate
     );
 
     res.json({

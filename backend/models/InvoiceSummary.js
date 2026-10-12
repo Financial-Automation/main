@@ -13,7 +13,7 @@ const invoiceSummarySchema = new mongoose.Schema({
     id: {
         type: Number,
         unique: true,
-        required: true
+        default: 0
     },
     productName: {
         type: String,
@@ -52,8 +52,8 @@ const invoiceSummarySchema = new mongoose.Schema({
 });
 
 // Auto-increment ID middleware
-invoiceSummarySchema.pre('save', async function (next) {
-    if (this.isNew) {
+invoiceSummarySchema.pre('validate', async function (next) {
+    if (this.isNew && (!this.id || this.id === 0)) {
         try {
             const counter = await Counter.findByIdAndUpdate(
                 { _id: 'invoiceSummaryId' },

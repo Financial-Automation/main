@@ -1,4 +1,5 @@
 import BookkeepingEntry from "../models/BookkeepingEntry.js";
+import { invalidateFinanceCache } from "./financeAggregator.js";
 
 /**
  * Upserts an automated BookkeepingEntry for a given referenceId and userId.
@@ -19,7 +20,7 @@ export const upsertAutomatedBookkeepingEntry = async ({
   }
 
   const parsedAmount = Math.abs(parseFloat(amount));
-  if (isNaN(parsedAmount)) return null;
+  if (isNaN(parsedAmount) || !isFinite(parsedAmount) || parsedAmount <= 0) return null;
 
   const entryType = (type && type.toString().toLowerCase() === "income") ? "income" : "expense";
   const entryDate = date ? new Date(date) : new Date();
@@ -41,13 +42,25 @@ export const upsertAutomatedBookkeepingEntry = async ({
     isAutomated: true
   };
 
-  const entry = await BookkeepingEntry.findOneAndUpdate(filter, update, {
-    upsert: true,
-    new: true,
-    setDefaultsOnInsert: true
-  });
-
-  return entry;
+  try {
+    const entry = await BookkeepingEntry.findOneAndUpdate(filter, update, {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true
+    });
+    invalidateFinanceCache(userId);
+    return entry;
+  } catch (err) {
+    if (err.code === 11000) {
+      const entry = await BookkeepingEntry.findOneAndUpdate(filter, update, {
+        upsert: true,
+        new: true
+      });
+      invalidateFinanceCache(userId);
+      return entry;
+    }
+    throw err;
+  }
 };
 
 /**
@@ -55,5 +68,6 @@ export const upsertAutomatedBookkeepingEntry = async ({
  */
 export const removeAutomatedBookkeepingEntry = async ({ userId, referenceId }) => {
   if (!userId || !referenceId) return null;
+  invalidateFinanceCache(userId);
   return await BookkeepingEntry.deleteMany({ userId, referenceId });
 };

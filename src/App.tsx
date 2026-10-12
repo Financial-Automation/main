@@ -38,6 +38,9 @@ import ThankYou from "./pages/ThankYou";
 import ProductPage from "./pages/ProductPage";
 import AiInvoicingSoftware from "./pages/AiInvoicingSoftware";
 import CashFlowForecastingSoftware from "./pages/CashFlowForecastingSoftware";
+import Customers from "./pages/Customers";
+import Vendors from "./pages/Vendors";
+import ExpenseBudgeting from "./pages/ExpenseBudgeting";
 
 const queryClient = new QueryClient();
 
@@ -103,6 +106,9 @@ const App = () => {
             <Route path="/financial-ratios" element={isMaintenanceMode ? <ServerIssues /> : <FinancialRatios />} />
             <Route path="/bookkeeping" element={isMaintenanceMode ? <ServerIssues /> : <Bookkeeping />} />
             <Route path="/inventory" element={isMaintenanceMode ? <ServerIssues /> : <Inventory />} />
+            <Route path="/customers" element={isMaintenanceMode ? <ServerIssues /> : <Customers />} />
+            <Route path="/vendors" element={isMaintenanceMode ? <ServerIssues /> : <Vendors />} />
+            <Route path="/expense-budgeting" element={isMaintenanceMode ? <ServerIssues /> : <ExpenseBudgeting />} />
             <Route path="/bank-reconciliation" element={isMaintenanceMode ? <ServerIssues /> : <BankReconciliation />} />
             <Route path="/fraud-detection" element={isMaintenanceMode ? <ServerIssues /> : <FraudDetection />} />
             <Route path="/invoice" element={isMaintenanceMode ? <ServerIssues /> : <AutomationInvoice />} />

@@ -65,7 +65,7 @@ const processUploadedFile = async (filePath, fileType) => {
                     .on('error', reject);
             });
         } else if (fileType === 'xlsx' || fileType === 'xls') {
-            const workbook = xlsx.readFile(filePath);
+            const workbook = xlsx.read(fs.readFileSync(filePath));
             const sheetName = workbook.SheetNames[0];
             data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
             fs.unlinkSync(filePath);

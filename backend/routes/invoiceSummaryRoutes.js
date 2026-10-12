@@ -3,29 +3,39 @@ import InvoiceSummary from "../models/InvoiceSummary.js";
 
 import jwt from "jsonwebtoken";
 
-const verifyTokenOptional = (req, res, next) => {
+const verifyToken = (req, res, next) => {
+  if (req.user && (req.user.id || req.user._id) && req.user.id !== "000000000000000000000000") {
+    return next();
+  }
   const token = req.headers.authorization?.split(" ")[1];
   const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 
   if (!token || token === "null" || token === "undefined") {
-    req.user = { id: "000000000000000000000000" };
-    return next();
+    return res.status(401).json({ message: "Access denied. No token provided." });
   }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      id: decoded.id || decoded._id?.toString()
+    };
+    if (!req.user.id || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Invalid authorization token." });
+    }
     next();
   } catch (error) {
-    req.user = { id: "000000000000000000000000" };
-    next();
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Token expired. Please log in again." });
+    }
+    return res.status(401).json({ message: "Invalid authorization token." });
   }
 };
 
 const router = express.Router();
 
 // ✅ 1. Create New Invoice Summary
-router.post("/create", async (req, res) => {
+router.post("/create", verifyToken, async (req, res) => {
     try {
         const { productName, quantity, rate, tax } = req.body;
         const createdbyid = req.user.id; // Enforce user ID from authentication token
@@ -68,7 +78,7 @@ router.post("/create", async (req, res) => {
 });
 
 // ✅ 2. Get All Invoice Summaries for Authenticated User
-router.get("/all", async (req, res) => {
+router.get("/all", verifyToken, async (req, res) => {
     try {
         const {
             page = 1,
@@ -108,7 +118,7 @@ router.get("/all", async (req, res) => {
 });
 
 // ✅ 3. Get Single Invoice Summary by ID for Authenticated User
-router.get("/:id", async (req, res) => {
+router.get("/:id", verifyToken, async (req, res) => {
     try {
         const invoiceSummary = await InvoiceSummary.findOne({
             id: parseInt(req.params.id),
@@ -132,7 +142,7 @@ router.get("/:id", async (req, res) => {
 });
 
 // ✅ 4. Get Invoice Summaries by User ID (Ensuring they request their own data)
-router.get("/user/:userId", async (req, res) => {
+router.get("/user/:userId", verifyToken, async (req, res) => {
     try {
         if (req.params.userId !== req.user.id) {
             return res.status(403).json({ message: "Access denied. Cannot view another user's invoice summaries." });
@@ -175,7 +185,7 @@ router.get("/user/:userId", async (req, res) => {
 });
 
 // ✅ 5. Update Invoice Summary for Authenticated User
-router.put("/:id", async (req, res) => {
+router.put("/:id", verifyToken, async (req, res) => {
     try {
         const { productName, quantity, rate, tax } = req.body;
 
@@ -234,7 +244,7 @@ router.put("/:id", async (req, res) => {
 });
 
 // ✅ 6. Delete Invoice Summary for Authenticated User
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", verifyToken, async (req, res) => {
     try {
         const deletedInvoiceSummary = await InvoiceSummary.findOneAndDelete({
             id: parseInt(req.params.id),
@@ -261,7 +271,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 // ✅ 7. Get Invoice Summary Statistics for Authenticated User
-router.get("/stats/overview", async (req, res) => {
+router.get("/stats/overview", verifyToken, async (req, res) => {
     try {
         const matchQuery = { createdbyid: req.user.id };
 
@@ -302,7 +312,7 @@ router.get("/stats/overview", async (req, res) => {
 });
 
 // ✅ 8. Search Invoice Summaries by Product Name for Authenticated User
-router.get("/search/:productName", async (req, res) => {
+router.get("/search/:productName", verifyToken, async (req, res) => {
     try {
         const { page = 1, limit = 20 } = req.query;
         const skip = (parseInt(page) - 1) * parseInt(limit);

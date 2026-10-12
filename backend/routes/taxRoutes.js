@@ -6,6 +6,7 @@ import { getGstAnalytics } from "../utils/financeAggregator.js";
 const router = express.Router();
 
 const verifyTokenOptional = (req, res, next) => {
+  if (process.env.SKIP_DUPLICATE_JWT !== "false" && req.user && req.user.id !== "000000000000000000000000") return next();
   const token = req.headers.authorization?.split(" ")[1];
   const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
 

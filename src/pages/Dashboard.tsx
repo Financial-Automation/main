@@ -82,6 +82,9 @@ type ChatMessage = {
 
 const dashboardModules: DashboardModule[] = [
   { title: "Dashboard", description: "Main overview", output: "", icon: Home, path: "/" },
+  { title: "Customer CRM", description: "Manage clients, invoices, receivables & customer profiles.", output: "", icon: Users, path: "/customers" },
+  { title: "Vendor Management", description: "Track suppliers, purchase bills, payables & credit terms.", output: "", icon: Building2, path: "/vendors" },
+  { title: "Expense & Budgeting", description: "Set category spending limits, track MoM trends & prevent budget overrun.", output: "", icon: PieChart, path: "/expense-budgeting" },
   { title: "Payroll Automation", description: "Manage employee salaries, deductions, and salary slips.", output: "", icon: Users, path: "/payroll" },
   { title: "Tax & GST Management", description: "Calculate and manage GST, CGST, SGST, and IGST.", output: "", icon: FileText, path: "/tax-gst" },
   { title: "Balance Sheet", description: "Generate balance sheets with assets, liabilities, and equity.", output: "", icon: BarChart3, path: "/balance-sheet" },
@@ -262,6 +265,7 @@ const Dashboard = () => {
   const [gstAnalyticsData, setGstAnalyticsData] = useState<any>(null);
   const [liveBalanceSheetData, setLiveBalanceSheetData] = useState<any>(null);
   const [liveFinancialRatiosData, setLiveFinancialRatiosData] = useState<any>(null);
+  const [dashboardOverview, setDashboardOverview] = useState<any>(null);
 
   // Modules Dynamic Data States
   const [dashboardStats, setDashboardStats] = useState<any[]>(emptyStats);
@@ -416,14 +420,15 @@ const Dashboard = () => {
           if (parsed) setAllBalanceSheets(parsed);
         }
 
-        const [statements, bookkeeping, plGenData, cfGenData, gstData, liveBS, liveRatios] = await Promise.all([
+        const [statements, bookkeeping, plGenData, cfGenData, gstData, liveBS, liveRatios, overviewData] = await Promise.all([
           readJson(`${API_BASE_URL}/cashflow-statement/all`),
           readJson(`${API_BASE_URL}/bookkeeping/all`),
           readJson(`${API_BASE_URL}/profitloss/generate?period=${selectedPeriod}`),
           readJson(`${API_BASE_URL}/cashflow-statement/generate?period=${selectedPeriod}`),
           readJson(`${API_BASE_URL}/tax/analytics?period=${selectedPeriod}`),
           readJson(`${API_BASE_URL}/balance/generate?period=${selectedPeriod}`),
-          readJson(`${API_BASE_URL}/financial-ratios/generate?period=${selectedPeriod}`)
+          readJson(`${API_BASE_URL}/financial-ratios/generate?period=${selectedPeriod}`),
+          readJson(`${API_BASE_URL}/dashboard/overview?period=${selectedPeriod}`)
         ]);
 
         if (plGenData) setPlGen(plGenData);
@@ -431,6 +436,7 @@ const Dashboard = () => {
         if (gstData) setGstAnalyticsData(gstData);
         if (liveBS) setLiveBalanceSheetData(liveBS);
         if (liveRatios) setLiveFinancialRatiosData(liveRatios);
+        if (overviewData) setDashboardOverview(overviewData);
         const cashFlowStatementData = Array.isArray(statements) ? statements.filter((s: any) => !s.isDeleted) : [];
         const bookkeepingEntries = Array.isArray(bookkeeping?.entries) ? bookkeeping.entries.filter((e: any) => !e.isDeleted) : [];
         
@@ -1579,6 +1585,49 @@ const Dashboard = () => {
               </select>
             </div>
           </div>
+
+          {/* --- Business Action Center / Interactive Alerts --- */}
+          {dashboardOverview?.warnings && dashboardOverview.warnings.length > 0 && (
+            <div className="mb-6 space-y-3">
+              {dashboardOverview.warnings.map((warn: any, idx: number) => {
+                let bgClass = "bg-blue-50/80 border-blue-200 text-blue-900";
+                let btnLabel = "Take Action";
+                let btnPath = "/";
+
+                if (warn.code === "LOW_STOCK") {
+                  bgClass = "bg-amber-50 border-amber-200 text-amber-900";
+                  btnLabel = "Manage Inventory";
+                  btnPath = "/inventory";
+                } else if (warn.code === "HIGH_RECEIVABLES" || warn.code === "OVERDUE_INVOICES") {
+                  bgClass = "bg-rose-50 border-rose-200 text-rose-900";
+                  btnLabel = "View Invoices";
+                  btnPath = "/invoice";
+                } else if (warn.code === "NET_LOSS") {
+                  bgClass = "bg-red-50 border-red-200 text-red-900";
+                  btnLabel = "Review P&L";
+                  btnPath = "/profit-loss";
+                } else if (warn.code === "HEALTHY") {
+                  bgClass = "bg-emerald-50 border-emerald-200 text-emerald-900";
+                  btnLabel = "New Invoice";
+                  btnPath = "/invoice";
+                }
+
+                return (
+                  <div key={idx} className={`p-4 rounded-[6px] border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm ${bgClass}`}>
+                    <div className="flex items-center gap-3">
+                      <span className="font-semibold text-[13px]">{warn.message}</span>
+                    </div>
+                    <button
+                      onClick={() => navigate(btnPath)}
+                      className="px-3.5 py-1.5 bg-white border border-slate-300 hover:border-slate-400 text-slate-800 text-[12px] font-bold rounded shadow-sm hover:shadow transition-all cursor-pointer whitespace-nowrap"
+                    >
+                      {btnLabel} →
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* --- Stats Grid (4 columns to fit fully visible text) --- */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">

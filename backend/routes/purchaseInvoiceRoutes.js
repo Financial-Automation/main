@@ -73,6 +73,7 @@ const getInventoryModel = () => mongoose.model("InventoryItem");
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
+    if (process.env.SKIP_DUPLICATE_JWT !== "false" && req.user) return next();
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) {
         return res.status(401).json({ message: "Access denied. No token provided." });
@@ -126,6 +127,33 @@ router.post("/create", verifyToken, async (req, res) => {
             type: "expense",
             referenceId: `purchase_inv_${newInvoice._id}`
         });
+
+        // Link supplier or auto-create Vendor document
+        const VendorModel = mongoose.models.Vendor || mongoose.model("Vendor");
+        if (VendorModel && newInvoice.supplierName) {
+            try {
+                let vendorDoc = await VendorModel.findOne({
+                    $or: [{ userId: req.user.id }, { userId: new mongoose.Types.ObjectId(req.user.id) }],
+                    name: { $regex: new RegExp(`^${newInvoice.supplierName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+                });
+                if (!vendorDoc) {
+                    vendorDoc = new VendorModel({
+                        userId: req.user.id,
+                        name: newInvoice.supplierName.trim(),
+                        phone: newInvoice.phone || "",
+                        gstin: newInvoice.gstin || "",
+                        placeOfSupply: newInvoice.stateOfSupply || ""
+                    });
+                    await vendorDoc.save();
+                }
+                const balance = (newInvoice.total || 0) - (newInvoice.paid || 0);
+                vendorDoc.outstandingPayable = (vendorDoc.outstandingPayable || 0) + Math.max(0, balance);
+                vendorDoc.updatedAt = new Date();
+                await vendorDoc.save();
+            } catch (vErr) {
+                console.warn("⚠️ Vendor sync warning during purchase creation:", vErr.message);
+            }
+        }
 
         // Add purchased items to inventory stock
         const InventoryItem = getInventoryModel();

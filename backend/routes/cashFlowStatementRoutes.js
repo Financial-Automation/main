@@ -36,6 +36,8 @@ const cashFlowStatementSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+cashFlowStatementSchema.index({ userId: 1, createdAt: -1 });
+
 const CashFlowStatement = mongoose.model("CashFlowStatement", cashFlowStatementSchema);
 const SimpleCashFlowStatement = mongoose.model("SimpleCashFlowStatement", new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -45,20 +47,31 @@ const SimpleCashFlowStatement = mongoose.model("SimpleCashFlowStatement", new mo
 // ==================== MIDDLEWARE ====================
 
 const verifyToken = (req, res, next) => {
+  if (req.user && (req.user.id || req.user._id) && req.user.id !== "000000000000000000000000") {
+    return next();
+  }
   const token = req.headers.authorization?.split(" ")[1];
 
-  if (!token) {
+  if (!token || token === "null" || token === "undefined") {
     return res.status(401).json({ message: "Access denied. No token provided." });
   }
 
   try {
     const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      id: decoded.id || decoded._id?.toString()
+    };
+    if (!req.user.id || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Invalid authorization token." });
+    }
     next();
   } catch (error) {
-    console.error("Token verification failed:", error.message);
-    res.status(400).json({ message: "Invalid token" });
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Token expired. Please log in again." });
+    }
+    return res.status(401).json({ message: "Invalid authorization token." });
   }
 };
 
@@ -147,7 +160,7 @@ router.post("/create", verifyToken, async (req, res) => {
 // ✅ GET - Fetch all dynamic statements for user
 router.get("/all", verifyToken, async (req, res) => {
   try {
-    const statements = await CashFlowStatement.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    const statements = await CashFlowStatement.find({ userId: req.user.id }).sort({ createdAt: -1 }).lean();
     res.json(statements);
   } catch (error) {
     console.error("Error fetching cash flow statements:", error);
@@ -188,7 +201,7 @@ router.get("/generate", verifyToken, async (req, res) => {
       sales: metrics.revenue.sales,
       serviceIncome: 0,
       interestIncome: 0,
-      otherIncome: metrics.revenue.bookkeepingIncome + metrics.revenue.inventorySales,
+      otherIncome: Math.max(0, metrics.revenue.total - metrics.revenue.sales),
       // Outflow breakdown
       costOfMaterials: metrics.expense.costOfMaterials + metrics.expense.cogs,
       salaries: metrics.expense.salaries,

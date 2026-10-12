@@ -5,8 +5,19 @@ import { performance } from "perf_hooks";
 import Sale from "../models/Sale.js";
 import Category from "../models/Category.js";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
+import { recordInventoryMetric, getInventoryInstrumentationReport, resetInventoryMetrics } from "../utils/inventoryInstrumentation.js";
 
 const router = express.Router();
+
+// ✅ Instrumentation control endpoints
+router.get("/instrumentation-stats", (req, res) => {
+    res.json(getInventoryInstrumentationReport());
+});
+
+router.post("/instrumentation-reset", (req, res) => {
+    resetInventoryMetrics();
+    res.json({ status: "reset" });
+});
 
 // ✅ Inventory Schema
 const inventorySchema = new mongoose.Schema({
@@ -27,6 +38,7 @@ const inventorySchema = new mongoose.Schema({
     cgst: { type: Number, default: 0 },
     igst: { type: Number, default: 0 },
     stateOfSupply: { type: String, default: "" },
+    minStockLevel: { type: Number, default: 5 },
     lastUpdated: { type: Date, default: Date.now },
 });
 
@@ -36,6 +48,7 @@ const InventoryItem = mongoose.model("InventoryItem", inventorySchema);
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
+    if (process.env.SKIP_DUPLICATE_JWT !== "false" && req.user) return next();
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) {
         return res.status(401).json({ message: "Access denied. No token provided." });
@@ -54,7 +67,7 @@ const verifyToken = (req, res, next) => {
 // ✅ POST route to add inventory item
 router.post("/add", verifyToken, async (req, res) => {
     try {
-        const { itemName, sku, quantity, price, category, gstRate, sgst, cgst, igst, stateOfSupply } = req.body;
+        const { itemName, sku, quantity, price, category, gstRate, sgst, cgst, igst, stateOfSupply, minStockLevel } = req.body;
 
         // Use new gstRate field, fallback to old sgst+cgst+igst for backward compatibility
         const effectiveGstRate = Number(gstRate) || (Number(sgst) || 0) + (Number(cgst) || 0) + (Number(igst) || 0);
@@ -73,7 +86,8 @@ router.post("/add", verifyToken, async (req, res) => {
             sgst: effectiveGstRate / 2,
             cgst: effectiveGstRate / 2,
             igst: 0,
-            stateOfSupply
+            stateOfSupply,
+            minStockLevel: minStockLevel !== undefined ? Number(minStockLevel) : 5
         });
         await newItem.save();
 
@@ -98,23 +112,159 @@ router.post("/add", verifyToken, async (req, res) => {
         });
     } catch (error) {
         console.error("Error adding inventory item:", error);
+        if (error.name === "ValidationError" || error.name === "CastError") {
+            return res.status(400).json({ message: "Invalid item data or data type", error: error.message });
+        }
         res.status(500).json({ message: "Error adding item", error });
     }
 });
 
+// Process-local In-Flight Promise Map for Single-Flight Request Coalescing
+// Note: Each PM2 worker maintains its own process-local map.
+const inFlightInventoryPromises = new Map();
+
+// Coalescing instrumentation counters per worker
+let inventoryRequestsReceived = 0;
+let inventoryCommandsStarted = 0;
+let inventoryCommandsCompleted = 0;
+let inventoryCoalescedRequests = 0;
+let inventoryQueryFailures = 0;
+
+export const resetInventoryCoalescingMetrics = () => {
+    inventoryRequestsReceived = 0;
+    inventoryCommandsStarted = 0;
+    inventoryCommandsCompleted = 0;
+    inventoryCoalescedRequests = 0;
+    inventoryQueryFailures = 0;
+    inFlightInventoryPromises.clear();
+};
+
+export const getInventoryCoalescingMetrics = () => ({
+    requestsReceived: inventoryRequestsReceived,
+    commandsStarted: inventoryCommandsStarted,
+    commandsCompleted: inventoryCommandsCompleted,
+    coalescedRequests: inventoryCoalescedRequests,
+    queryFailures: inventoryQueryFailures,
+    inFlightMapSize: inFlightInventoryPromises.size
+});
+
+// ✅ GET route to fetch low-stock inventory alerts and stock valuation summary
+router.get("/low-stock", verifyToken, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const items = await InventoryItem.find({ userId })
+            .select("_id itemName sku quantity price costPrice buyPrice category minStockLevel lastUpdated")
+            .lean();
+
+        const lowStockItems = items.filter(item => {
+            const minLevel = item.minStockLevel !== undefined ? item.minStockLevel : 5;
+            return (item.quantity || 0) <= minLevel;
+        });
+
+        const totalValuation = items.reduce((sum, item) => {
+            const unitPrice = item.price || item.costPrice || item.buyPrice || 0;
+            return sum + ((item.quantity || 0) * unitPrice);
+        }, 0);
+
+        res.json({
+            totalItems: items.length,
+            lowStockCount: lowStockItems.length,
+            totalValuation,
+            lowStockItems
+        });
+    } catch (error) {
+        console.error("Error fetching low-stock items:", error);
+        res.status(500).json({ message: "Error fetching low-stock inventory data" });
+    }
+});
+
 // ✅ GET route to fetch all inventory items (User Specific)
-router.get("/all", verifyToken, async (req, res) => {
+router.get("/all", async (req, res) => {
+    const t_inv_start = performance.now();
     const isPerfDebug = process.env.PERF_DEBUG === "true";
     const corrId = req._corrId || (isPerfDebug ? Math.random().toString(36).substring(2, 10) : null);
     const reqStartTime = req._reqStartTime || (isPerfDebug ? performance.now() : null);
 
+    inventoryRequestsReceived++;
+
+    const userIdStr = req.user.id || req.user._id?.toString();
+    const queryKey = JSON.stringify(req.query || {});
+    const cacheKey = `${userIdStr}:${queryKey}`;
+
     try {
-        const queryStart = isPerfDebug ? performance.now() : null;
-        const items = await InventoryItem.find({ userId: req.user.id }).sort({ lastUpdated: -1 });
+        const t_mongo_start = performance.now();
+        let items;
+        let wasCoalesced = false;
+
+        const isSingleFlightEnabled = process.env.ENABLE_INVENTORY_SINGLE_FLIGHT !== "false";
+
+        if (isSingleFlightEnabled && inFlightInventoryPromises.has(cacheKey)) {
+            inventoryCoalescedRequests++;
+            wasCoalesced = true;
+            items = await inFlightInventoryPromises.get(cacheKey);
+        } else {
+            const fetchPromise = (async () => {
+                try {
+                    inventoryCommandsStarted++;
+                    const docs = await InventoryItem.find({ userId: req.user.id })
+                        .select("_id itemName sku quantity price costPrice buyPrice category gstRate sgst cgst igst stateOfSupply lastUpdated")
+                        .sort({ lastUpdated: -1 })
+                        .lean();
+                    inventoryCommandsCompleted++;
+                    return docs;
+                } catch (err) {
+                    inventoryQueryFailures++;
+                    throw err;
+                } finally {
+                    if (isSingleFlightEnabled) {
+                        inFlightInventoryPromises.delete(cacheKey);
+                    }
+                }
+            })();
+
+            if (isSingleFlightEnabled) {
+                inFlightInventoryPromises.set(cacheKey, fetchPromise);
+            }
+            items = await fetchPromise;
+        }
+
+        const t_mongo_end = performance.now();
+
+        const t_ser_start = performance.now();
+        const jsonString = JSON.stringify(items);
+        const t_ser_end = performance.now();
+        const payload_bytes = Buffer.byteLength(jsonString, "utf8");
+
+        res.on("finish", () => {
+            const t_write_end = performance.now();
+            const t_arrival = req._t_arrival || t_inv_start;
+            const t_auth_start = req._t_auth_start || t_inv_start;
+            const t_auth_done = req._t_auth_done || t_inv_start;
+            const t_sub_start = req._t_sub_start || t_auth_done;
+            const t_sub_done = req._t_sub_done || t_sub_start;
+            const t_module_start = req._t_module_start || t_sub_done;
+            const t_module_done = req._t_module_done || t_module_start;
+
+            recordInventoryMetric({
+                req_to_auth: t_auth_start - t_arrival,
+                jwt_verify: req._t_jwt_dur || 0,
+                sub_module_middleware: (t_sub_done - t_sub_start) + (t_module_done - t_module_start),
+                routing_dispatch: t_inv_start - t_module_done,
+                pre_mongo_handler: t_mongo_start - t_inv_start,
+                mongo_query_exec: t_mongo_end - t_mongo_start,
+                post_mongo_wait: t_ser_start - t_mongo_end,
+                serialization: t_ser_end - t_ser_start,
+                write_response: t_write_end - t_ser_end,
+                total_duration: t_write_end - t_arrival,
+                payload_bytes,
+                record_count: items.length,
+                was_coalesced: wasCoalesced
+            });
+        });
 
         if (isPerfDebug) {
-            const queryDuration = (performance.now() - queryStart).toFixed(2);
-            console.log(`[PERF_DEBUG] [${corrId}] inventory GET /all Mongo query duration: ${queryDuration} ms`);
+            const queryDuration = (t_mongo_end - t_mongo_start).toFixed(2);
+            console.log(`[PERF_DEBUG] [${corrId}] inventory GET /all Mongo query duration: ${queryDuration} ms (coalesced: ${wasCoalesced})`);
 
             if (reqStartTime) {
                 const totalDuration = (performance.now() - reqStartTime).toFixed(2);
@@ -122,7 +272,8 @@ router.get("/all", verifyToken, async (req, res) => {
             }
         }
 
-        res.json(items);
+        res.setHeader("Content-Type", "application/json");
+        res.send(jsonString);
     } catch (error) {
         console.error("Error fetching inventory:", error);
         if (isPerfDebug && reqStartTime) {

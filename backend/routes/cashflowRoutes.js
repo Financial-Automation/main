@@ -21,25 +21,50 @@ const cashflowEntrySchema = new mongoose.Schema({
 
 // ✅ Add index for better query performance
 cashflowEntrySchema.index({ userId: 1, year: 1, month: 1 });
+cashflowEntrySchema.index({ userId: 1, createdAt: -1 });
 
 const CashFlowEntry = mongoose.model("CashFlowEntry", cashflowEntrySchema);
 
+// Helper to get user filter for tenant isolation
+const getUserFilter = (req) => {
+  const userIdStr = req.user?.id || req.user?._id?.toString();
+  if (!userIdStr || userIdStr === "000000000000000000000000") return { userId: null };
+  const userObjectId = mongoose.Types.ObjectId.isValid(userIdStr)
+    ? new mongoose.Types.ObjectId(userIdStr)
+    : null;
+
+  return userObjectId
+    ? { $or: [{ userId: userObjectId }, { userId: userIdStr }] }
+    : { userId: userIdStr };
+};
+
 // ✅ Middleware to verify JWT token (same as server.js)
 const verifyToken = (req, res, next) => {
+  if (req.user && (req.user.id || req.user._id) && req.user.id !== "000000000000000000000000") {
+    return next();
+  }
   const token = req.headers.authorization?.split(" ")[1];
 
-  if (!token) {
+  if (!token || token === "null" || token === "undefined") {
     return res.status(401).json({ message: "Access denied. No token provided." });
   }
 
   try {
     const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      id: decoded.id || decoded._id?.toString()
+    };
+    if (!req.user.id || req.user.id === "000000000000000000000000") {
+      return res.status(401).json({ message: "Invalid authorization token." });
+    }
     next();
   } catch (error) {
-    console.error("Token verification failed:", error.message);
-    res.status(400).json({ message: "Invalid token" });
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Token expired. Please log in again." });
+    }
+    return res.status(401).json({ message: "Invalid authorization token." });
   }
 };
 
@@ -54,9 +79,9 @@ router.post("/add", verifyToken, async (req, res) => {
     }
 
     // Parse arrays for multiple entries
-    const monthArray = Array.isArray(month) ? month : month.split(',').map(m => m.trim());
-    const inflowArray = Array.isArray(cashInflow) ? cashInflow : cashInflow.split(',').map(val => parseFloat(val.trim()) || 0);
-    const outflowArray = Array.isArray(cashOutflow) ? cashOutflow : cashOutflow.split(',').map(val => parseFloat(val.trim()) || 0);
+    const monthArray = Array.isArray(month) ? month : String(month).split(',').map(m => m.trim());
+    const inflowArray = Array.isArray(cashInflow) ? cashInflow : String(cashInflow).split(',').map(val => parseFloat(val.trim()) || 0);
+    const outflowArray = Array.isArray(cashOutflow) ? cashOutflow : String(cashOutflow).split(',').map(val => parseFloat(val.trim()) || 0);
     const descriptionArray = Array.isArray(description) ? description : [description || ""];
     const categoryArray = Array.isArray(category) ? category : [category || "General"];
 
@@ -279,6 +304,203 @@ router.delete("/delete/:id", verifyToken, async (req, res) => {
       message: "Error deleting cash flow entry",
       error: error.message 
     });
+  }
+});
+
+// ✅ CASH FLOW PLANNING & CONTROL CENTER API
+router.get("/planning", verifyToken, async (req, res) => {
+  try {
+    const userFilter = getUserFilter(req);
+    const userIdStr = req.user.id || req.user._id?.toString();
+    const userObjectId = mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
+    const windowDays = parseInt(req.query.days || "30", 10);
+
+    const now = new Date();
+    const cutoffDate = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
+
+    // Mongoose models
+    const BookkeepingEntry = mongoose.models.BookkeepingEntry || mongoose.model("BookkeepingEntry");
+    const Invoice = mongoose.models.Invoice || mongoose.model("Invoice");
+    const PurchaseInvoice = mongoose.models.PurchaseInvoice || mongoose.model("PurchaseInvoice");
+    const Payroll = mongoose.models.Payroll || mongoose.model("Payroll");
+
+    // 1. Fetch Bookkeeping entries for Current Net Cash Position & MTD Actuals
+    let currentCash = 0;
+    let actualMTDInflow = 0;
+    let actualMTDOutflow = 0;
+
+    if (BookkeepingEntry) {
+      const bkEntries = await BookkeepingEntry.find({
+        ...userFilter,
+        isDeleted: { $ne: true }
+      }).lean();
+
+      const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      bkEntries.forEach(entry => {
+        const amt = entry.amount || 0;
+        const isIncome = entry.type === "Income" || entry.type === "income";
+        const isExpense = entry.type === "Expenses" || entry.type === "Expense" || entry.type === "expense";
+
+        if (isIncome) currentCash += amt;
+        if (isExpense) currentCash -= amt;
+
+        if (entry.date && new Date(entry.date) >= startOfCurrentMonth) {
+          if (isIncome) actualMTDInflow += amt;
+          if (isExpense) actualMTDOutflow += amt;
+        }
+      });
+    }
+
+    // 2. Fetch Outstanding Sales Invoices (Expected Inflows)
+    const salesInvoices = Invoice ? await Invoice.find({
+      ...userFilter,
+      isDeleted: false,
+      paymentStatus: { $ne: "paid" }
+    }).select("invoiceNumber customerName grandTotal amountPaid balanceDue dueDate paymentStatus status").lean() : [];
+
+    let totalOverdueReceivables = 0;
+    let totalUpcomingReceivables = 0;
+    const inflowItems = [];
+
+    salesInvoices.forEach(inv => {
+      const balance = inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, (inv.grandTotal || 0) - (inv.amountPaid || 0));
+      if (balance <= 0) return;
+
+      const dueDate = inv.dueDate ? new Date(inv.dueDate) : now;
+      const isOverdue = dueDate < now;
+      const isInWindow = isOverdue || dueDate <= cutoffDate;
+
+      if (isInWindow) {
+        if (isOverdue) totalOverdueReceivables += balance;
+        else totalUpcomingReceivables += balance;
+
+        inflowItems.push({
+          id: inv._id,
+          type: "Sales Invoice",
+          referenceNo: inv.invoiceNumber,
+          partyName: inv.customerName || "Customer",
+          amount: balance,
+          dueDate: inv.dueDate,
+          status: isOverdue ? "overdue" : "expected"
+        });
+      }
+    });
+
+    // 3. Fetch Outstanding Purchase Bills (Expected Outflows)
+    const purchaseBills = PurchaseInvoice ? await PurchaseInvoice.find({
+      $or: [{ userId: userObjectId }, { userId: userIdStr }],
+      isDeleted: { $ne: true }
+    }).select("billNo supplierName total paid balance createdAt").lean() : [];
+
+    let totalOverduePayables = 0;
+    let totalUpcomingPayables = 0;
+    const outflowItems = [];
+
+    purchaseBills.forEach(bill => {
+      const balance = bill.balance !== undefined ? bill.balance : Math.max(0, (bill.total || 0) - (bill.paid || 0));
+      if (balance <= 0) return;
+
+      const billDate = bill.createdAt ? new Date(bill.createdAt) : now;
+      const dueDate = new Date(billDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const isOverdue = dueDate < now;
+      const isInWindow = isOverdue || dueDate <= cutoffDate;
+
+      if (isInWindow) {
+        if (isOverdue) totalOverduePayables += balance;
+        else totalUpcomingPayables += balance;
+
+        outflowItems.push({
+          id: bill._id,
+          type: "Purchase Bill",
+          referenceNo: bill.billNo || "PURCHASE",
+          partyName: bill.supplierName || "Supplier",
+          amount: balance,
+          dueDate,
+          status: isOverdue ? "overdue" : "expected"
+        });
+      }
+    });
+
+    // 4. Fetch Payroll Obligations
+    let payrollObligations = 0;
+    if (Payroll) {
+      const pendingPayrolls = await Payroll.find({
+        ...userFilter,
+        paymentStatus: { $ne: "Paid" }
+      }).lean();
+      payrollObligations = pendingPayrolls.reduce((sum, p) => sum + (p.netPay || p.totalSalary || 0), 0);
+
+      if (payrollObligations > 0) {
+        outflowItems.push({
+          id: "payroll_pending",
+          type: "Payroll",
+          referenceNo: "PAYROLL",
+          partyName: "Employee Salaries",
+          amount: payrollObligations,
+          dueDate: new Date(now.getFullYear(), now.getMonth() + 1, 1),
+          status: "expected"
+        });
+      }
+    }
+
+    // 5. Projected Closing Cash & Risk Status
+    const expectedInflowsTotal = totalOverdueReceivables + totalUpcomingReceivables;
+    const expectedOutflowsTotal = totalOverduePayables + totalUpcomingPayables + payrollObligations;
+    const projectedClosingCash = currentCash + expectedInflowsTotal - expectedOutflowsTotal;
+    const potentialDeficit = projectedClosingCash < 0 ? Math.abs(projectedClosingCash) : 0;
+
+    const drivers = [];
+    if (totalOverdueReceivables > 0) {
+      drivers.push(`Overdue customer receivables of ₹${totalOverdueReceivables.toLocaleString('en-IN')}`);
+    }
+    if (totalOverduePayables > 0) {
+      drivers.push(`Overdue vendor payables of ₹${totalOverduePayables.toLocaleString('en-IN')}`);
+    }
+    if (payrollObligations > 0) {
+      drivers.push(`Upcoming employee salary obligations of ₹${payrollObligations.toLocaleString('en-IN')}`);
+    }
+
+    const hasRisk = projectedClosingCash < 0 || (currentCash + expectedInflowsTotal < expectedOutflowsTotal);
+
+    res.json({
+      planningWindowDays: windowDays,
+      openingCash: currentCash,
+      currentCash,
+      actualMTD: {
+        inflow: actualMTDInflow,
+        outflow: actualMTDOutflow,
+        net: actualMTDInflow - actualMTDOutflow
+      },
+      expectedInflows: {
+        totalInWindow: expectedInflowsTotal,
+        overdue: totalOverdueReceivables,
+        upcoming: totalUpcomingReceivables,
+        count: inflowItems.length,
+        items: inflowItems.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime())
+      },
+      expectedOutflows: {
+        totalInWindow: expectedOutflowsTotal,
+        overdue: totalOverduePayables,
+        upcoming: totalUpcomingPayables,
+        payroll: payrollObligations,
+        count: outflowItems.length,
+        items: outflowItems.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime())
+      },
+      projectedClosingCash,
+      potentialDeficit,
+      riskStatus: {
+        hasRisk,
+        severity: hasRisk ? (projectedClosingCash < 0 ? "danger" : "warning") : "healthy",
+        warningMessage: hasRisk
+          ? `Potential cash flow shortage detected in the next ${windowDays} days. Projected closing cash: ₹${projectedClosingCash.toLocaleString('en-IN')}.`
+          : `Cash flow position healthy across the next ${windowDays} days.`,
+        drivers
+      }
+    });
+  } catch (error) {
+    console.error("Error generating cash flow planning data:", error);
+    res.status(500).json({ message: "Error generating cash flow planning data", error: error.message });
   }
 });
 

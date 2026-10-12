@@ -1,474 +1,637 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useEffect, useRef } from "react";
-import { VoiceButton } from "@/components/ui/VoiceButton";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+import { useSubscription } from "@/contexts/SubscriptionContext";
+import {
+  ArrowLeft,
+  BarChart3,
+  TrendingUp,
+  TrendingDown,
+  AlertTriangle,
+  CheckCircle,
+  Calendar,
+  Download,
+  Users,
+  Building2,
+  FileText,
+  BookOpen,
+  Loader2,
+  ChevronRight,
+  Sparkles,
+  DollarSign,
+  Clock,
+  ExternalLink,
+  RefreshCw,
+  Plus
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { API_ENDPOINTS, API_BASE_URL } from "@/lib/api";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ArrowLeft, Plus, BarChart3, Sparkles, Download, LineChart as LineChartIcon } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { API_BASE_URL, apiRequest } from "@/lib/api";
+import { DEFAULT_REPORT_COMPANY_NAME, getReportCompanyName } from "@/lib/reportBranding";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
-import html2canvas from "html2canvas";
-import { DEFAULT_REPORT_COMPANY_NAME, REPORT_FOOTER_COMPANY, getReportCompanyName } from "@/lib/reportBranding";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
 
-interface CashFlowEntry {
-  year: string;
-  month: string;
-  cashInflow: number;
-  cashOutflow: number;
-  netCashFlow: number;
-  time: number;
+interface MovementItem {
+  id: string;
+  type: "Sales Invoice" | "Purchase Bill" | "Payroll";
+  referenceNo: string;
+  partyName: string;
+  amount: number;
+  dueDate: string;
+  status: "overdue" | "expected";
 }
 
-interface PredictionData {
-  month: string;
-  predictedNetCashFlow: number;
-  time: number;
+interface CashFlowPlanningData {
+  planningWindowDays: number;
+  openingCash: number;
+  currentCash: number;
+  actualMTD: {
+    inflow: number;
+    outflow: number;
+    net: number;
+  };
+  expectedInflows: {
+    totalInWindow: number;
+    overdue: number;
+    upcoming: number;
+    count: number;
+    items: MovementItem[];
+  };
+  expectedOutflows: {
+    totalInWindow: number;
+    overdue: number;
+    upcoming: number;
+    payroll: number;
+    count: number;
+    items: MovementItem[];
+  };
+  projectedClosingCash: number;
+  potentialDeficit: number;
+  riskStatus: {
+    hasRisk: boolean;
+    severity: "healthy" | "warning" | "danger";
+    warningMessage: string;
+    drivers: string[];
+  };
 }
 
-const CashFlow = () => {
+export const CashFlow = () => {
   const navigate = useNavigate();
-  const chartRef = useRef<HTMLDivElement>(null);
+  const { hasAccess } = useSubscription();
 
-  const [formData, setFormData] = useState({
-    companyName: DEFAULT_REPORT_COMPANY_NAME,
-    year: "",
-    month: "",
-    cashInflow: "",
-    cashOutflow: "",
-  });
+  const [windowDays, setWindowDays] = useState<number>(30);
+  const [planningData, setPlanningData] = useState<CashFlowPlanningData | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [activeTab, setActiveTab] = useState<string>("all");
 
-  const [cashflowData, setCashflowData] = useState<CashFlowEntry[]>([]);
-  const [predictions, setPredictions] = useState<PredictionData[]>([]);
-  const [showPrediction, setShowPrediction] = useState(false);
+  const [predictData, setPredictData] = useState<any>(null);
+  const [loadingPredict, setLoadingPredict] = useState<boolean>(false);
 
-  const handleInputChange = (field: string, value: string) => {
-    setFormData((prev) => ({ ...prev, [field]: value }));
-  };
+  useEffect(() => {
+    fetchPlanningData();
+  }, [windowDays]);
 
-  const addEntry = () => {
-    if (!formData.year || !formData.month || !formData.cashInflow || !formData.cashOutflow) {
-      alert("Please fill all fields!");
-      return;
-    }
-
-    const months = formData.month.split(',').map(m => m.trim());
-    const inflows = formData.cashInflow.split(',').map(val => parseFloat(val.trim()) || 0);
-    const outflows = formData.cashOutflow.split(',').map(val => parseFloat(val.trim()) || 0);
-
-    if (months.length !== inflows.length || months.length !== outflows.length) {
-      alert("Number of months, cash inflows, and cash outflows must match!");
-      return;
-    }
-
-    const newEntries: CashFlowEntry[] = months.map((month, index) => ({
-      year: formData.year,
-      month: month,
-      cashInflow: inflows[index],
-      cashOutflow: outflows[index],
-      netCashFlow: inflows[index] - outflows[index],
-      time: cashflowData.length + index,
-    }));
-
-    setCashflowData((prev) => [...prev, ...newEntries]);
-    setFormData((prev) => ({ ...prev, year: "", month: "", cashInflow: "", cashOutflow: "" }));
-    setShowPrediction(false);
-  };
-
-  const predictCashflow = async () => {
+  const fetchPlanningData = async () => {
     try {
-      const token = localStorage.getItem("token");
-      const response = await fetch(`${API_BASE_URL}/cashflow/predict`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.hasEnoughData && data.predictions) {
-          const futurePredictions: PredictionData[] = data.predictions.map((p: any) => ({
-            month: p.month,
-            predictedNetCashFlow: p.predictedNet,
-            time: p.time
-          }));
-          setPredictions(futurePredictions);
-          setShowPrediction(true);
-          return;
-        } else {
-          alert(data.message || "Not enough historical data for reliable prediction");
-          setShowPrediction(false);
-          return;
-        }
-      }
-    } catch (e) {
-      console.error("Error fetching prediction from backend:", e);
+      setLoading(true);
+      const data = await apiRequest(`${API_BASE_URL}/api/cashflow/planning?days=${windowDays}`);
+      setPlanningData(data);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to load cash flow planning data.");
+    } finally {
+      setLoading(false);
     }
-
-    if (cashflowData.length < 2) {
-      alert("Not enough historical data for reliable prediction");
-      return;
-    }
-
-    const n = cashflowData.length;
-    const sumX = cashflowData.reduce((sum, entry) => sum + entry.time, 0);
-    const sumY = cashflowData.reduce((sum, entry) => sum + entry.netCashFlow, 0);
-    const sumXY = cashflowData.reduce((sum, entry) => sum + entry.time * entry.netCashFlow, 0);
-    const sumXX = cashflowData.reduce((sum, entry) => sum + entry.time * entry.time, 0);
-
-    const slope = (n * sumXY - sumX * sumY) / ((n * sumXX - sumX * sumX) || 1);
-    const intercept = (sumY - slope * sumX) / n;
-
-    const futurePredictions: PredictionData[] = [];
-    for (let i = 0; i < 6; i++) {
-      const futureTime = n + i;
-      const predictedValue = slope * futureTime + intercept;
-      futurePredictions.push({
-        month: `Month ${futureTime + 1}`,
-        predictedNetCashFlow: predictedValue,
-        time: futureTime,
-      });
-    }
-
-    setPredictions(futurePredictions);
-    setShowPrediction(true);
   };
 
-  const handleBackToDashboard = () => {
-    navigate("/dashboard");
+  const fetchPredictions = async () => {
+    try {
+      setLoadingPredict(true);
+      const data = await apiRequest(`${API_BASE_URL}/api/cashflow/predict`);
+      setPredictData(data);
+    } catch (error: any) {
+      toast.error(error.message || "Failed to load trend predictions.");
+    } finally {
+      setLoadingPredict(false);
+    }
   };
 
-  const downloadReport = async () => {
-    if (cashflowData.length === 0) {
-      alert("No data to download! Please add entries first.");
-      return;
-    }
+  const downloadReport = () => {
+    if (!planningData) return;
 
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
-    const pageHeight = doc.internal.pageSize.getHeight();
-    let yPosition = 20;
+    let y = 20;
 
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
-    doc.text(getReportCompanyName(formData.companyName), pageWidth / 2, yPosition, { align: "center" });
+    doc.setFontSize(14);
+    doc.text(getReportCompanyName(DEFAULT_REPORT_COMPANY_NAME), pageWidth / 2, y, { align: "center" });
 
-    yPosition += 8;
+    y += 8;
     doc.setFontSize(18);
-    doc.text("CASH FLOW ANALYSIS & PREDICTION REPORT", pageWidth / 2, yPosition, { align: "center" });
+    doc.text(`CASH FLOW PLANNING CONTROL REPORT (${windowDays}-DAY WINDOW)`, pageWidth / 2, y, { align: "center" });
 
-    yPosition += 15;
+    y += 10;
     doc.setFontSize(10);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, pageWidth / 2, yPosition, { align: "center" });
+    doc.setFont("helvetica", "normal");
+    doc.text(`Generated: ${new Date().toLocaleString()}`, pageWidth / 2, y, { align: "center" });
 
-    yPosition += 15;
-
-    if (chartRef.current) {
-      try {
-        const canvas = await html2canvas(chartRef.current, {
-          backgroundColor: "#ffffff",
-          scale: 2,
-          logging: false,
-        });
-        const imgData = canvas.toDataURL("image/png");
-        const imgWidth = pageWidth - 30;
-        const imgHeight = (canvas.height * imgWidth) / canvas.width;
-
-        doc.addImage(imgData, "PNG", 15, yPosition, imgWidth, imgHeight);
-        yPosition += imgHeight + 15;
-
-        if (yPosition > pageHeight - 60) {
-          doc.addPage();
-          yPosition = 20;
-        }
-      } catch (error) {
-        console.error("Error capturing chart:", error);
-      }
-    }
-
+    y += 15;
     doc.setFontSize(12);
-    doc.text("HISTORICAL CASH FLOW DATA", 15, yPosition);
+    doc.setFont("helvetica", "bold");
+    doc.text("EXECUTIVE CASH SUMMARY", 15, y);
 
-    yPosition += 10;
-    const historicalData = cashflowData.map((entry, index) => [
-      index + 1,
-      `${entry.month} ${entry.year}`,
-      `Rs. ${entry.cashInflow.toFixed(2)}`,
-      `Rs. ${entry.cashOutflow.toFixed(2)}`,
-      `Rs. ${entry.netCashFlow.toFixed(2)}`,
-      entry.netCashFlow >= 0 ? "Positive" : "Negative"
-    ]);
-
-    autoTable(doc, {
-      startY: yPosition,
-      head: [["#", "Period", "Cash Inflow", "Cash Outflow", "Net Cash Flow", "Status"]],
-      body: historicalData,
-      theme: "grid",
-    });
-
-    yPosition = (doc as any).lastAutoTable.finalY + 15;
-
-    if (yPosition > pageHeight - 60) {
-      doc.addPage();
-      yPosition = 20;
-    }
-
-    doc.setFontSize(12);
-    doc.text("SUMMARY STATISTICS", 15, yPosition);
-    yPosition += 8;
-
-    const totalInflow = cashflowData.reduce((sum, e) => sum + e.cashInflow, 0);
-    const totalOutflow = cashflowData.reduce((sum, e) => sum + e.cashOutflow, 0);
-    const totalNetCashFlow = cashflowData.reduce((sum, e) => sum + e.netCashFlow, 0);
-    const averageNetCashFlow = totalNetCashFlow / cashflowData.length;
-
-    const summaryData = [
-      ["Total Entries", cashflowData.length.toString()],
-      ["Total Cash Inflow", `Rs. ${totalInflow.toFixed(2)}`],
-      ["Total Cash Outflow", `Rs. ${totalOutflow.toFixed(2)}`],
-      ["Total Net Cash Flow", `Rs. ${totalNetCashFlow.toFixed(2)}`],
-      ["Average Net Cash Flow", `Rs. ${averageNetCashFlow.toFixed(2)}`],
+    y += 8;
+    const summaryRows = [
+      ["Current Cash Position", `Rs. ${planningData.currentCash.toLocaleString('en-IN')}`],
+      [`Expected Inflows (Next ${windowDays} Days)`, `Rs. ${planningData.expectedInflows.totalInWindow.toLocaleString('en-IN')}`],
+      [`Expected Outflows (Next ${windowDays} Days)`, `Rs. ${planningData.expectedOutflows.totalInWindow.toLocaleString('en-IN')}`],
+      [`Projected Closing Cash`, `Rs. ${planningData.projectedClosingCash.toLocaleString('en-IN')}`],
+      ["Potential Cash Deficit", planningData.potentialDeficit > 0 ? `Rs. ${planningData.potentialDeficit.toLocaleString('en-IN')}` : "None"],
+      ["Risk Status", planningData.riskStatus.hasRisk ? "WARNING: Cash Shortage Risk" : "HEALTHY"]
     ];
 
     autoTable(doc, {
-      startY: yPosition,
-      head: [["Metric", "Value"]],
-      body: summaryData,
-      theme: "grid",
+      startY: y,
+      head: [["Financial Metric", "Value"]],
+      body: summaryRows,
+      theme: "grid"
     });
 
-    yPosition = (doc as any).lastAutoTable.finalY + 15;
+    y = (doc as any).lastAutoTable.finalY + 15;
 
-    if (predictions.length > 0) {
-      if (yPosition > pageHeight - 60) {
-        doc.addPage();
-        yPosition = 20;
-      }
+    // Upcoming Inflows Table
+    doc.setFontSize(12);
+    doc.text(`EXPECTED INFLOWS (${planningData.expectedInflows.items.length})`, 15, y);
+    y += 8;
 
-      doc.setFontSize(12);
-      doc.text("AI-POWERED PREDICTIONS (Next 6 Months)", 15, yPosition);
-      yPosition += 8;
+    const inflowRows = planningData.expectedInflows.items.map(item => [
+      item.referenceNo,
+      item.partyName,
+      new Date(item.dueDate).toLocaleDateString(),
+      item.status.toUpperCase(),
+      `Rs. ${item.amount.toLocaleString('en-IN')}`
+    ]);
 
-      const predictionData = predictions.map((pred, index) => [
-        index + 1,
-        pred.month,
-        `Rs. ${pred.predictedNetCashFlow.toFixed(2)}`,
-        pred.predictedNetCashFlow >= 0 ? "Positive" : "Negative"
-      ]);
+    autoTable(doc, {
+      startY: y,
+      head: [["Reference", "Customer", "Due Date", "Status", "Amount"]],
+      body: inflowRows.length > 0 ? inflowRows : [["N/A", "No pending inflows", "-", "-", "Rs. 0"]],
+      theme: "grid"
+    });
 
-      autoTable(doc, {
-        startY: yPosition,
-        head: [["#", "Month", "Predicted Net Cash Flow", "Status"]],
-        body: predictionData,
-        theme: "grid",
-      });
-    }
+    y = (doc as any).lastAutoTable.finalY + 15;
 
-    const footerY = pageHeight - 12;
-    doc.setDrawColor(226, 232, 240);
-    doc.line(15, footerY - 5, pageWidth - 15, footerY - 5);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    doc.setTextColor(148, 163, 184);
-    doc.text(`Generated by ${REPORT_FOOTER_COMPANY}  |  Cash Flow Analytics Engine`, pageWidth / 2, footerY, { align: "center" });
+    // Upcoming Outflows Table
+    doc.setFontSize(12);
+    doc.text(`EXPECTED OUTFLOWS (${planningData.expectedOutflows.items.length})`, 15, y);
+    y += 8;
 
-    doc.save(`cashflow_report_${new Date().toISOString().split('T')[0]}.pdf`);
+    const outflowRows = planningData.expectedOutflows.items.map(item => [
+      item.referenceNo,
+      item.partyName,
+      new Date(item.dueDate).toLocaleDateString(),
+      item.status.toUpperCase(),
+      `Rs. ${item.amount.toLocaleString('en-IN')}`
+    ]);
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Reference", "Supplier / Type", "Due Date", "Status", "Amount"]],
+      body: outflowRows.length > 0 ? outflowRows : [["N/A", "No pending outflows", "-", "-", "Rs. 0"]],
+      theme: "grid"
+    });
+
+    doc.save(`cash_flow_plan_${windowDays}days_${Date.now()}.pdf`);
+    toast.success("Cash flow planning report downloaded.");
   };
 
-  const chartData = [
-    ...cashflowData.map((entry) => ({
-      name: entry.month,
-      actual: entry.netCashFlow,
-      time: entry.time,
-    })),
-    ...predictions.map((pred) => ({
-      name: pred.month,
-      predicted: pred.predictedNetCashFlow,
-      time: pred.time,
-    })),
-  ];
+  // Combine Movements for Display
+  const allMovements: (MovementItem & { category: "inflow" | "outflow" })[] = [];
+  if (planningData) {
+    planningData.expectedInflows.items.forEach(i => allMovements.push({ ...i, category: "inflow" }));
+    planningData.expectedOutflows.items.forEach(o => allMovements.push({ ...o, category: "outflow" }));
+    allMovements.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+  }
+
+  const filteredMovements = allMovements.filter(m => {
+    if (activeTab === "inflows") return m.category === "inflow";
+    if (activeTab === "outflows") return m.category === "outflow";
+    if (activeTab === "overdue") return m.status === "overdue";
+    return true;
+  });
+
+  // Chart Visualization Data
+  const chartData = planningData ? [
+    { name: "Current Cash", amount: planningData.currentCash },
+    { name: "Expected Inflows", amount: planningData.expectedInflows.totalInWindow },
+    { name: "Expected Outflows", amount: -planningData.expectedOutflows.totalInWindow },
+    { name: "Projected Closing", amount: planningData.projectedClosingCash }
+  ] : [];
 
   return (
-    <div className="liquid-page module-ink min-h-screen overflow-hidden text-slate-950">
-      <div className="liquid-backdrop fixed inset-0 pointer-events-none" />
-
-      <header className="sticky top-0 z-20 border-b border-white/40 bg-white/24 backdrop-blur-2xl">
-        <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between mb-4">
-            <Button
-              variant="ghost"
-              onClick={handleBackToDashboard}
-              className="rounded-full border border-white/60 bg-white/45 text-slate-700 hover:bg-white/70 hover:text-slate-950"
-            >
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Dashboard
-            </Button>
-
-            <Button
-              onClick={downloadReport}
-              className="group rounded-full bg-slate-950 font-semibold text-white shadow-[0_20px_48px_rgba(15,23,42,0.18)] transition-all duration-300 hover:-translate-y-0.5 hover:bg-slate-800"
-            >
-              <Download className="mr-2 h-5 w-5 group-hover:translate-y-1 transition-transform duration-300" />
-              Download Report
-            </Button>
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="liquid-icon flex h-16 w-16 items-center justify-center rounded-[22px]">
-              <BarChart3 className="h-8 w-8 text-slate-900" />
-            </div>
-            <div>
-              <h1 className="text-4xl font-semibold tracking-tight text-slate-950">
-                Cash Flow Forecast
-              </h1>
-              <p className="mt-1 text-slate-600">Forecast inflow and outflow with six-month clarity</p>
-            </div>
+    <div className="min-h-screen bg-slate-50 p-4 sm:p-6 lg:p-8 space-y-6">
+      
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => navigate("/dashboard")}
+            className="rounded-xl border-slate-200"
+          >
+            <ArrowLeft className="h-4 w-4 text-slate-600" />
+          </Button>
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+              <BarChart3 className="h-7 w-7 text-indigo-600" />
+              Cash Flow Planning & Financial Control Center
+            </h1>
+            <p className="text-sm text-slate-500">
+              Trace current cash, expected inflows, vendor payables & 30/60/90-day cash shortage risks.
+            </p>
           </div>
         </div>
-      </header>
 
-      <main className="relative z-10 mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-3 text-2xl font-semibold tracking-tight text-slate-950">
-                <LineChartIcon className="h-6 w-6 text-sky-700" />
-                Cash Flow Entry
+        <div className="flex items-center gap-3 w-full sm:w-auto">
+          {/* 30 / 60 / 90 Planning Window Buttons */}
+          <div className="bg-slate-200/80 p-1 rounded-xl flex items-center gap-1">
+            <Button
+              variant={windowDays === 30 ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setWindowDays(30)}
+              className={windowDays === 30 ? "bg-indigo-600 text-white rounded-lg font-semibold" : "text-slate-700 hover:text-slate-900 rounded-lg"}
+            >
+              30 Days
+            </Button>
+            <Button
+              variant={windowDays === 60 ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setWindowDays(60)}
+              className={windowDays === 60 ? "bg-indigo-600 text-white rounded-lg font-semibold" : "text-slate-700 hover:text-slate-900 rounded-lg"}
+            >
+              60 Days
+            </Button>
+            <Button
+              variant={windowDays === 90 ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setWindowDays(90)}
+              className={windowDays === 90 ? "bg-indigo-600 text-white rounded-lg font-semibold" : "text-slate-700 hover:text-slate-900 rounded-lg"}
+            >
+              90 Days
+            </Button>
+          </div>
+
+          <Button
+            onClick={downloadReport}
+            disabled={!planningData}
+            className="bg-slate-900 hover:bg-slate-800 text-white rounded-xl shadow-md gap-2"
+          >
+            <Download className="h-4 w-4" />
+            Download Plan PDF
+          </Button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="p-16 text-center text-slate-500 flex flex-col items-center gap-2">
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
+          <p>Analyzing cash flows, receivables & vendor payables...</p>
+        </div>
+      ) : planningData ? (
+        <>
+          {/* Financial Risk Warning Banner */}
+          {planningData.riskStatus.hasRisk && (
+            <Card className="rounded-2xl border-amber-300 bg-amber-50/90 shadow-sm overflow-hidden">
+              <CardContent className="p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="h-10 w-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 mt-0.5">
+                    <AlertTriangle className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-amber-900">
+                      {planningData.riskStatus.warningMessage}
+                    </h3>
+                    {planningData.riskStatus.drivers.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {planningData.riskStatus.drivers.map((driver, idx) => (
+                          <Badge key={idx} variant="outline" className="bg-white/80 border-amber-300 text-amber-900 text-xs">
+                            {driver}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 w-full md:w-auto">
+                  <Button
+                    onClick={() => navigate("/customers")}
+                    size="sm"
+                    className="bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs gap-1"
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                    Review Receivables
+                  </Button>
+                  <Button
+                    onClick={() => navigate("/vendors")}
+                    size="sm"
+                    variant="outline"
+                    className="border-amber-300 bg-white hover:bg-amber-100 text-amber-900 rounded-xl text-xs gap-1"
+                  >
+                    <Building2 className="h-3.5 w-3.5" />
+                    Review Payables
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* 4 Core Financial KPI Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            
+            {/* Opening / Current Cash */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Current Cash Balance</p>
+                  <h3 className="text-2xl font-bold text-slate-900 mt-1">
+                    ₹{planningData.currentCash.toLocaleString('en-IN')}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">Actual cash/bank on hand</p>
+                </div>
+                <div className="h-12 w-12 rounded-2xl bg-indigo-50 flex items-center justify-center text-indigo-600">
+                  <DollarSign className="h-6 w-6" />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Expected Inflows */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Expected Inflows ({windowDays}D)
+                  </p>
+                  <h3 className="text-2xl font-bold text-emerald-600 mt-1">
+                    + ₹{planningData.expectedInflows.totalInWindow.toLocaleString('en-IN')}
+                  </h3>
+                  <p className="text-xs text-amber-600 font-medium mt-0.5">
+                    ₹{planningData.expectedInflows.overdue.toLocaleString('en-IN')} overdue
+                  </p>
+                </div>
+                <div className="h-12 w-12 rounded-2xl bg-emerald-50 flex items-center justify-center text-emerald-600">
+                  <TrendingUp className="h-6 w-6" />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Expected Outflows */}
+            <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Expected Outflows ({windowDays}D)
+                  </p>
+                  <h3 className="text-2xl font-bold text-red-600 mt-1">
+                    - ₹{planningData.expectedOutflows.totalInWindow.toLocaleString('en-IN')}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Payables & payroll due
+                  </p>
+                </div>
+                <div className="h-12 w-12 rounded-2xl bg-red-50 flex items-center justify-center text-red-600">
+                  <TrendingDown className="h-6 w-6" />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Projected Closing Cash */}
+            <Card className={`rounded-2xl shadow-sm bg-white border ${planningData.projectedClosingCash < 0 ? 'border-red-300' : 'border-slate-200'}`}>
+              <CardContent className="p-5 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Projected Closing ({windowDays}D)
+                  </p>
+                  <h3 className={`text-2xl font-bold mt-1 ${planningData.projectedClosingCash < 0 ? 'text-red-600' : 'text-slate-900'}`}>
+                    ₹{planningData.projectedClosingCash.toLocaleString('en-IN')}
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    {planningData.potentialDeficit > 0 ? `Deficit: ₹${planningData.potentialDeficit.toLocaleString('en-IN')}` : 'Healthy positive balance'}
+                  </p>
+                </div>
+                <div className={`h-12 w-12 rounded-2xl flex items-center justify-center ${planningData.projectedClosingCash < 0 ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>
+                  {planningData.projectedClosingCash < 0 ? <AlertTriangle className="h-6 w-6" /> : <CheckCircle className="h-6 w-6" />}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Action Center Row */}
+          <Card className="rounded-2xl border-slate-200 shadow-sm bg-white">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-150 px-6 py-4">
+              <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-indigo-600" />
+                Financial Action Center: What Should You Do Today?
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="space-y-3">
-                <Label className="font-semibold text-slate-700">Enter Your Company Name</Label>
-                <Input
-                  placeholder="Enter your company name"
-                  value={formData.companyName}
-                  onChange={(e) => handleInputChange("companyName", e.target.value)}
-                  className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:ring-0"
-                />
-              </div>
-
-              <div className="space-y-3">
-                <Label className="font-semibold text-slate-700">Year</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    placeholder="e.g., 2025"
-                    value={formData.year}
-                    onChange={(e) => handleInputChange("year", e.target.value)}
-                    className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:ring-0"
-                  />
-                  <VoiceButton
-                    onTranscript={(text) => handleInputChange("year", text)}
-                    onClear={() => handleInputChange("year", "")}
-                  />
+            <CardContent className="p-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-slate-100/60 transition-colors flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-indigo-600 font-semibold text-sm">
+                      <Users className="h-4 w-4" />
+                      Follow Up Customer Receivables
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {planningData.expectedInflows.count} open customer invoice(s) due for collection.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => navigate("/customers")}
+                    variant="outline"
+                    size="sm"
+                    className="mt-4 rounded-xl text-xs w-full justify-between"
+                  >
+                    <span>View Customer Profiles</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
-              </div>
 
-              <div className="space-y-3">
-                <Label className="font-semibold text-slate-700">Month</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    placeholder="e.g., Jan,Feb,Mar"
-                    value={formData.month}
-                    onChange={(e) => handleInputChange("month", e.target.value)}
-                    className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:ring-0"
-                  />
-                  <VoiceButton
-                    onTranscript={(text) => handleInputChange("month", text)}
-                    onClear={() => handleInputChange("month", "")}
-                  />
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-slate-100/60 transition-colors flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-amber-600 font-semibold text-sm">
+                      <Building2 className="h-4 w-4" />
+                      Vendor Payables Schedule
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {planningData.expectedOutflows.count} supplier bill(s) pending payment.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => navigate("/vendors")}
+                    variant="outline"
+                    size="sm"
+                    className="mt-4 rounded-xl text-xs w-full justify-between"
+                  >
+                    <span>View Vendor Payables</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
-              </div>
 
-              <div className="space-y-3">
-                <Label className="font-semibold text-slate-700">Cash Inflow (₹)</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    placeholder="e.g., 5000,4800,5100"
-                    value={formData.cashInflow}
-                    onChange={(e) => handleInputChange("cashInflow", e.target.value)}
-                    className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:ring-0"
-                  />
-                  <VoiceButton
-                    onTranscript={(text) => handleInputChange("cashInflow", text)}
-                    onClear={() => handleInputChange("cashInflow", "")}
-                  />
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-slate-100/60 transition-colors flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-blue-600 font-semibold text-sm">
+                      <FileText className="h-4 w-4" />
+                      Invoice Management
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Create new invoices or record partial payments.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => navigate("/invoice")}
+                    variant="outline"
+                    size="sm"
+                    className="mt-4 rounded-xl text-xs w-full justify-between"
+                  >
+                    <span>Open Invoice Module</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
-              </div>
 
-              <div className="space-y-3">
-                <Label className="font-semibold text-slate-700">Cash Outflow (₹)</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    placeholder="e.g., 7000,6500,5900"
-                    value={formData.cashOutflow}
-                    onChange={(e) => handleInputChange("cashOutflow", e.target.value)}
-                    className="h-12 rounded-[18px] border-slate-200 bg-white/80 text-slate-900 focus:ring-0"
-                  />
-                  <VoiceButton
-                    onTranscript={(text) => handleInputChange("cashOutflow", text)}
-                    onClear={() => handleInputChange("cashOutflow", "")}
-                  />
+                <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-slate-100/60 transition-colors flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 text-emerald-600 font-semibold text-sm">
+                      <BookOpen className="h-4 w-4" />
+                      Bookkeeping Audit
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Verify categorized expenses & cash entries.
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => navigate("/bookkeeping")}
+                    variant="outline"
+                    size="sm"
+                    className="mt-4 rounded-xl text-xs w-full justify-between"
+                  >
+                    <span>Open Bookkeeping</span>
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
-              </div>
 
-              <div className="flex gap-4 pt-4">
-                <Button onClick={addEntry} className="flex-1 h-12 bg-green-600 hover:bg-green-500 text-white font-bold rounded-xl shadow-2xl transition-all duration-300">
-                  <Plus className="mr-2 h-5 w-5" /> Add Entry
-                </Button>
-                <Button onClick={predictCashflow} className="flex-1 h-12 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-xl shadow-2xl transition-all duration-300">
-                  <BarChart3 className="mr-2 h-5 w-5" /> Predict
-                </Button>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="backdrop-blur-2xl bg-white/10 border border-blue-400/20 shadow-2xl rounded-3xl p-6 max-h-[500px] overflow-y-auto">
-            <h3 className="text-2xl font-black text-blue-100 mb-4">Current Entries ({cashflowData.length})</h3>
-            {cashflowData.length === 0 ? (
-              <p className="text-blue-300/60 text-center py-8">No entries yet.</p>
-            ) : (
-              <div className="space-y-3">
-                {cashflowData.map((entry, index) => (
-                  <div key={index} className="bg-white/5 border border-blue-400/20 rounded-xl p-4">
-                    <div className="flex justify-between font-bold text-cyan-400 mb-1">
-                      <span>{entry.month} {entry.year}</span>
-                      <span className={entry.netCashFlow >= 0 ? 'text-green-400' : 'text-red-400'}>₹{entry.netCashFlow.toFixed(2)}</span>
-                    </div>
-                  </div>
-                ))}
+          {/* Tabbed Movements Timeline Table */}
+          <Card className="rounded-2xl border-slate-200 shadow-sm bg-white overflow-hidden">
+            <CardHeader className="bg-slate-50/50 border-b border-slate-150 px-6 py-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <CardTitle className="text-base font-semibold text-slate-900">
+                  Upcoming Cash Movements Timeline ({filteredMovements.length})
+                </CardTitle>
+                <CardDescription>
+                  Inflows & outflows due within the next {windowDays} days.
+                </CardDescription>
               </div>
-            )}
-          </Card>
-        </div>
 
-        {showPrediction && predictions.length > 0 && (
-          <Card className="mt-8 backdrop-blur-2xl bg-gradient-to-br from-slate-800/90 via-blue-900/80 to-indigo-900/90 border-2 border-cyan-400/60 shadow-2xl rounded-3xl p-8">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-3xl font-black text-blue-100">AI Prediction Results</h3>
-              <div className="px-4 py-2 bg-yellow-400/20 border border-yellow-400/50 rounded-full text-yellow-100 font-bold flex items-center gap-2">
-                <Sparkles className="h-4 w-4" /> AI Powered
-              </div>
-            </div>
-            <div ref={chartRef} className="bg-white rounded-xl p-4">
-              <ResponsiveContainer width="100%" height={400}>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Line type="monotone" dataKey="actual" stroke="#06b6d4" strokeWidth={3} name="Actual" />
-                  <Line type="monotone" dataKey="predicted" stroke="#f59e0b" strokeWidth={3} strokeDasharray="5 5" name="Predicted" />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
+              <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full sm:w-auto">
+                <TabsList className="rounded-xl bg-slate-200/80 p-1 grid grid-cols-4 w-full sm:w-80">
+                  <TabsTrigger value="all" className="rounded-lg text-xs font-semibold">All</TabsTrigger>
+                  <TabsTrigger value="inflows" className="rounded-lg text-xs font-semibold">Inflows</TabsTrigger>
+                  <TabsTrigger value="outflows" className="rounded-lg text-xs font-semibold">Outflows</TabsTrigger>
+                  <TabsTrigger value="overdue" className="rounded-lg text-xs font-semibold">Overdue</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </CardHeader>
+            <CardContent className="p-0">
+              {filteredMovements.length === 0 ? (
+                <div className="p-12 text-center text-slate-500 space-y-2">
+                  <Clock className="h-8 w-8 text-slate-400 mx-auto" />
+                  <p className="font-semibold text-slate-900">No Cash Movements Found</p>
+                  <p className="text-xs text-slate-500">No expected transactions for the selected filter and timeframe.</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-50 text-slate-600 uppercase text-xs font-semibold tracking-wider border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-3.5">Type & Reference</th>
+                        <th className="px-6 py-3.5">Party / Category</th>
+                        <th className="px-6 py-3.5">Due Date</th>
+                        <th className="px-6 py-3.5">Status</th>
+                        <th className="px-6 py-3.5 text-right">Amount</th>
+                        <th className="px-6 py-3.5 text-center">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-150 text-slate-800">
+                      {filteredMovements.map((item, idx) => (
+                        <tr key={idx} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="font-semibold text-slate-900">{item.type}</div>
+                            <div className="text-xs font-mono text-slate-500">{item.referenceNo}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="font-medium text-slate-900">{item.partyName}</div>
+                          </td>
+                          <td className="px-6 py-4 text-xs text-slate-600">
+                            {new Date(item.dueDate).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                          </td>
+                          <td className="px-6 py-4">
+                            {item.status === "overdue" ? (
+                              <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100 border-none">
+                                Overdue
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline" className="border-slate-300 text-slate-700">
+                                Expected
+                              </Badge>
+                            )}
+                          </td>
+                          <td className={`px-6 py-4 text-right font-semibold ${item.category === 'inflow' ? 'text-emerald-600' : 'text-red-600'}`}>
+                            {item.category === 'inflow' ? '+' : '-'} ₹{item.amount.toLocaleString('en-IN')}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            {item.category === 'inflow' ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => navigate("/customers")}
+                                className="h-8 text-xs text-indigo-600 hover:bg-indigo-50 rounded-lg gap-1"
+                              >
+                                View Customer
+                                <ExternalLink className="h-3 w-3" />
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => navigate("/vendors")}
+                                className="h-8 text-xs text-amber-600 hover:bg-amber-50 rounded-lg gap-1"
+                              >
+                                View Vendor
+                                <ExternalLink className="h-3 w-3" />
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
           </Card>
-        )}
-        <div className="mt-8 text-center pb-8">
-            <p className="text-slate-500 text-sm backdrop-blur-md inline-block px-6 py-2 rounded-full border border-white/40">
-                Powered by SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED ✨
-            </p>
-        </div>
-      </main>
+        </>
+      ) : null}
+
     </div>
   );
 };

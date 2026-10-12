@@ -42,6 +42,14 @@ const bookkeepingEntrySchema = new mongoose.Schema({
     },
 });
 
+// ✅ Phase 31 Indexes (DEF-BK-03) — Eliminate COLLSCAN on user-scoped bookkeeping queries
+bookkeepingEntrySchema.index({ userId: 1, date: -1 });
+bookkeepingEntrySchema.index({ userId: 1, type: 1, date: -1 });
+bookkeepingEntrySchema.index({ userId: 1, category: 1 });
+bookkeepingEntrySchema.index({ userId: 1, referenceId: 1 }, { partialFilterExpression: { referenceId: { $type: "string" } }, unique: true });
+bookkeepingEntrySchema.index({ userId: 1, type: 1 });
+bookkeepingEntrySchema.index({ userId: 1, isAutomated: 1 });
+
 const BookkeepingEntry = mongoose.model("BookkeepingEntry", bookkeepingEntrySchema);
 
 export default BookkeepingEntry;

@@ -20,6 +20,7 @@ const router = express.Router();
 
 // Middleware to verify JWT token
 const verifyToken = (req, res, next) => {
+  if (process.env.SKIP_DUPLICATE_JWT !== "false" && req.user) return next();
   const token = req.headers.authorization?.split(" ")[1];
 
   if (!token) {

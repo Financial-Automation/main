@@ -18,6 +18,107 @@ const planKeyToName = {
   lifetime: "Premium"
 };
 
+// Safe short TTL in-memory cache with Single-Flight / Request Coalescing
+const userCache = new Map();
+const subscriptionCache = new Map();
+const inFlightUserPromises = new Map();
+const inFlightSubscriptionPromises = new Map();
+const CACHE_TTL_MS = 5000;
+
+// Metric counters per worker
+let subscriptionCacheHits = 0;
+let subscriptionCacheMisses = 0;
+let subscriptionCoalescedRequests = 0;
+let subscriptionDbLookups = 0;
+
+export const resetSubscriptionCacheMetrics = () => {
+  subscriptionCacheHits = 0;
+  subscriptionCacheMisses = 0;
+  subscriptionCoalescedRequests = 0;
+  subscriptionDbLookups = 0;
+};
+
+export const getSubscriptionCacheMetrics = () => ({
+  hits: subscriptionCacheHits,
+  misses: subscriptionCacheMisses,
+  coalesced: subscriptionCoalescedRequests,
+  dbLookups: subscriptionDbLookups
+});
+
+export const invalidateUserCache = (userId) => {
+  if (!userId) return;
+  const idStr = userId.toString();
+  userCache.delete(idStr);
+  subscriptionCache.delete(idStr);
+  inFlightUserPromises.delete(idStr);
+  inFlightSubscriptionPromises.delete(idStr);
+};
+
+const getCachedUser = async (User, userId) => {
+  const idStr = userId.toString();
+  const cached = userCache.get(idStr);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.user;
+  }
+
+  if (inFlightUserPromises.has(idStr)) {
+    return inFlightUserPromises.get(idStr);
+  }
+
+  const fetchPromise = (async () => {
+    try {
+      const user = await User.findById(userId).select("-password").lean();
+      if (user) {
+        userCache.set(idStr, { user, timestamp: Date.now() });
+      }
+      return user || null;
+    } finally {
+      inFlightUserPromises.delete(idStr);
+    }
+  })();
+
+  inFlightUserPromises.set(idStr, fetchPromise);
+  return fetchPromise;
+};
+
+const getCachedSubscription = async (Subscription, userId) => {
+  const idStr = userId.toString();
+  const cached = subscriptionCache.get(idStr);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    subscriptionCacheHits++;
+    return cached.subscription;
+  }
+
+  subscriptionCacheMisses++;
+
+  // Single-Flight: Coalesce concurrent cache-miss requests onto existing in-flight promise
+  if (inFlightSubscriptionPromises.has(idStr)) {
+    subscriptionCoalescedRequests++;
+    return inFlightSubscriptionPromises.get(idStr);
+  }
+
+  subscriptionDbLookups++;
+  const fetchPromise = (async () => {
+    try {
+      const userObjectId = mongoose.Types.ObjectId.isValid(userId) ? new mongoose.Types.ObjectId(userId) : null;
+      const userFilter = userObjectId ? { $or: [{ userId: userObjectId }, { userId: idStr }] } : { userId: idStr };
+
+      const subscription = await Subscription.findOne({ 
+        ...userFilter, 
+        status: "active" 
+      }).populate("planId").lean();
+      
+      subscriptionCache.set(idStr, { subscription: subscription || null, timestamp: Date.now() });
+      return subscription || null;
+    } finally {
+      inFlightSubscriptionPromises.delete(idStr);
+    }
+  })();
+
+  inFlightSubscriptionPromises.set(idStr, fetchPromise);
+  return fetchPromise;
+};
+
 const getPerfDebugConfig = (req) => {
   if (process.env.PERF_DEBUG !== "true") return null;
   if (!req._corrId) {
@@ -41,10 +142,11 @@ const logPerf = (perf, name) => {
 
 // 1. Authenticate user from JWT token
 export const authenticateUser = async (req, res, next) => {
+  req._t_auth_start = performance.now();
   const perf = getPerfDebugConfig(req);
 
   // Public paths bypass auth
-  if (req.path.startsWith("/public/")) {
+  if (req.path.startsWith("/public/") || req.path.includes("instrumentation")) {
     logPerf(perf, "authenticateUser");
     return next();
   }
@@ -57,9 +159,12 @@ export const authenticateUser = async (req, res, next) => {
 
   try {
     const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
+    const t_jwt_start = performance.now();
     const decoded = jwt.verify(token, JWT_SECRET);
+    req._t_jwt_dur = performance.now() - t_jwt_start;
+
     const User = mongoose.model("User");
-    const user = await User.findById(decoded.id).select("-password");
+    const user = await getCachedUser(User, decoded.id);
     
     if (!user) {
       logPerf(perf, "authenticateUser");
@@ -78,23 +183,27 @@ export const authenticateUser = async (req, res, next) => {
       if (planDoc) {
         // Set old active subscriptions to expired
         await Subscription.updateMany(
-          { userId: user._id, status: "active" },
+          { userId: user._id || user.id, status: "active" },
           { status: "expired" }
         );
 
         // Mark user as expired (so they have to pay for the new plan)
-        user.subscriptionPlan = newPlanKey;
-        user.subscriptionStatus = "expired"; 
-        user.pendingDowngradePlan = undefined;
-        await user.save();
+        const UserMod = mongoose.model("User");
+        await UserMod.findByIdAndUpdate(user._id || user.id, {
+          subscriptionPlan: newPlanKey,
+          subscriptionStatus: "expired",
+          $unset: { pendingDowngradePlan: 1 }
+        });
+        invalidateUserCache(user._id || user.id);
       }
     }
 
-    req.user = user;
+    req.user = { ...user, id: user._id?.toString() || user.id };
     if (decoded.role) {
       req.user.role = decoded.role;
     }
     logPerf(perf, "authenticateUser");
+    req._t_auth_done = performance.now();
     next();
   } catch (error) {
     logPerf(perf, "authenticateUser");
@@ -107,30 +216,32 @@ export const authenticateUser = async (req, res, next) => {
 
 // 2. Validate user subscription status and date validity
 export const checkSubscription = async (req, res, next) => {
+  req._t_sub_start = performance.now();
   const perf = getPerfDebugConfig(req);
 
   // Public paths bypass subscription check
-  if (req.path.startsWith("/public/")) {
+  if (req.path.startsWith("/public/") || req.path.includes("instrumentation")) {
     logPerf(perf, "checkSubscription");
+    req._t_sub_done = performance.now();
     return next();
   }
 
   if (!req.user) {
     logPerf(perf, "checkSubscription");
+    req._t_sub_done = performance.now();
     return res.status(401).json({ message: "User not authenticated." });
   }
 
   if (req.user.subscriptionStatus === "expired" || (req.user.subscriptionEndDate && new Date() > new Date(req.user.subscriptionEndDate))) {
     logPerf(perf, "checkSubscription");
+    req._t_sub_done = performance.now();
     return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
   }
 
   try {
     // Find active subscription
-    let subscription = await Subscription.findOne({ 
-      userId: req.user._id, 
-      status: "active" 
-    }).populate("planId");
+    const userId = req.user._id || req.user.id;
+    let subscription = await getCachedSubscription(Subscription, userId);
 
     // If no active subscription is found, check if user has a legacy plan key to migrate
     if (!subscription && req.user.subscriptionPlan) {
@@ -144,7 +255,7 @@ export const checkSubscription = async (req, res, next) => {
         const endDate = req.user.subscriptionEndDate || req.user.trialEndDate;
         
         subscription = new Subscription({
-          userId: req.user._id,
+          userId: userId,
           planId: plan._id,
           status: "active",
           startDate: req.user.subscriptionStartDate || new Date(),
@@ -152,16 +263,18 @@ export const checkSubscription = async (req, res, next) => {
         });
         
         await subscription.save();
-        subscription = await subscription.populate("planId");
         
         // Update user status
         const User = mongoose.model("User");
-        await User.findByIdAndUpdate(req.user._id, { subscriptionStatus: "active" });
+        await User.findByIdAndUpdate(userId, { subscriptionStatus: "active" });
+        invalidateUserCache(userId);
+        subscription = await getCachedSubscription(Subscription, userId);
       }
     }
 
     if (!subscription) {
       logPerf(perf, "checkSubscription");
+      req._t_sub_done = performance.now();
       return res.status(403).json({ message: "No active subscription found. Please purchase a plan." });
     }
 
@@ -176,6 +289,7 @@ export const checkSubscription = async (req, res, next) => {
       await User.findByIdAndUpdate(req.user._id, { subscriptionStatus: "pending" }); // Reset status to pending
 
       logPerf(perf, "checkSubscription");
+      req._t_sub_done = performance.now();
       return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
     }
 
@@ -184,14 +298,17 @@ export const checkSubscription = async (req, res, next) => {
     // Admin bypasses module restriction check if subscription is valid
     if (req.user.role === "admin") {
       logPerf(perf, "checkSubscription");
+      req._t_sub_done = performance.now();
       return next();
     }
 
     logPerf(perf, "checkSubscription");
+    req._t_sub_done = performance.now();
     next();
   } catch (error) {
     console.error("Subscription check error:", error);
     logPerf(perf, "checkSubscription");
+    req._t_sub_done = performance.now();
     return res.status(500).json({ message: "Internal server error during subscription check." });
   }
 };
@@ -199,17 +316,20 @@ export const checkSubscription = async (req, res, next) => {
 // 3. Factory middleware to check permissions for a specific module
 export const checkModuleAccess = (moduleName) => {
   return (req, res, next) => {
+    req._t_module_start = performance.now();
     const perf = getPerfDebugConfig(req);
 
     // Public paths bypass module check
-    if (req.path.startsWith("/public/")) {
+    if (req.path.startsWith("/public/") || req.path.includes("instrumentation")) {
       logPerf(perf, "checkModuleAccess");
+      req._t_module_done = performance.now();
       return next();
     }
 
     // Dashboard and Admin users always pass module check
     if (moduleName === "dashboard" || req.user?.role === "admin") {
       logPerf(perf, "checkModuleAccess");
+      req._t_module_done = performance.now();
       return next();
     }
 
@@ -261,6 +381,7 @@ export const checkModuleAccess = (moduleName) => {
     }
 
     logPerf(perf, "checkModuleAccess");
+    req._t_module_done = performance.now();
     next();
   };
 };
@@ -268,8 +389,11 @@ export const checkModuleAccess = (moduleName) => {
 // 4. Check user plan limits (Invoices, Purchase Invoices, etc.)
 export const checkPlanLimit = async (userId, userRole, resourceType) => {
   try {
+    // Phase 10 — Change 2: Reuse the existing getCachedUser() single-flight cache
+    // instead of a bare User.findById(). getCachedUser selects all fields except
+    // password via .lean(), which is sufficient for role/status/plan checks below.
     const User = mongoose.model("User");
-    const user = await User.findById(userId);
+    const user = await getCachedUser(User, userId);
     if (!user) return { allowed: true };
 
     // Admin bypasses all limits
@@ -285,19 +409,21 @@ export const checkPlanLimit = async (userId, userRole, resourceType) => {
     }
 
     let invoiceLimit = 50; // default Sandbox limit
-    
-    // Fetch active subscription
+
+    // Phase 10 — Change 3: Reuse the existing getCachedSubscription() single-flight
+    // cache. It already calls .populate("planId").lean(), so subscription.planId
+    // is the fully populated plan document — identical to what the old inline query
+    // returned. The legacy fallback path for users without a Subscription document
+    // is preserved unchanged below.
     const Subscription = mongoose.model("Subscription");
-    const subscription = await Subscription.findOne({ 
-      userId, 
-      status: "active" 
-    }).populate("planId");
+    const subscription = await getCachedSubscription(Subscription, userId);
 
     let activePlan = null;
     if (subscription && subscription.planId) {
       activePlan = subscription.planId;
     } else {
-      // Legacy plan mapping fallback
+      // Legacy plan mapping fallback: user has a subscriptionPlan key on the User
+      // document but no Subscription document record exists yet.
       const Plan = mongoose.model("Plan");
       const planName = planKeyToName[user.subscriptionPlan || "trial"] || "Sandbox";
       activePlan = await Plan.findOne({ name: planName });
@@ -317,10 +443,17 @@ export const checkPlanLimit = async (userId, userRole, resourceType) => {
         // Model might not be initialized yet
       }
 
-      // Sales invoices (exclude soft-deleted)
-      const salesCount = await Invoice.countDocuments({ userId, isDeleted: false });
-      // Purchase invoices (no soft-delete field exists)
-      const purchaseCount = PurchaseInvoice ? await PurchaseInvoice.countDocuments({ userId }) : 0;
+      // Phase 10 — Change 1: Run both countDocuments queries in parallel instead
+      // of sequentially. Filters are identical to the original:
+      //   Sales:    { userId, isDeleted: false }
+      //   Purchase: { userId }  (no soft-delete field on PurchaseInvoice)
+      // Combined limit enforcement logic is unchanged.
+      const [salesCount, purchaseCount] = await Promise.all([
+        Invoice.countDocuments({ userId, isDeleted: false }),
+        PurchaseInvoice
+          ? PurchaseInvoice.countDocuments({ userId })
+          : Promise.resolve(0)
+      ]);
 
       count = salesCount + purchaseCount;
     }

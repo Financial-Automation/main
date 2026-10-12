@@ -595,6 +595,51 @@ const FinancialRatios = () => {
                           ))}
                         </div>
 
+                        {/* Plain-English Business Insights & Interpretation */}
+                        <div className="p-5 bg-slate-900/90 rounded-2xl border border-slate-700 text-left mb-8 space-y-3">
+                          <h4 className="font-bold text-sky-400 text-sm uppercase tracking-wider flex items-center gap-2">
+                            💡 Plain-English Business Health Analysis
+                          </h4>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs sm:text-sm text-slate-200">
+                            <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700">
+                              <strong className="text-white block mb-1">Liquidity Status:</strong>
+                              {(calculatedRatios.currentRatio || 0) >= 1.5 ? (
+                                <span className="text-emerald-400 font-semibold">✅ Liquidity is healthy — current assets comfortably cover short-term obligations.</span>
+                              ) : (calculatedRatios.currentRatio || 0) >= 1.0 ? (
+                                <span className="text-amber-400 font-semibold">⚠️ Liquidity is adequate — monitor short-term cash demands closely.</span>
+                              ) : (
+                                <span className="text-rose-400 font-semibold">🚨 Liquidity Warning — short-term liabilities exceed liquid assets.</span>
+                              )}
+                            </div>
+                            <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700">
+                              <strong className="text-white block mb-1">Solvency & Debt Leverage:</strong>
+                              {(calculatedRatios.debtToEquity || 0) <= 1.5 ? (
+                                <span className="text-emerald-400 font-semibold">✅ Solvency is strong — debt is well balanced against equity capital.</span>
+                              ) : (
+                                <span className="text-rose-400 font-semibold">⚠️ High debt leverage — monitor interest obligations and debt service.</span>
+                              )}
+                            </div>
+                            <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700">
+                              <strong className="text-white block mb-1">Profitability & Margin:</strong>
+                              {(calculatedRatios.netProfitMargin || 0) >= 15 ? (
+                                <span className="text-emerald-400 font-semibold">🎉 Strong profitability — net margin above 15% demonstrates effective pricing.</span>
+                              ) : (calculatedRatios.netProfitMargin || 0) >= 5 ? (
+                                <span className="text-amber-400 font-semibold">📊 Moderate profit margin — operating overhead is under control.</span>
+                              ) : (
+                                <span className="text-rose-400 font-semibold">⚠️ Low net margin — review operating expenses and pricing structure.</span>
+                              )}
+                            </div>
+                            <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700">
+                              <strong className="text-white block mb-1">Return on Equity (ROE):</strong>
+                              {(calculatedRatios.roe || 0) >= 15 ? (
+                                <span className="text-emerald-400 font-semibold">🌟 Excellent ROE — high return generated on invested equity capital.</span>
+                              ) : (
+                                <span className="text-slate-300 font-semibold">📈 Moderate ROE — scope for optimizing equity asset utilization.</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
                         {/* Action Buttons */}
                         <div className="flex gap-4 justify-center">
                           <Button
