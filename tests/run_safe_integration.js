@@ -13,6 +13,7 @@ import { runFinancialRegression } from "./golden-flow/07_financial.test.js";
 import { runDataIsolationRegression } from "./golden-flow/08_data_isolation.test.js";
 import { runSubscriptionPlanRegression } from "./golden-flow/09_plan.test.js";
 import { runGoldenSmokeTest } from "./golden-flow/10_golden_smoke.test.js";
+import { runPurchaseDraftAndPaymentAuthRegression } from "./golden-flow/11_purchase_draft_and_payment_auth.test.js";
 
 const TARGET_PORT = 5001;
 const HEALTH_URL = `http://localhost:${TARGET_PORT}/api/health`;
@@ -80,6 +81,7 @@ async function main() {
     { id: "08_data_isolation", name: "08_data_isolation (Multi-Tenant Company Data Isolation)", fn: runDataIsolationRegression },
     { id: "09_plan", name: "09_plan (Subscription Plan Enforcement)", fn: runSubscriptionPlanRegression },
     { id: "10_golden_smoke", name: "10_golden_smoke (End-to-End Golden Smoke Test)", fn: runGoldenSmokeTest },
+    { id: "11_purchase_draft_and_payment_auth", name: "11_purchase_draft_and_payment_auth (Purchase Draft & Payment Auth)", fn: runPurchaseDraftAndPaymentAuthRegression },
   ];
 
   const isSmokeOnly = process.argv.includes("--smoke");
