@@ -3,6 +3,8 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import { checkPlanLimit } from "../utils/authMiddleware.js";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
+import User from "../models/User.js";
+import Vendor from "../models/Vendor.js";
 
 const router = express.Router();
 
@@ -56,6 +58,7 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     totalTax: { type: Number, default: 0 },
     total: { type: Number, default: 0 },
     paid: { type: Number, default: 0 },
+    balance: { type: Number, default: 0 },
     bankName: { type: String, default: "" },
     accountType: { type: String, default: "Current" },
     accountNumber: { type: String, default: "" },
@@ -63,13 +66,44 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     authorisedSignature: { type: String, default: "" },
     templateId: { type: String, default: "" },
     templateSnapshot: { type: Object, default: null },
+    status: { type: String, enum: ["draft", "completed", "paid", "cancelled"], default: "completed" },
     createdAt: { type: Date, default: Date.now },
 });
 
-const PurchaseInvoice = mongoose.model("PurchaseInvoice", purchaseInvoiceSchema);
+const PurchaseInvoice = mongoose.models.PurchaseInvoice || mongoose.model("PurchaseInvoice", purchaseInvoiceSchema);
 
 // Get the InventoryItem model (already registered by inventoryRoutes)
 const getInventoryModel = () => mongoose.model("InventoryItem");
+
+// Helper to enrich purchase invoice with default bank details from user if missing
+const enrichInvoiceWithBankDetails = async (invoice) => {
+    if (!invoice) return invoice;
+    const invObj = typeof invoice.toObject === "function" ? invoice.toObject() : { ...invoice };
+    
+    // Check if bank details are missing
+    if (!invObj.bankName || !invObj.accountNumber || !invObj.ifscCode) {
+        try {
+            const user = invObj.userId ? await User.findById(invObj.userId) : null;
+            if (user) {
+                invObj.bankName = invObj.bankName || user.bankName || "ABC Bank";
+                invObj.accountType = invObj.accountType || user.accountType || "Current";
+                invObj.accountNumber = invObj.accountNumber || user.accountNumber || "123456789012";
+                invObj.ifscCode = invObj.ifscCode || user.ifscCode || "ABCD0001234";
+                invObj.authorisedSignature = invObj.authorisedSignature || user.authorisedSignature || "Store Manager";
+            }
+        } catch (e) {
+            console.error("Error enriching bank details:", e);
+        }
+    }
+    
+    // Ensure default bank info if still blank
+    if (!invObj.bankName) invObj.bankName = "ABC Bank";
+    if (!invObj.accountType) invObj.accountType = "Current";
+    if (!invObj.accountNumber) invObj.accountNumber = "123456789012";
+    if (!invObj.ifscCode) invObj.ifscCode = "ABCD0001234";
+    
+    return invObj;
+};
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
@@ -95,7 +129,8 @@ router.get("/public/:id", async (req, res) => {
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
-        res.json(invoice);
+        const enriched = await enrichInvoiceWithBankDetails(invoice);
+        res.json(enriched);
     } catch (error) {
         console.error("Error fetching public purchase invoice:", error);
         res.status(500).json({ message: "Error fetching purchase invoice" });
@@ -110,6 +145,16 @@ router.post("/create", verifyToken, async (req, res) => {
             return res.status(403).json(limitCheck);
         }
         const invoiceData = req.body;
+        
+        // Auto-fetch default bank details if missing
+        const user = await User.findById(req.user.id);
+        if (user) {
+            if (!invoiceData.bankName) invoiceData.bankName = user.bankName || "ABC Bank";
+            if (!invoiceData.accountType) invoiceData.accountType = user.accountType || "Current";
+            if (!invoiceData.accountNumber) invoiceData.accountNumber = user.accountNumber || "123456789012";
+            if (!invoiceData.ifscCode) invoiceData.ifscCode = user.ifscCode || "ABCD0001234";
+            if (!invoiceData.authorisedSignature) invoiceData.authorisedSignature = user.authorisedSignature || "Store Manager";
+        }
 
         const newInvoice = new PurchaseInvoice({
             userId: req.user.id,
@@ -117,97 +162,101 @@ router.post("/create", verifyToken, async (req, res) => {
         });
         await newInvoice.save();
 
-        // Automatically generate Bookkeeping Entry for purchase invoice
-        await upsertAutomatedBookkeepingEntry({
-            userId: req.user.id,
-            date: newInvoice.billDate ? new Date(newInvoice.billDate) : new Date(),
-            description: `Purchase Invoice ${newInvoice.billNo} from ${newInvoice.supplierName}`,
-            category: "Purchases",
-            amount: newInvoice.total || newInvoice.subtotal,
-            type: "expense",
-            referenceId: `purchase_inv_${newInvoice._id}`
-        });
+        // Automatically generate Bookkeeping Entry and sync Vendor for non-draft purchase invoices
+        if (newInvoice.status !== 'draft') {
+            await upsertAutomatedBookkeepingEntry({
+                userId: req.user.id,
+                date: newInvoice.billDate ? new Date(newInvoice.billDate) : new Date(),
+                description: `Purchase Invoice ${newInvoice.billNo} from ${newInvoice.supplierName}`,
+                category: "Purchases",
+                amount: newInvoice.total || newInvoice.subtotal,
+                type: "expense",
+                referenceId: `purchase_inv_${newInvoice._id}`
+            });
 
-        // Link supplier or auto-create Vendor document
-        const VendorModel = mongoose.models.Vendor || mongoose.model("Vendor");
-        if (VendorModel && newInvoice.supplierName) {
-            try {
-                let vendorDoc = await VendorModel.findOne({
-                    $or: [{ userId: req.user.id }, { userId: new mongoose.Types.ObjectId(req.user.id) }],
-                    name: { $regex: new RegExp(`^${newInvoice.supplierName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-                });
-                if (!vendorDoc) {
-                    vendorDoc = new VendorModel({
-                        userId: req.user.id,
-                        name: newInvoice.supplierName.trim(),
-                        phone: newInvoice.phone || "",
-                        gstin: newInvoice.gstin || "",
-                        placeOfSupply: newInvoice.stateOfSupply || ""
+            // Link supplier or auto-create Vendor document
+            const VendorModel = Vendor;
+            if (VendorModel && newInvoice.supplierName) {
+                try {
+                    let vendorDoc = await VendorModel.findOne({
+                        $or: [{ userId: req.user.id }, { userId: new mongoose.Types.ObjectId(req.user.id) }],
+                        name: { $regex: new RegExp(`^${newInvoice.supplierName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
                     });
+                    if (!vendorDoc) {
+                        vendorDoc = new VendorModel({
+                            userId: req.user.id,
+                            name: newInvoice.supplierName.trim(),
+                            phone: newInvoice.phone || "",
+                            gstin: newInvoice.gstin || "",
+                            placeOfSupply: newInvoice.stateOfSupply || ""
+                        });
+                        await vendorDoc.save();
+                    }
+                    const balance = (newInvoice.total || 0) - (newInvoice.paid || 0);
+                    vendorDoc.outstandingPayable = (vendorDoc.outstandingPayable || 0) + Math.max(0, balance);
+                    vendorDoc.updatedAt = new Date();
                     await vendorDoc.save();
+                } catch (vErr) {
+                    console.warn("⚠️ Vendor sync warning during purchase creation:", vErr.message);
                 }
-                const balance = (newInvoice.total || 0) - (newInvoice.paid || 0);
-                vendorDoc.outstandingPayable = (vendorDoc.outstandingPayable || 0) + Math.max(0, balance);
-                vendorDoc.updatedAt = new Date();
-                await vendorDoc.save();
-            } catch (vErr) {
-                console.warn("⚠️ Vendor sync warning during purchase creation:", vErr.message);
             }
         }
 
-        // Add purchased items to inventory stock
-        const InventoryItem = getInventoryModel();
+        // Add purchased items to inventory stock if not draft
         const stockResults = [];
+        if (newInvoice.status !== 'draft') {
+            const InventoryItem = getInventoryModel();
 
-        for (const item of invoiceData.items) {
-            const rawSku = item.itemCode ? item.itemCode.trim() : "";
-            const rawName = item.itemName ? item.itemName.trim() : "";
-            const sku = rawSku || `PUR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            for (const item of invoiceData.items) {
+                const rawSku = item.itemCode ? item.itemCode.trim() : "";
+                const rawName = item.itemName ? item.itemName.trim() : "";
+                const sku = rawSku || `PUR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-            // Check if item with same SKU or Name already exists for this user to avoid duplicates
-            const searchOr = [];
-            if (rawSku) searchOr.push({ sku: rawSku });
-            if (rawName) searchOr.push({ itemName: new RegExp(`^${rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") });
+                // Check if item with same SKU or Name already exists for this user to avoid duplicates
+                const searchOr = [];
+                if (rawSku) searchOr.push({ sku: rawSku });
+                if (rawName) searchOr.push({ itemName: new RegExp(`^${rawName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") });
 
-            const existingItem = searchOr.length > 0 ? await InventoryItem.findOne({
-                userId: req.user.id,
-                $or: searchOr,
-            }) : null;
-
-            if (existingItem) {
-                // Update quantity and product master info of existing item
-                existingItem.quantity += item.quantity;
-                existingItem.price = item.pricePerUnit;
-                if (item.hsnCode) existingItem.hsnCode = item.hsnCode;
-                if (item.taxPercent !== undefined) existingItem.gstRate = item.taxPercent;
-                if (item.unit) existingItem.unit = item.unit;
-                existingItem.lastUpdated = Date.now();
-                await existingItem.save();
-                stockResults.push({ itemName: item.itemName, action: "updated", quantity: existingItem.quantity });
-            } else {
-                // Create new inventory item
-                const newStockItem = new InventoryItem({
+                const existingItem = searchOr.length > 0 ? await InventoryItem.findOne({
                     userId: req.user.id,
-                    itemName: item.itemName,
-                    sku: sku,
-                    hsnCode: item.hsnCode || "",
-                    quantity: item.quantity,
-                    unit: item.unit || "Pcs",
-                    price: item.pricePerUnit,
-                    category: "General",
-                    gstRate: item.taxPercent || 0,
-                    sgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
-                    cgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
-                    igst: item.isInterState ? (item.taxPercent || 0) : 0,
-                    stateOfSupply: invoiceData.stateOfSupply || "",
-                });
-                await newStockItem.save();
-                stockResults.push({ itemName: item.itemName, action: "created", quantity: item.quantity });
+                    $or: searchOr,
+                }) : null;
+
+                if (existingItem) {
+                    // Update quantity and product master info of existing item
+                    existingItem.quantity += item.quantity;
+                    existingItem.price = item.pricePerUnit;
+                    if (item.hsnCode) existingItem.hsnCode = item.hsnCode;
+                    if (item.taxPercent !== undefined) existingItem.gstRate = item.taxPercent;
+                    if (item.unit) existingItem.unit = item.unit;
+                    existingItem.lastUpdated = Date.now();
+                    await existingItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "updated", quantity: existingItem.quantity });
+                } else {
+                    // Create new inventory item
+                    const newStockItem = new InventoryItem({
+                        userId: req.user.id,
+                        itemName: item.itemName,
+                        sku: sku,
+                        hsnCode: item.hsnCode || "",
+                        quantity: item.quantity,
+                        unit: item.unit || "Pcs",
+                        price: item.pricePerUnit,
+                        category: "General",
+                        gstRate: item.taxPercent || 0,
+                        sgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        cgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        igst: item.isInterState ? (item.taxPercent || 0) : 0,
+                        stateOfSupply: invoiceData.stateOfSupply || "",
+                    });
+                    await newStockItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "created", quantity: item.quantity });
+                }
             }
         }
 
         res.status(201).json({
-            message: "Purchase invoice saved & items added to stock!",
+            message: newInvoice.status === 'draft' ? "Purchase invoice drafted!" : "Purchase invoice saved & items added to stock!",
             invoice: newInvoice,
             stockUpdates: stockResults,
         });
@@ -217,11 +266,113 @@ router.post("/create", verifyToken, async (req, res) => {
     }
 });
 
+// PUT - Update purchase invoice & add items to inventory stock if completed
+router.put("/:id", verifyToken, async (req, res) => {
+    try {
+        const invoiceData = req.body;
+        const existingInvoice = await PurchaseInvoice.findOne({ _id: req.params.id, userId: req.user.id });
+        if (!existingInvoice) {
+            return res.status(404).json({ message: "Purchase invoice not found" });
+        }
+
+        // We only add to stock if it transitioned from draft to completed
+        const wasDraft = existingInvoice.status === "draft" || existingInvoice.status === undefined;
+        const isNowCompleted = invoiceData.status !== "draft";
+        
+        Object.assign(existingInvoice, invoiceData);
+        await existingInvoice.save();
+
+        const stockResults = [];
+        if (wasDraft && isNowCompleted) {
+            const InventoryItem = getInventoryModel();
+            for (const item of invoiceData.items) {
+                const rawSku = item.itemCode ? item.itemCode.trim() : "";
+                const rawName = item.itemName ? item.itemName.trim() : "";
+                const sku = rawSku || `PUR-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+                const searchOr = [];
+                if (rawSku) searchOr.push({ sku: rawSku });
+                if (rawName) searchOr.push({ itemName: new RegExp(`^${rawName.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, "i") });
+
+                const existingItem = searchOr.length > 0 ? await InventoryItem.findOne({
+                    userId: req.user.id,
+                    $or: searchOr,
+                }) : null;
+
+                if (existingItem) {
+                    existingItem.quantity += item.quantity;
+                    existingItem.price = item.pricePerUnit;
+                    if (item.hsnCode) existingItem.hsnCode = item.hsnCode;
+                    if (item.taxPercent !== undefined) existingItem.gstRate = item.taxPercent;
+                    if (item.unit) existingItem.unit = item.unit;
+                    existingItem.lastUpdated = Date.now();
+                    await existingItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "updated", quantity: existingItem.quantity });
+                } else {
+                    const newStockItem = new InventoryItem({
+                        userId: req.user.id,
+                        itemName: item.itemName,
+                        sku: sku,
+                        hsnCode: item.hsnCode || "",
+                        quantity: item.quantity,
+                        unit: item.unit || "Pcs",
+                        price: item.pricePerUnit,
+                        category: "General",
+                        gstRate: item.taxPercent || 0,
+                        sgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        cgst: item.isInterState ? 0 : (item.taxPercent || 0) / 2,
+                        igst: item.isInterState ? (item.taxPercent || 0) : 0,
+                        stateOfSupply: invoiceData.stateOfSupply || "",
+                    });
+                    await newStockItem.save();
+                    stockResults.push({ itemName: item.itemName, action: "created", quantity: item.quantity });
+                }
+            }
+            
+            // Upsert Bookkeeping Entry since it is now completed
+            await upsertAutomatedBookkeepingEntry({
+                userId: req.user.id,
+                date: existingInvoice.billDate ? new Date(existingInvoice.billDate) : new Date(),
+                description: `Purchase Invoice ${existingInvoice.billNo} from ${existingInvoice.supplierName}`,
+                category: "Purchases",
+                amount: existingInvoice.total || existingInvoice.subtotal,
+                type: "expense",
+                referenceId: `purchase_inv_${existingInvoice._id}`
+            });
+        }
+
+        res.json({
+            message: existingInvoice.status === "draft" ? "Purchase invoice draft updated!" : "Purchase invoice updated & items added to stock!",
+            invoice: existingInvoice,
+            stockUpdates: stockResults,
+        });
+    } catch (error) {
+        console.error("Error updating purchase invoice:", error);
+        res.status(500).json({ message: "Error updating purchase invoice", error: error.message });
+    }
+});
+
 // GET - All purchase invoices for authenticated user
 router.get("/all", verifyToken, async (req, res) => {
     try {
         const invoices = await PurchaseInvoice.find({ userId: req.user.id }).sort({ createdAt: -1 });
-        res.json({ invoices });
+        const user = await User.findById(req.user.id);
+        const enrichedInvoices = invoices.map(inv => {
+            const obj = inv.toObject();
+            if (user) {
+                if (!obj.bankName) obj.bankName = user.bankName || "ABC Bank";
+                if (!obj.accountType) obj.accountType = user.accountType || "Current";
+                if (!obj.accountNumber) obj.accountNumber = user.accountNumber || "123456789012";
+                if (!obj.ifscCode) obj.ifscCode = user.ifscCode || "ABCD0001234";
+                if (!obj.authorisedSignature) obj.authorisedSignature = user.authorisedSignature || "Store Manager";
+            }
+            if (!obj.bankName) obj.bankName = "ABC Bank";
+            if (!obj.accountType) obj.accountType = "Current";
+            if (!obj.accountNumber) obj.accountNumber = "123456789012";
+            if (!obj.ifscCode) obj.ifscCode = "ABCD0001234";
+            return obj;
+        });
+        res.json({ invoices: enrichedInvoices });
     } catch (error) {
         console.error("Error fetching purchase invoices:", error);
         res.status(500).json({ message: "Error fetching purchase invoices" });
@@ -235,14 +386,49 @@ router.get("/:id", verifyToken, async (req, res) => {
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
-        res.json(invoice);
+        const enriched = await enrichInvoiceWithBankDetails(invoice);
+        res.json(enriched);
     } catch (error) {
         console.error("Error fetching purchase invoice:", error);
         res.status(500).json({ message: "Error fetching purchase invoice" });
     }
 });
 
+
+// POST - Record payment for purchase invoice
+router.post("/:id/payment", verifyToken, async (req, res) => {
+    try {
+        const { amount } = req.body;
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ message: "Invalid payment amount" });
+        }
+        
+        const invoice = await PurchaseInvoice.findOne({ _id: req.params.id, userId: req.user.id });
+        if (!invoice) {
+            return res.status(404).json({ message: "Purchase invoice not found" });
+        }
+        
+        // Update paid and balance
+        invoice.paid = (invoice.paid || 0) + Number(amount);
+        invoice.balance = invoice.total - invoice.paid;
+        
+        // Don't allow negative balance
+        if (invoice.balance < 0) {
+            invoice.balance = 0;
+            invoice.paid = invoice.total;
+        }
+        
+        await invoice.save();
+        
+        res.json({ message: "Payment recorded successfully", invoice });
+    } catch (error) {
+        console.error("Error recording payment:", error);
+        res.status(500).json({ message: "Error recording payment" });
+    }
+});
+
 // DELETE - Delete purchase invoice
+
 router.delete("/:id", verifyToken, async (req, res) => {
     try {
         const deleted = await PurchaseInvoice.findOneAndDelete({ _id: req.params.id, userId: req.user.id });

@@ -631,86 +631,158 @@ const AutomationInvoice = () => {
   const handleRecordPaymentSubmit = async () => {
     const targetId = selectedPaymentInvoiceId || lastSavedId;
 
-    if (paymentForm.amount <= 0) {
-      toast.error("Payment amount must be greater than zero.");
+    if (!targetId) {
+      toast.error("No invoice selected to apply payment.");
       return;
     }
 
-    let updatedInvoiceData: any = null;
+    const isCredit = paymentForm.paymentMethod === 'credit';
 
-    if (targetId) {
-      try {
-        const token = localStorage.getItem("token");
-        const res = await fetch(`${API_BASE_URL}/invoice/${targetId}/payment`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            amount: paymentForm.amount,
-            amountPaid: paymentForm.amount,
-            paymentMethod: paymentForm.paymentMethod,
-            paymentDate: paymentForm.paymentDate
-          })
-        });
+    // Locate target invoice from invoiceHistory
+    const targetInvoice = invoiceHistory.find((inv: any) =>
+      targetId && (
+        String(inv.id) === String(targetId) ||
+        String(inv._id) === String(targetId) ||
+        inv.invoiceNo === targetId
+      )
+    ) || (
+      (!selectedPaymentInvoiceId && lastSavedId) ? currentInvoice : null
+    );
 
-        if (res.ok) {
-          const data = await res.json();
-          updatedInvoiceData = data.invoice;
-        } else {
-          console.warn("Backend payment route warning");
-        }
-      } catch (error) {
-        console.warn("Error submitting payment to API:", error);
+    const prevPaid = Number(targetInvoice?.paid ?? targetInvoice?.amountPaid ?? (targetInvoice ? 0 : (currentInvoice.paid || 0)));
+    const grandTotal = Number(targetInvoice?.total ?? targetInvoice?.grandTotal ?? (targetInvoice ? 0 : (currentInvoice.total || 0)));
+    const currentBalance = targetInvoice ? Number(targetInvoice.balance ?? targetInvoice.balanceDue ?? Math.max(0, grandTotal - prevPaid)) : Math.max(0, (currentInvoice.total || 0) - (currentInvoice.paid || 0));
+
+    // Validation
+    if (!isCredit) {
+      if (isNaN(paymentForm.amount) || paymentForm.amount <= 0) {
+        toast.error("Please enter a valid payment amount greater than zero.");
+        return;
+      }
+      if (paymentForm.amount > currentBalance + 0.01) {
+        toast.error(`Payment amount (₹${paymentForm.amount.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`);
+        return;
       }
     }
 
-    // Always update localStorage & local history state
-    const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
-    const idx = savedList.findIndex((inv: any) =>
-      (targetId && (inv.id === targetId || inv._id === targetId)) ||
-      (currentInvoice.invoiceNo && inv.invoiceNo === currentInvoice.invoiceNo)
-    );
+    const actualAmount = isCredit ? 0 : paymentForm.amount;
 
-    let newPaid = 0;
-    let newBalance = 0;
-    let newStatus = 'paid';
+    let updatedInvoiceData: any = null;
 
-    if (idx !== -1) {
-      const currentPaid = savedList[idx].paid || 0;
-      const currentTotal = savedList[idx].total || savedList[idx].grandTotal || 0;
-      newPaid = updatedInvoiceData ? (updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid) : (currentPaid + paymentForm.amount);
-      newBalance = updatedInvoiceData ? (updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance) : Math.max(0, currentTotal - newPaid);
-      newStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(`${API_BASE_URL}/invoice/${targetId}/payment`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          amount: actualAmount,
+          amountPaid: actualAmount,
+          paymentMethod: paymentForm.paymentMethod,
+          paymentDate: paymentForm.paymentDate,
+          isCredit
+        })
+      });
 
-      savedList[idx].paid = newPaid;
-      savedList[idx].balance = newBalance;
-      savedList[idx].paymentStatus = newStatus;
-      savedList[idx].status = newStatus;
-
-      localStorage.setItem('savedInvoices', JSON.stringify(savedList));
-      setInvoiceHistory(savedList);
+      if (res.ok) {
+        const data = await res.json();
+        updatedInvoiceData = data.invoice;
+      } else {
+        console.warn("Backend payment route warning");
+      }
+    } catch (error) {
+      console.warn("Error submitting payment to API:", error);
     }
 
-    // Also update current active invoice if matching
-    if (!targetId || targetId === lastSavedId || (currentInvoice && idx !== -1)) {
-      const currentPaid = currentInvoice.paid || 0;
-      const currentTotal = currentInvoice.total || 0;
-      const finalPaid = updatedInvoiceData ? (updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid) : (currentPaid + paymentForm.amount);
-      const finalBalance = updatedInvoiceData ? (updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance) : Math.max(0, currentTotal - finalPaid);
-      const finalStatus = finalBalance <= 0 ? 'paid' : finalPaid > 0 ? 'partial' : 'pending';
+    // Calculate new paid & balance amounts
+    let newPaid: number;
+    let newBalance: number;
 
+    if (isCredit) {
+      newPaid = prevPaid;
+      newBalance = Math.max(0, grandTotal - newPaid);
+    } else if (updatedInvoiceData) {
+      newPaid = Number(updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? (prevPaid + actualAmount));
+      newBalance = Number(updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? Math.max(0, grandTotal - newPaid));
+    } else {
+      newPaid = prevPaid + actualAmount;
+      newBalance = Math.max(0, grandTotal - newPaid);
+    }
+
+    const newPaymentStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+    const newStatus = isCredit ? (targetInvoice?.status || 'sent') : (newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending');
+
+    // 1. Update localStorage ('savedInvoices')
+    const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
+    const idx = savedList.findIndex((inv: any) =>
+      targetId && (
+        String(inv.id) === String(targetId) ||
+        String(inv._id) === String(targetId) ||
+        inv.invoiceNo === targetId ||
+        (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+      )
+    );
+
+    if (idx !== -1) {
+      savedList[idx].paid = newPaid;
+      savedList[idx].amountPaid = newPaid;
+      savedList[idx].balance = newBalance;
+      savedList[idx].balanceDue = newBalance;
+      savedList[idx].paymentStatus = newPaymentStatus;
+      savedList[idx].status = isCredit ? (savedList[idx].status || 'sent') : newStatus;
+      savedList[idx].isCredit = isCredit;
+      localStorage.setItem('savedInvoices', JSON.stringify(savedList));
+    }
+
+    // 2. Update state ('invoiceHistory')
+    setInvoiceHistory(prevList => prevList.map((inv: any) => {
+      const isMatch = targetId && (
+        String(inv.id) === String(targetId) ||
+        String(inv._id) === String(targetId) ||
+        inv.invoiceNo === targetId ||
+        (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+      );
+      if (!isMatch) return inv;
+      return {
+        ...inv,
+        paid: newPaid,
+        amountPaid: newPaid,
+        balance: newBalance,
+        balanceDue: newBalance,
+        paymentStatus: newPaymentStatus as any,
+        status: isCredit ? (inv.status || 'sent') : newStatus as any,
+        isCredit
+      };
+    }));
+
+    // 3. Update active currentInvoice ONLY if it's the target invoice
+    const isCurrentInvoiceTarget = Boolean(
+      (targetId && (
+        String(currentInvoice.id) === String(targetId) ||
+        String((currentInvoice as any)._id) === String(targetId) ||
+        currentInvoice.invoiceNo === targetId
+      )) || (targetInvoice && currentInvoice.invoiceNo === targetInvoice.invoiceNo) ||
+      (!selectedPaymentInvoiceId && lastSavedId)
+    );
+
+    if (isCurrentInvoiceTarget) {
       setCurrentInvoice(prev => ({
         ...prev,
-        paid: finalPaid,
-        balance: finalBalance,
-        paymentStatus: finalStatus as any,
-        status: finalStatus as any
+        paid: newPaid,
+        amountPaid: newPaid,
+        balance: newBalance,
+        balanceDue: newBalance,
+        paymentStatus: newPaymentStatus as any,
+        status: isCredit ? prev.status : newStatus as any
       }));
     }
 
-    toast.success("Payment recorded & applied successfully!");
+    const msg = isCredit
+      ? "Recorded as credit (unpaid). Invoice marked as Unpaid in history."
+      : "Payment recorded & applied successfully!";
+    toast.success(msg);
     setIsRecordPaymentOpen(false);
     setSelectedPaymentInvoiceId(null);
   };
@@ -804,7 +876,6 @@ const AutomationInvoice = () => {
           const parsed = JSON.parse(saved);
           mergedInvoices = parsed.filter((inv: any) => {
             if (inv.type === 'purchase') return false;
-            if (inv.userId && user?.id && String(inv.userId) !== String(user.id)) return false;
             return true;
           });
         } catch (e) {
@@ -894,14 +965,36 @@ const AutomationInvoice = () => {
           }
         }
 
-        // Merge and de-duplicate by invoiceNo & id
-        const existingNos = new Set(mergedInvoices.map(inv => inv.invoiceNo).filter(Boolean));
-        const existingIds = new Set(mergedInvoices.map(inv => (inv as any).id || (inv as any)._id).filter(Boolean));
-        backendInvoices.forEach((inv: any) => {
-          if ((inv.invoiceNo && !existingNos.has(inv.invoiceNo)) && (inv.id && !existingIds.has(inv.id))) {
-            mergedInvoices.push(inv);
+        // Merge and de-duplicate by invoiceNo & id, prioritizing authoritative backend values
+        backendInvoices.forEach((bInv: any) => {
+          const matchIdx = mergedInvoices.findIndex((inv: any) =>
+            (inv.invoiceNo && bInv.invoiceNo && inv.invoiceNo === bInv.invoiceNo) ||
+            (inv.id && bInv.id && String(inv.id) === String(bInv.id)) ||
+            ((inv as any)._id && bInv._id && String((inv as any)._id) === String(bInv._id))
+          );
+
+          if (matchIdx !== -1) {
+            mergedInvoices[matchIdx] = {
+              ...mergedInvoices[matchIdx],
+              paid: bInv.paid,
+              amountPaid: bInv.paid,
+              balance: bInv.balance,
+              balanceDue: bInv.balance,
+              paymentStatus: bInv.paymentStatus,
+              status: bInv.status,
+              id: bInv.id || mergedInvoices[matchIdx].id,
+              _id: bInv._id || (mergedInvoices[matchIdx] as any)._id
+            };
+          } else {
+            mergedInvoices.push(bInv);
           }
         });
+
+        try {
+          localStorage.setItem('savedInvoices', JSON.stringify(mergedInvoices));
+        } catch (e) {
+          console.warn("Could not save merged invoices to localStorage", e);
+        }
       } catch (err) {
         console.warn("Failed to fetch backend invoices:", err);
       }
@@ -1498,6 +1591,12 @@ const AutomationInvoice = () => {
       localStorage.setItem('savedInvoices', JSON.stringify(savedList));
       setInvoiceHistory(savedList);
 
+      // Always ensure lastSavedId is set after saving so the summary shows Record Payment
+      const finalId = backendId || currentInvoice.invoiceNo || `local_${Date.now()}`;
+      if (!lastSavedId) {
+        setLastSavedId(finalId);
+      }
+
       setCurrentInvoice(prev => ({
         ...prev,
         status: statusValue
@@ -1736,7 +1835,7 @@ const AutomationInvoice = () => {
   };
 
   // Generate Invoice PDF using jsPDF and jspdf-autotable
-  const generateInvoicePDF = (data: InvoiceData) => {
+  const generateInvoicePDF = (data: InvoiceData, forceDownload = false) => {
     try {
       const doc = new jsPDF();
       const sellerName = data.sellerName || COMPANY_NAME;
@@ -2170,12 +2269,17 @@ const AutomationInvoice = () => {
       const pdfBlob = doc.output('blob');
       const blobURL = URL.createObjectURL(pdfBlob);
       
-      const printWindow = window.open(blobURL);
-      if (printWindow) {
-        toast.success("Opening print preview...");
-      } else {
+      if (forceDownload) {
         doc.save(`invoice_${data.invoiceNo}.pdf`);
         toast.success("PDF saved! Please check your downloads.");
+      } else {
+        const printWindow = window.open(blobURL);
+        if (printWindow) {
+          toast.success("Opening print preview...");
+        } else {
+          doc.save(`invoice_${data.invoiceNo}.pdf`);
+          toast.success("PDF saved! Please check your downloads.");
+        }
       }
     } catch (e) {
       console.error(e);
@@ -2372,16 +2476,22 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
   };
 
   // Share on WhatsApp — auto-saves first if needed
-  const shareOnWhatsApp = async () => {
-    if (currentInvoice.items.length === 0 && invoiceHistory.length === 0) {
+  const shareOnWhatsApp = async (targetInvoice?: any) => {
+    // Determine if this is a click event or an actual invoice object
+    const isEvent = targetInvoice && targetInvoice.nativeEvent;
+    const actualInvoice = isEvent ? undefined : targetInvoice;
+    const isHistoryShare = !!actualInvoice;
+    const dataToUse = isHistoryShare ? actualInvoice : currentInvoice;
+
+    if (!isHistoryShare && currentInvoice.items.length === 0 && invoiceHistory.length === 0) {
       toast.error("Add items to the invoice before sharing.");
       return;
     }
 
-    let idToUse = lastSavedId;
+    let idToUse = isHistoryShare ? (actualInvoice.id || actualInvoice._id) : lastSavedId;
 
-    // Auto-save if not yet saved
-    if (!idToUse && currentInvoice.items.length > 0) {
+    // Auto-save if not yet saved (only for active invoice)
+    if (!isHistoryShare && !idToUse && currentInvoice.items.length > 0) {
       toast.info("Saving invoice before sharing...");
       const savedId = await saveInvoice('sent');
       if (!savedId) {
@@ -2392,7 +2502,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
     }
 
     // Use saved invoice data
-    const data = currentInvoice;
+    const data = dataToUse;
     const customerName = data.partyName || 'Valued Customer';
     const grandTotal = data.total || 0;
     const amountPaid = data.paid || 0;
@@ -3762,6 +3872,8 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </span>
                   </div>
 
+
+
                   <div className="flex justify-between items-center py-2 border-t border-slate-200">
                     <span className="text-slate-600 font-semibold">Balance</span>
                     <span className={`text-xl font-bold ${currentInvoice.balance > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
@@ -3781,6 +3893,34 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </div>
                   )}
                 </div>
+
+                {lastSavedId && (
+                  <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
+                    {currentInvoice.paid > 0 && (
+                      <div className="flex justify-between items-center text-sm mb-3">
+                        <span className="text-slate-600 font-semibold">Amount Paid</span>
+                        <span className="font-semibold text-emerald-600">₹{currentInvoice.paid.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {currentInvoice.balance > 0 && (
+                      <Button
+                        onClick={() => {
+                          setSelectedPaymentInvoiceId(lastSavedId);
+                          setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
+                          setIsRecordPaymentOpen(true);
+                        }}
+                        className="w-full bg-slate-950 text-white hover:bg-slate-800 rounded-xl py-6 font-bold"
+                      >
+                        <CreditCard className="h-5 w-5 mr-2" />
+                        Record Payment
+                      </Button>
+                    )}
+                    <Button onClick={printInvoice} variant="outline" className="w-full bg-white/60 border-slate-200 text-slate-700 hover:bg-slate-50 rounded-xl py-6 font-bold">
+                      <Printer className="h-5 w-5 mr-2" />
+                      Print Invoice
+                    </Button>
+                  </div>
+                )}
 
                 {/* Template Selection */}
                 <div className="mt-4 pt-4 border-t border-slate-200 space-y-1.5">
@@ -3831,31 +3971,14 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       className="h-12 rounded-xl bg-slate-950 font-semibold text-white transition-all duration-300 hover:bg-slate-800"
                     >
                       {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
-                      Save & Send
+                      Save Invoice
                     </Button>
                   </div>
 
-                  {lastSavedId && currentInvoice.balance > 0 && currentInvoice.status !== 'cancelled' && (
-                    <div className="pt-1">
-                      <Button
-                        onClick={() => {
-                          setSelectedPaymentInvoiceId(lastSavedId);
-                          setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
-                          setIsRecordPaymentOpen(true);
-                        }}
-                        className="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold w-full"
-                      >
-                        <CreditCard className="h-4 w-4 mr-1.5" />
-                        Record Payment
-                      </Button>
-                    </div>
-                  )}
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <Button onClick={printInvoice} variant="outline" className="h-10 rounded-xl bg-white/60 border-slate-200 text-slate-850 hover:bg-slate-50">
-                      <Printer className="h-4 w-4 mr-1.5" />
-                      Print
-                    </Button>
+
+
+                  <div className="grid grid-cols-1 gap-2">
                     <Button
                       onClick={() => {
                         resetForm();
@@ -3865,7 +3988,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       className="h-10 rounded-xl bg-white/60 border-slate-200 text-rose-700 hover:bg-rose-50 hover:border-rose-200 font-semibold"
                     >
                       <Trash2 className="h-4 w-4 mr-1.5" />
-                      Clear
+                      Clear Form
                     </Button>
                   </div>
 
@@ -4563,17 +4686,32 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              const id = (invoice as any).id || (invoice as any)._id;
-                              if (invoice.type === 'purchase') {
-                                window.open(`/purchase-invoice/view/${id}`, '_blank');
-                              } else {
-                                window.open(`/invoice/view/${id}`, '_blank');
-                              }
+                              generateInvoicePDF(invoice as any, false);
                             }}
                             className="rounded-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                           >
                             <Printer className="mr-1.5 h-4 w-4" />
-                            View
+                            Print
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              generateInvoicePDF(invoice as any, true);
+                            }}
+                            className="rounded-full border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                          >
+                            <Download className="mr-1.5 h-4 w-4" />
+                            Download PDF
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => shareOnWhatsApp(invoice)}
+                            className="rounded-full border-green-200 bg-green-50 text-green-700 hover:bg-green-100"
+                          >
+                            <MessageCircle className="mr-1.5 h-4 w-4" />
+                            WhatsApp
                           </Button>
                           <Button
                             variant="outline"
