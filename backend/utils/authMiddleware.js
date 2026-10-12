@@ -146,7 +146,7 @@ export const authenticateUser = async (req, res, next) => {
   const perf = getPerfDebugConfig(req);
 
   // Public paths bypass auth
-  if (req.path.startsWith("/public/") || req.path.includes("instrumentation")) {
+  if (req.path.startsWith("/public/")) {
     logPerf(perf, "authenticateUser");
     return next();
   }
@@ -220,7 +220,7 @@ export const checkSubscription = async (req, res, next) => {
   const perf = getPerfDebugConfig(req);
 
   // Public paths bypass subscription check
-  if (req.path.startsWith("/public/") || req.path.includes("instrumentation")) {
+  if (req.path.startsWith("/public/")) {
     logPerf(perf, "checkSubscription");
     req._t_sub_done = performance.now();
     return next();
@@ -320,7 +320,7 @@ export const checkModuleAccess = (moduleName) => {
     const perf = getPerfDebugConfig(req);
 
     // Public paths bypass module check
-    if (req.path.startsWith("/public/") || req.path.includes("instrumentation")) {
+    if (req.path.startsWith("/public/")) {
       logPerf(perf, "checkModuleAccess");
       req._t_module_done = performance.now();
       return next();
