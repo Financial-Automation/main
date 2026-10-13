@@ -31,7 +31,8 @@ import {
   Activity,
   RefreshCw,
   Lock,
-  Check
+  Check,
+  Zap
 } from "lucide-react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -42,7 +43,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import { API_ENDPOINTS, API_BASE_URL, apiRequest } from "@/lib/api";
 import { isTrialExpired } from "@/lib/trial";
-import { callGemini } from "@/lib/gemini";
+import { callGemini, SUGGESTED_PROMPTS } from "@/lib/gemini";
 
 // --- Types & Data ---
 
@@ -281,7 +282,7 @@ const Dashboard = () => {
   const [isAiChatOpen, setIsAiChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { id: "1", role: "ai", content: "Hi there! I am your SHREE ANDAL AI Assistant. How can I help you automate tasks today?", timestamp: new Date() }
+    { id: "1", role: "ai", content: "Hello! I'm your **AI CFO**, connected to your live accounting database.\n\nI can answer questions about:\n- 📊 Revenue, Expenses & Net Profit\n- 🧾 Invoices & Accounts Receivable\n- 🏷️ GST & Tax Analysis\n- 📦 Inventory & Stock\n- 👥 Payroll & HR\n- 📋 Balance Sheet & Ratios\n- 💰 Cash Flow\n\nTry asking: *\"What is my net profit this month?\"*", timestamp: new Date() }
   ]);
   const [chatViewMode, setChatViewMode] = useState<"chat" | "history">("chat");
   const chatScrollRef = useRef<HTMLDivElement>(null);
@@ -460,7 +461,7 @@ const Dashboard = () => {
 
     // Calculate Receivables (total unpaid balance owed TO us by customers)
     const invoiceReceivables = allInvoices.reduce((sum, inv) => {
-      if (inv.isDeleted || inv.status === 'cancelled') return sum;
+      if (inv.isDeleted || inv.status === 'cancelled' || inv.status === 'paid') return sum;
       if (!isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod)) return sum;
       
       const total = inv.grandTotal || inv.total || 0;
@@ -471,7 +472,7 @@ const Dashboard = () => {
 
     // Calculate Payables (total unpaid balance WE owe to suppliers)
     const purchasePayables = allPurchaseInvoices.reduce((sum, inv) => {
-      if (inv.isDeleted) return sum;
+      if (inv.isDeleted || inv.status === 'cancelled') return sum;
       if (!isDateInPeriod(inv.createdAt || inv.billDate, selectedPeriod)) return sum;
 
       const total = inv.total || 0;
@@ -491,9 +492,10 @@ const Dashboard = () => {
       ? invoiceReceivables 
       : ((cfGen?.cashFlow?.receivables > 0) ? cfGen.cashFlow.receivables : bkIncome);
 
-    const calcPayables = purchasePayables > 0 
-      ? purchasePayables 
-      : ((cfGen?.cashFlow?.payables > 0) ? cfGen.cashFlow.payables : bkExpense);
+    // Payables are open supplier-bill balances only. Expenses and cash-flow
+    // summaries are not substitutes: using either here made the dashboard and
+    // AI assistant report a payable amount even when no supplier bill existed.
+    const calcPayables = purchasePayables;
 
     const netProf = plGen?.netProfit !== undefined ? plGen.netProfit : (bkIncome - bkExpense);
 
@@ -980,7 +982,7 @@ const Dashboard = () => {
 
     try {
       const currentHistory = [...chatMessages, newUserMsg];
-      const replyText = await callGemini(currentHistory);
+      const replyText = await callGemini(currentHistory, selectedPeriod);
 
       try { await apiRequest(API_ENDPOINTS.AI_CHAT_MESSAGE, { method: "POST", body: JSON.stringify({ role: "ai", content: replyText }) }); } catch (dbErr) { }
 
@@ -989,7 +991,7 @@ const Dashboard = () => {
       );
     } catch (error: any) {
       setChatMessages((prev) => 
-        prev.map(msg => msg.id === aiPlaceholderId ? { ...msg, content: "Error communicating with AI.", timestamp: new Date() } : msg)
+        prev.map(msg => msg.id === aiPlaceholderId ? { ...msg, content: error?.message || "I could not retrieve live financial data. Please try again.", timestamp: new Date() } : msg)
       );
     }
   };
@@ -2004,44 +2006,100 @@ const Dashboard = () => {
         {chatViewMode === "chat" ? (
           <>
             {/* Chat Messages Area */}
-            <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-5 space-y-4 bg-[#f9fafd]">
+            <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#f9fafd]">
               {chatMessages.map((msg) => (
                 <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                  <div 
-                    className={`max-w-[85%] p-3 rounded-[4px] text-[13px] leading-relaxed ${
-                      msg.role === 'user' 
-                        ? 'bg-[#006aff] text-white shadow-sm' 
-                        : 'bg-white border border-[#e4e5e7] text-[#333] shadow-sm'
+                  <div
+                    className={`max-w-[90%] px-3.5 py-3 rounded-[10px] text-[13px] leading-[1.6] ${
+                      msg.role === 'user'
+                        ? 'bg-[#006aff] text-white shadow-sm'
+                        : 'bg-white border border-[#e4e5e7] text-[#222] shadow-sm'
                     }`}
                   >
-                    {msg.content}
+                    {msg.role === 'ai' && msg.content === 'Thinking...' ? (
+                      <span className="flex items-center gap-1.5 text-[#999] italic">
+                        <span className="inline-block w-1.5 h-1.5 bg-[#006aff] rounded-full animate-bounce [animation-delay:0ms]"></span>
+                        <span className="inline-block w-1.5 h-1.5 bg-[#006aff] rounded-full animate-bounce [animation-delay:150ms]"></span>
+                        <span className="inline-block w-1.5 h-1.5 bg-[#006aff] rounded-full animate-bounce [animation-delay:300ms]"></span>
+                      </span>
+                    ) : msg.role === 'ai' ? (
+                      <div
+                        className="ai-message-content"
+                        dangerouslySetInnerHTML={{
+                          __html: msg.content
+                            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                            .replace(/^### (.+)$/gm, '<h4 class="text-[12px] font-bold text-[#111] mt-2.5 mb-1 uppercase tracking-wide">$1</h4>')
+                            .replace(/^## (.+)$/gm, '<h3 class="text-[13px] font-bold text-[#111] mt-3 mb-1">$1</h3>')
+                            .replace(/^# (.+)$/gm, '<h2 class="text-[14px] font-bold text-[#111] mt-3 mb-1.5">$1</h2>')
+                            .replace(/\*\*(.+?)\*\*/g, '<strong class="font-bold text-[#111]">$1</strong>')
+                            .replace(/\*(.+?)\*/g, '<em>$1</em>')
+                            .replace(/`(.+?)`/g, '<code class="bg-[#f0f2f5] text-[#e83e8c] px-1.5 py-0.5 rounded text-[11px] font-mono">$1</code>')
+                            .replace(/^- (.+)$/gm, '<div class="flex items-start gap-1.5 my-0.5"><span class="text-[#006aff] mt-0.5 shrink-0">•</span><span>$1</span></div>')
+                            .replace(/^(\d+)\. (.+)$/gm, '<div class="flex items-start gap-1.5 my-0.5"><span class="text-[#006aff] font-bold shrink-0">$1.</span><span>$2</span></div>')
+                            .replace(/^---$/gm, '<hr class="border-[#eee] my-2" />')
+                            .replace(/\n{2,}/g, '</p><p class="mt-1.5">')
+                            .replace(/\n/g, '<br/>')
+                        }}
+                      />
+                    ) : (
+                      <span>{msg.content}</span>
+                    )}
                   </div>
-                  <span className="text-[10px] text-[#999] font-medium mt-1">
-                    {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  <span className="text-[10px] text-[#aaa] font-medium mt-0.5 px-1">
+                    {msg.role === 'ai' ? '🤖 AI CFO · ' : ''}{msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               ))}
+
+              {/* Suggested Prompts — show only at start (1 message = welcome only) */}
+              {chatMessages.length === 1 && (
+                <div className="mt-3">
+                  <p className="text-[11px] text-[#999] font-semibold uppercase tracking-wide mb-2 flex items-center gap-1">
+                    <Zap className="w-3 h-3 text-[#f59e0b]" /> Quick Questions
+                  </p>
+                  <div className="flex flex-col gap-1.5">
+                    {SUGGESTED_PROMPTS.slice(0, 6).map((prompt, i) => (
+                      <button
+                        key={i}
+                        onClick={() => {
+                          setChatInput(prompt);
+                          setTimeout(() => {
+                            const form = document.getElementById('ai-chat-form') as HTMLFormElement;
+                            if (form) form.requestSubmit();
+                          }, 50);
+                        }}
+                        className="text-left text-[12px] text-[#006aff] bg-white border border-[#d0e3ff] hover:bg-[#e8f0ff] rounded-[8px] px-3 py-2 transition-colors"
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Chat Input Area */}
-            <form onSubmit={handleChatSubmit} className="p-4 bg-white border-t border-[#eee] shrink-0">
-              <div className="relative flex items-center">
-                <input 
-                  type="text" 
+            <div className="px-3 pb-3 bg-[#f9fafd] border-t border-[#eee] shrink-0 pt-2">
+              <p className="text-[10px] text-[#bbb] mb-1.5 text-center">Period: <span className="font-semibold text-[#888]">{selectedPeriod.replace('-', ' ')}</span></p>
+              <form id="ai-chat-form" onSubmit={handleChatSubmit} className="relative flex items-center bg-white border border-[#ccc] rounded-[10px] shadow-sm focus-within:border-[#006aff] focus-within:ring-1 focus-within:ring-[#006aff] transition-shadow">
+                <input
+                  type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Ask about your finances..."
-                  className="w-full pl-3 pr-10 py-2.5 bg-white border border-[#ccc] rounded-[4px] text-[13px] focus:outline-none focus:border-[#006aff] focus:ring-1 focus:ring-[#006aff] transition-shadow placeholder:text-[#999]"
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleChatSubmit(); } }}
+                  placeholder="Ask your AI CFO anything..."
+                  className="flex-1 pl-3.5 pr-2 py-3 bg-transparent text-[13px] focus:outline-none placeholder:text-[#bbb] rounded-l-[10px]"
                 />
-                <button 
+                <button
                   type="submit"
                   disabled={!chatInput.trim()}
-                  className="absolute right-1.5 w-8 h-8 rounded bg-[#006aff] text-white flex items-center justify-center hover:bg-[#005cdb] disabled:opacity-50 disabled:hover:bg-[#006aff] transition-colors"
+                  className="m-1.5 w-8 h-8 rounded-[7px] bg-[#006aff] text-white flex items-center justify-center hover:bg-[#005cdb] disabled:opacity-40 transition-all shrink-0"
                 >
-                  <Send className="w-4 h-4 ml-0.5" />
+                  <Send className="w-3.5 h-3.5" />
                 </button>
-              </div>
-            </form>
+              </form>
+              <p className="text-[10px] text-[#ccc] text-center mt-1.5">Powered by Gemini AI · Verify with your CA for statutory filings</p>
+            </div>
           </>
         ) : (
           /* History View Mode */
