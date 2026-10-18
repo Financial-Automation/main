@@ -232,8 +232,13 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
         currentInventoryValuation = inventoryItems.reduce((sum, item) => sum + ((item.quantity || 0) * (item.price || item.costPrice || 0)), 0);
     }
 
-    // Cash and Bank Balance: Total Inflows - Total Outflows
-    const cashAndBank = cumulativeIncome - cumulativeExpense;
+    // Cash and Bank Balance: Actual Cash Collected - Actual Cash Disbursed
+    // In accrual bookkeeping, cumulativeIncome includes sales revenue (which includes uncollected accountsReceivable),
+    // and cumulativeExpense includes purchase expenses (which includes unpaid accountsPayable).
+    // Cash balance must reflect actual cash collections and payments, avoiding double-counting open receivables.
+    const actualCashCollected = Math.max(0, cumulativeIncome - accountsReceivable);
+    const actualCashDisbursed = Math.max(0, cumulativeExpense - accountsPayable);
+    const cashAndBank = actualCashCollected - actualCashDisbursed;
 
     const fixedAssets = 0;
     const currentAssets = cashAndBank + accountsReceivable + currentInventoryValuation;
