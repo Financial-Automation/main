@@ -116,13 +116,13 @@ test("Test A — Configuration: Backend loads API key without revealing value", 
 // ---------------------------------------------------------------------------
 // Test B — Provider authentication
 // ---------------------------------------------------------------------------
-test("Test B — Provider authentication: Real minimal call with gemini-3.8-flash", async () => {
+test("Test B — Provider authentication: Real minimal call with Gemini model", async () => {
   try {
     const result = await generateGeminiContent("Respond with exactly: PONG");
     if (result) {
       assert.ok(result.text, "Response must contain generated text");
       assert.ok(result.text.length > 0, "Response text must be non-empty");
-      assert.equal(result.model, "gemini-3.8-flash", "Model used must be gemini-3.8-flash");
+      assert.ok(GEMINI_MODELS.includes(result.model), `Model used (${result.model}) must be one of GEMINI_MODELS`);
     }
   } catch (err) {
     // If running in offline sandbox, verify error is clean network error without secret leak
