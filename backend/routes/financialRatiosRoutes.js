@@ -26,6 +26,7 @@ const verifyToken = (req, res, next) => {
 
 // Financial Ratios Schema
 const financialRatiosSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   companyName: { type: String, required: true },
   period: { type: String, required: true },
   currentAssets: { type: Number, required: true },
@@ -55,10 +56,10 @@ const financialRatiosSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-const FinancialRatios = mongoose.model("FinancialRatios", financialRatiosSchema);
+const FinancialRatios = mongoose.models.FinancialRatios || mongoose.model("FinancialRatios", financialRatiosSchema);
 
 // POST route to calculate and store financial ratios
-router.post("/calculate", async (req, res) => {
+router.post("/calculate", verifyToken, async (req, res) => {
   try {
     const financialData = req.body;
     
@@ -77,6 +78,7 @@ router.post("/calculate", async (req, res) => {
     };
 
     const financialRecord = new FinancialRatios({
+      userId: req.user?.id || undefined,
       ...financialData,
       ratios: ratios
     });
@@ -93,9 +95,10 @@ router.post("/calculate", async (req, res) => {
 });
 
 // GET route to fetch financial ratios history
-router.get("/history", async (req, res) => {
+router.get("/history", verifyToken, async (req, res) => {
   try {
-    const financialRatios = await FinancialRatios.find().sort({ createdAt: -1 });
+    const query = req.user?.id ? { userId: req.user.id } : {};
+    const financialRatios = await FinancialRatios.find(query).sort({ createdAt: -1 });
     res.json(financialRatios);
   } catch (error) {
     console.error("Error fetching financial ratios:", error);
@@ -198,9 +201,10 @@ router.get("/generate", verifyToken, async (req, res) => {
 });
 
 // GET route to fetch specific financial ratios by ID
-router.get("/:id", async (req, res) => {
+router.get("/:id", verifyToken, async (req, res) => {
   try {
-    const financialRatio = await FinancialRatios.findById(req.params.id);
+    const query = req.user?.id ? { _id: req.params.id, userId: req.user.id } : { _id: req.params.id };
+    const financialRatio = await FinancialRatios.findOne(query);
     if (!financialRatio) {
       return res.status(404).json({ message: "Financial ratios record not found" });
     }
