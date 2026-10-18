@@ -140,13 +140,13 @@ router.post("/sell/:id", verifyToken, async (req, res) => {
         let sgstAmount, cgstAmount, igstAmount;
 
         if (isInterState) {
-            // Inter-state sale: Apply IGST at 18%
+            // Inter-state sale: Apply IGST at item's configured GST rate
             sgstRate = 0;
             cgstRate = 0;
-            igstRate = 18;
+            igstRate = itemGstRate;
             sgstAmount = 0;
             cgstAmount = 0;
-            igstAmount = (subtotal * 18) / 100;
+            igstAmount = (subtotal * itemGstRate) / 100;
         } else {
             // Intra-state sale: Split GST 50-50 into SGST + CGST
             sgstRate = itemGstRate / 2;

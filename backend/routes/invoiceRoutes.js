@@ -50,7 +50,7 @@ const verifyTokenOptional = (req, res, next) => {
 const invoiceSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   // Invoice Details
-  invoiceNumber: { type: String, required: true, unique: true },
+  invoiceNumber: { type: String, required: true },
   invoiceDate: { type: Date, required: true },
   dueDate: { type: Date, required: true },
 
@@ -156,7 +156,9 @@ const invoiceSchema = new mongoose.Schema({
   isDeleted: { type: Boolean, default: false }
 });
 
-const Invoice = mongoose.model("Invoice", invoiceSchema);
+invoiceSchema.index({ userId: 1, invoiceNumber: 1 }, { unique: true });
+
+const Invoice = mongoose.models.Invoice || mongoose.model("Invoice", invoiceSchema);
 
 const getInvoiceIdFilter = (idParam) => {
   if (mongoose.Types.ObjectId.isValid(idParam)) {

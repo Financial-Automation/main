@@ -165,8 +165,10 @@ const BankReconciliation = () => {
             formData.append('dateToleranceDays', '3');
             formData.append('matchingTolerance', '0');
 
+            const token = localStorage.getItem("token");
             const response = await fetch(`${API_BASE_URL}/bank-reconciliation/reconcile`, {
                 method: 'POST',
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
                 body: formData
             });
 

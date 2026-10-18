@@ -126,8 +126,8 @@ export async function getFinanceMetrics(userId, start, end) {
         purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
     }
 
-    const totalCashInflow = totalRevenue;
-    const totalCashOutflow = totalExpenses;
+    const totalCashInflow = Math.max(0, totalRevenue - salesInvoiceOutstanding);
+    const totalCashOutflow = Math.max(0, totalExpenses - purchaseInvoiceOutstanding);
     const netCashFlow = totalCashInflow - totalCashOutflow;
 
     const salesRevenue = bkIncomeEntries.filter(e => e.category === "Sales").reduce((sum, e) => sum + (e.amount || 0), 0);

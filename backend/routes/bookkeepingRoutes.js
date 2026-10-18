@@ -64,13 +64,13 @@ router.get("/all", verifyToken, async (req, res) => {
     try {
         const entries = await BookkeepingEntry.find({ userId: req.user.id }).sort({ date: -1 });
 
-        // Calculate totals
+        // Calculate totals (case-insensitive to support legacy data safely)
         const totalIncome = entries
-            .filter(entry => entry.type === 'income') // Note: model uses lowercase 'income'
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'income')
             .reduce((sum, entry) => sum + entry.amount, 0);
 
         const totalExpenses = entries
-            .filter(entry => entry.type === 'expense') // Note: model uses lowercase 'expense'
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'expense')
             .reduce((sum, entry) => sum + entry.amount, 0);
 
         const netBalance = totalIncome - totalExpenses;
@@ -113,24 +113,25 @@ router.get("/summary", verifyToken, async (req, res) => {
         const entries = await BookkeepingEntry.find({ userId: req.user.id });
 
         const totalIncome = entries
-            .filter(entry => entry.type === 'income')
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'income')
             .reduce((sum, entry) => sum + entry.amount, 0);
 
         const totalExpenses = entries
-            .filter(entry => entry.type === 'expense')
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'expense')
             .reduce((sum, entry) => sum + entry.amount, 0);
 
         const netBalance = totalIncome - totalExpenses;
 
         // Category-wise breakdown
         const categoryBreakdown = entries.reduce((acc, entry) => {
-            if (!acc[entry.category]) {
-                acc[entry.category] = { income: 0, expenses: 0 };
+            const cat = entry.category || "General";
+            if (!acc[cat]) {
+                acc[cat] = { income: 0, expenses: 0 };
             }
-            if (entry.type === 'income') {
-                acc[entry.category].income += entry.amount;
+            if (entry.type && entry.type.toString().toLowerCase() === 'income') {
+                acc[cat].income += entry.amount;
             } else {
-                acc[entry.category].expenses += entry.amount;
+                acc[cat].expenses += entry.amount;
             }
             return acc;
         }, {});
