@@ -6,7 +6,15 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import dns from "dns";
 import Razorpay from "razorpay";
+
+// Ensure DNS resolves MongoDB Atlas SRV records reliably across all network environments
+try {
+  dns.setServers(["8.8.8.8", "1.1.1.1"]);
+} catch (dnsErr) {
+  console.warn("DNS server configuration fallback:", dnsErr.message);
+}
 import Plan from "./models/Plan.js";
 import Subscription from "./models/Subscription.js";
 import { authenticateUser, checkSubscription, checkModuleAccess } from "./utils/authMiddleware.js";
@@ -122,36 +130,81 @@ let mongoUri = isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 
+// Configure Mongoose global buffering & timeouts
+mongoose.set("bufferTimeoutMS", 5000);
+
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  family: 4, // Force IPv4 on dual-stack hosts to prevent lookup delays
+};
+
+let isConnecting = false;
+let reconnectTimer = null;
+
+const scheduleReconnect = () => {
+  if (reconnectTimer || mongoose.connection.readyState === 1) return;
+  console.log("🔄 Scheduling MongoDB reconnect in 5 seconds...");
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    await connectToMongoDB();
+  }, 5000);
+};
+
+// Auto-reconnect on disconnect
+mongoose.connection.on("disconnected", () => {
+  console.warn("⚠️ MongoDB disconnected.");
+  scheduleReconnect();
+});
+
+mongoose.connection.on("error", (err) => {
+  console.error("⚠️ MongoDB connection error:", err.message);
+});
+
 // Connect to MongoDB with fallback mechanism
 const connectToMongoDB = async () => {
+  if (isConnecting || mongoose.connection.readyState === 1) return;
+  isConnecting = true;
   try {
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(mongoUri, mongooseOptions);
     console.log("✅ MongoDB Connected Successfully");
     console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
   } catch (err) {
     console.error("❌ Primary MongoDB Connection Failed:", err.message);
 
-    if (isDevelopment) {
+    if (isDevelopment && process.env.PRO_MONGO_URI) {
       console.log("🔄 Falling back to Cloud Database...");
       try {
-        await mongoose.connect(process.env.PRO_MONGO_URI);
+        await mongoose.connect(process.env.PRO_MONGO_URI, mongooseOptions);
         console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
         console.log("📍 Database: Cloud Atlas (Fallback)");
       } catch (fallbackErr) {
         console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
-        console.error("💡 Please ensure MongoDB is running locally or check your internet connection");
-        throw fallbackErr; // Throw error to prevent server from starting without DB
       }
-    } else {
-      console.error("❌ Production MongoDB Connection Failed");
-      console.error("💡 Please check your cloud database configuration");
-      throw err; // Throw error to prevent server from starting without DB
     }
+    scheduleReconnect();
+  } finally {
+    isConnecting = false;
   }
 };
 
-// Don't call it here - we'll call it before starting the server
-// connectToMongoDB();
+// Database connection readiness check middleware
+// Prevents buffering timeouts like "Operation users.findOne() buffering timed out after 10000ms"
+app.use((req, res, next) => {
+  // Allow health check and static uploads through even if DB is reconnecting
+  if (req.path === "/api/health" || req.path.startsWith("/uploads/")) {
+    return next();
+  }
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({
+      success: false,
+      code: "DATABASE_UNAVAILABLE",
+      message: "Database connection is temporarily unavailable. Please retry in a few moments."
+    });
+  }
+  next();
+});
 
 // ✅ User Schema (synced with models/User.js)
 const userSchema = new mongoose.Schema({
@@ -1443,10 +1496,16 @@ const startServer = async () => {
     // Connect to MongoDB first
     await connectToMongoDB();
 
-    // Seed subscription plans
-    await seedPlans();
+    if (mongoose.connection.readyState === 1) {
+      // Seed subscription plans
+      await seedPlans();
+    } else {
+      console.warn("⚠️ Initial database connection not ready. Will retry in background.");
+      scheduleReconnect();
+    }
   } catch (error) {
-    console.warn("⚠️ Database connection failed. Starting server in degraded mode:", error.message);
+    console.warn("⚠️ Database connection error during startup:", error.message);
+    scheduleReconnect();
   }
 
   const server = app.listen(PORT, HOST, () => {
