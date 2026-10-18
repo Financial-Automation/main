@@ -58,14 +58,15 @@ export const getGenAI = () => {
   return genAI;
 };
 
-// Authoritative list of active Gemini models in priority order
+// Authoritative list of active Gemini models in priority order (verified against Google v1beta ModelService)
 export const GEMINI_MODELS = [
   process.env.GEMINI_MODEL,
-  "gemini-3.8-flash",
-  "gemini-3.8-pro",
   "gemini-3.5-flash",
-  "gemini-2.5-flash",
-].filter(Boolean);
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
 // Safety settings configured to prevent probability-based false refusals on business/accounting queries
 export const GEMINI_SAFETY_SETTINGS = [
