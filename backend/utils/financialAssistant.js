@@ -55,6 +55,18 @@ export const recognizeFinancialIntent = (question, previousIntent) => {
   return previousIntent || null;
 };
 
+/**
+ * Returns true only when the user is asking for company-specific financial
+ * data. This keeps explanatory questions such as "What is Total Payables?"
+ * on the knowledge-base path while still routing "What are my Total
+ * Payables this month?" to the authoritative financial tools.
+ */
+export const requestsLiveFinancialData = (question) => {
+  const text = String(question || "").toLowerCase();
+
+  return /\b(my|our|current|actual|live|show|list|how much|balance|breakdown|overdue|outstanding|this\s+(?:month|quarter|year|week)|last\s+(?:month|quarter|year|week)|today|yesterday|date range)\b/.test(text);
+};
+
 export const queryFinancialTool = async ({ userId, intent, period }) => {
   const scope = userScope(userId);
   const dateLabel = `${period.start.toLocaleDateString("en-IN")} – ${period.end.toLocaleDateString("en-IN")}`;

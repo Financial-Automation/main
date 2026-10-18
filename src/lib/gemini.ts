@@ -151,19 +151,22 @@ export const callGemini = async (
   chatMessages: ChatMessage[],
   period = "this-month"
 ): Promise<string> => {
+  // Try backend first (3-tier: financial tool → knowledge base → LLM)
   try {
     const res = await apiRequest(`${API_BASE_URL}/ai/cfo-chat`, {
       method: "POST",
-      body: JSON.stringify({
-        history: chatMessages,
-        period,
-      }),
+      body: JSON.stringify({ history: chatMessages, period }),
     });
     const data = await res.json().catch(() => null);
     if (res.ok && data?.reply) return data.reply;
-    throw new Error(data?.message || "The live financial data service did not return an answer.");
-  } catch (err) {
-    console.error("Error calling backend CFO chat:", err);
-    throw err;
+    // Backend returned a non-ok response — fall through to local engine
+    const serverMsg = data?.message;
+    if (serverMsg) console.warn("[saaiss-ai] backend non-ok:", serverMsg);
+  } catch (networkErr) {
+    // Network failure — fall through to local engine
+    console.error("[saaiss-ai] backend unreachable:", networkErr);
   }
+
+  // Local fallback engine (works offline / when backend is unavailable)
+  return runLocalFallback(chatMessages, period);
 };

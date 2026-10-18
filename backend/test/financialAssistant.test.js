@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { outstandingBalance, isOpenDocument, recognizeFinancialIntent, resolveAssistantPeriod } from "../utils/financialAssistant.js";
+import { outstandingBalance, isOpenDocument, recognizeFinancialIntent, requestsLiveFinancialData, resolveAssistantPeriod } from "../utils/financialAssistant.js";
+import { findBestMatch, knowledgeBaseSummary, searchKnowledgeBase } from "../utils/knowledgeBase.js";
 
 test("outstanding balance respects recorded balances and partial payments", () => {
   assert.equal(outstandingBalance({ total: 1000, paid: 250 }), 750);
@@ -30,4 +31,41 @@ test("last-month period is bounded to the previous calendar month", () => {
   assert.equal(period.start.getDate(), 1);
   assert.equal(period.end.getMonth(), 8);
   assert.equal(period.end.getDate(), 30);
+});
+
+test("conceptual financial questions stay on the knowledge-base path", () => {
+  assert.equal(requestsLiveFinancialData("What does Total Payables mean?"), false);
+  assert.equal(requestsLiveFinancialData("How do I view a profit and loss report?"), false);
+  assert.equal(requestsLiveFinancialData("What is my Total Payables this month?"), true);
+  assert.equal(requestsLiveFinancialData("Explain how payables are calculated and show my current Total Payables."), true);
+  assert.equal(recognizeFinancialIntent("What is my Total Payables this month?"), "total_payables");
+  assert.equal(recognizeFinancialIntent("Explain how payables are calculated and show my current Total Payables."), "total_payables");
+});
+
+test("knowledge base retrieves requested invoice and module workflows", () => {
+  const expected = new Map([
+    ["Explain how invoice creation works.", "invoice-creation-overview"],
+    ["How can I make a bill for my customer?", "sales-invoice-creation"],
+    ["How do I create a purchase invoice?", "purchase-invoice-creation"],
+    ["Where can I find a saved invoice?", "invoice-find"],
+    ["How do I print an invoice PDF?", "invoice-print"],
+    ["How do I apply a payment?", "invoice-payment"],
+    ["What is the difference between sales and purchase invoices?", "sales-vs-purchase-invoice"],
+    ["What does Total Payables mean?", "total-payables-concept"],
+    ["How does inventory work?", "inventory-overview"],
+    ["How do I view my profit and loss report?", "pnl-report"],
+    ["What is cash flow prediction?", "cash-flow-overview"],
+    ["Why are my dashboard and AI CFO showing different amounts?", "dashboard-ai-discrepancy"],
+    ["Why is my invoice not saving?", "troubleshooting"],
+  ]);
+
+  for (const [question, id] of expected) {
+    assert.equal(findBestMatch(question)?.record.id, id, question);
+  }
+
+  assert.ok(searchKnowledgeBase("How can I make a bill for my customer?", 2).length > 0);
+  const record = findBestMatch("How can I make a bill for my customer?")?.record;
+  assert.equal(record?.answerType, "application_workflow");
+  assert.ok(record?.verificationStatus);
+  assert.ok(knowledgeBaseSummary().recordCount >= 19);
 });
