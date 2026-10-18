@@ -71,6 +71,13 @@ export const authenticateUser = async (req, res, next) => {
     if (error.name === "TokenExpiredError") {
       return res.status(401).json({ message: "Token expired. Please log in again." });
     }
+    if (error.name === "MongooseError" || error.name === "MongoServerSelectionError" || error.message?.includes("buffering timed out")) {
+      return res.status(503).json({
+        success: false,
+        code: "DATABASE_UNAVAILABLE",
+        message: "Database connection is temporarily unavailable. Please retry in a few moments."
+      });
+    }
     return res.status(401).json({ message: "Invalid authorization token." });
   }
 };

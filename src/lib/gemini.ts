@@ -21,7 +21,9 @@ export const SUGGESTED_PROMPTS = [
 
 const toNumber = (value: unknown) => Number(value) || 0;
 
-// ─── Legacy local renderer (not used for financial answers) ─────────────────
+// Legacy renderer retained only for local development reference. It must never
+// be used as a production fallback because it cannot provide authoritative
+// tenant-scoped financial data.
 const runLocalFallback = async (
   chatMessages: ChatMessage[],
   period = "this-month"
@@ -152,22 +154,20 @@ export const callGemini = async (
   chatMessages: ChatMessage[],
   period = "this-month"
 ): Promise<string> => {
-  // Try backend first (3-tier: financial tool → knowledge base → LLM)
+  // The server owns model credentials, verified workflow knowledge, and
+  // tenant-scoped financial tools. Never substitute a browser-side estimate.
   try {
     const res = await apiRequest(`${API_BASE_URL}/ai/cfo-chat`, {
       method: "POST",
       body: JSON.stringify({ history: chatMessages, period }),
     });
     const data = await res.json().catch(() => null);
-    if (res.ok && data?.reply) return data.reply;
-    // Backend returned a non-ok response — fall through to local engine
-    const serverMsg = data?.message;
-    if (serverMsg) console.warn("[saaiss-ai] backend non-ok:", serverMsg);
+    if (res.ok && typeof data?.reply === "string" && data.reply.trim()) return data.reply;
+    throw new Error(data?.message || "The AI service returned an invalid response. Please try again.");
   } catch (networkErr) {
-    // Network failure — fall through to local engine
-    console.error("[saaiss-ai] backend unreachable:", networkErr);
+    console.error("[saaiss-ai] request failed:", networkErr);
+    throw networkErr instanceof Error
+      ? networkErr
+      : new Error("The AI service is unavailable. Please try again.");
   }
-
-  // Local fallback engine (works offline / when backend is unavailable)
-  return runLocalFallback(chatMessages, period);
 };

@@ -281,10 +281,93 @@ export const recognizeFinancialIntent = (question, previousIntent = null, histor
   return "dashboard_summary";
 };
 
+export const isGeneralQuestion = (question) => {
+  const text = String(question || "").toLowerCase().trim();
+  if (!text) return false;
+
+  // 1. Conceptual differences and comparisons across general accounting terms
+  if (/\b(difference between|what is the difference|vs\.?|versus)\b/i.test(text)) {
+    return true;
+  }
+
+  // 2. Explanations in simple terms / beginner level
+  if (/\b(in simple terms|simple words|for beginners|layman('?s)? terms?|explain simply)\b/i.test(text)) {
+    return true;
+  }
+
+  // 3. Generative or writing tasks (emails, letters, templates)
+  if (/\b(write|draft|compose|help me write|create an email|draft a message|sample email|template for)\b/i.test(text)) {
+    return true;
+  }
+
+  // 4. General programming, algorithms, math, or external topics
+  if (/\b(python|javascript|code|script|algorithm|compound interest|depreciation method)\b/i.test(text)) {
+    return true;
+  }
+
+  return false;
+};
+
+export const isLiveFinancialQuery = (question, previousIntent = null, history = []) => {
+  const text = String(question || "").toLowerCase().trim();
+  if (!text) return true; // empty query defaults to live dashboard summary for safety/compatibility
+
+  // 1. Specific invoice reference
+  if (extractInvoiceIdentifier(text)) return true;
+
+  // 2. Follow-up heuristics when previousIntent is present
+  if (previousIntent && (
+    /\b(which ones|which|who|list them|what about|how about|and|for)\b/.test(text) ||
+    /^\s*overdue\??\s*$/.test(text) ||
+    text.length < 20
+  )) {
+    return true;
+  }
+
+  // 3. User explicitly asking for company-specific numbers, records, or live calculations
+  if (requestsLiveFinancialData(text)) {
+    return true;
+  }
+
+  // 4. Exact metric command phrases (e.g., "total payables", "net profit", "cash balance")
+  const directMetricPatterns = [
+    /^(total )?payables?$/i,
+    /^(total )?receivables?$/i,
+    /^(total )?purchases?$/i,
+    /^(net )?profit( and loss)?$/i,
+    /^p&l$/i,
+    /^(total )?(revenue|sales|turnover)$/i,
+    /^(total )?(expenses?|expenditure)$/i,
+    /^(current )?cash (balance|flow|position)$/i,
+    /^balance sheet$/i,
+    /^(financial )?ratios?$/i,
+    /^(current )?inventory( valuation)?$/i,
+    /^payroll( summary)?$/i,
+    /^bank reconciliation$/i,
+    /^fraud detection$/i,
+    /^gst (summary|liability|payable)$/i,
+    /^(financial|dashboard|cfo) summary$/i
+  ];
+  if (directMetricPatterns.some(p => p.test(text))) {
+    return true;
+  }
+
+  return false;
+};
+
 // ============================================================================
 // QUESTION CLASSIFICATION (WORKFLOW vs DATA vs CONCEPT vs UNSUPPORTED)
 // ============================================================================
 export const classifyQuestion = (question, previousIntent = null, history = []) => {
+  const rawText = String(question || "").trim();
+  if (!rawText) {
+    return {
+      type: "LIVE_FINANCIAL_DATA",
+      knowledge: null,
+      intent: "dashboard_summary"
+    };
+  }
+
   // 1. Check structured application knowledge
   const appCheck = searchApplicationKnowledge(question);
   if (appCheck) {
@@ -299,7 +382,17 @@ export const classifyQuestion = (question, previousIntent = null, history = []) 
     };
   }
 
-  // 2. Structured Q&A Knowledge Base Retrieval
+  // 2. Explicit generative/comparison/simple-terms questions bypass loose keyword matching
+  const isGeneral = isGeneralQuestion(question);
+  if (isGeneral) {
+    return {
+      type: "GENERAL_QUESTION",
+      knowledge: null,
+      intent: null
+    };
+  }
+
+  // 3. Structured Q&A Knowledge Base Retrieval
   const qaResult = retrieveKnowledge(question);
   if (qaResult && qaResult.bestMatch && qaResult.confidence !== "none" && qaResult.score >= 0.45) {
     const rec = qaResult.bestMatch;
@@ -326,7 +419,15 @@ export const classifyQuestion = (question, previousIntent = null, history = []) 
     };
   }
 
-  // 3. Live Financial Data
+  // 4. Live Financial Data vs General Conversational / Educational Question
+  if (!isLiveFinancialQuery(question, previousIntent, history)) {
+    return {
+      type: "GENERAL_QUESTION",
+      knowledge: null,
+      intent: null
+    };
+  }
+
   const intent = recognizeFinancialIntent(question, previousIntent, history);
   return {
     type: "LIVE_FINANCIAL_DATA",

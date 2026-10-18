@@ -1,5 +1,5 @@
 import express from "express";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
 import { uploadInvoiceFile } from "../utils/invoiceStorage.js";
 import jwt from "jsonwebtoken";
 import ChatMessage from "../models/ChatMessage.js";
@@ -58,29 +58,60 @@ export const getGenAI = () => {
   return genAI;
 };
 
-// Authoritative list of active Gemini models in priority order
+// Authoritative list of active Gemini models in priority order (verified against Google v1beta ModelService)
 export const GEMINI_MODELS = [
   process.env.GEMINI_MODEL,
-  "gemini-3.8-flash",
-  "gemini-3.8-pro",
   "gemini-3.5-flash",
-  "gemini-2.5-flash",
-].filter(Boolean);
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
-export const generateGeminiContent = async (contentsOrPrompt) => {
+// Safety settings configured to prevent probability-based false refusals on business/accounting queries
+export const GEMINI_SAFETY_SETTINGS = [
+  {
+    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    threshold: HarmBlockThreshold.BLOCK_NONE,
+  },
+];
+
+export const generateGeminiContent = async (contentsOrPrompt, options = {}) => {
   const ai = getGenAI();
   if (!ai || !process.env.GEMINI_API_KEY) return null;
 
+  const modelConfig = {
+    safetySettings: GEMINI_SAFETY_SETTINGS,
+    ...(options.systemInstruction ? { systemInstruction: options.systemInstruction } : {}),
+  };
+
   for (const modelName of GEMINI_MODELS) {
     try {
-      const model = ai.getGenerativeModel({ model: modelName });
+      const model = ai.getGenerativeModel({ model: modelName, ...modelConfig });
       const result = typeof contentsOrPrompt === "string"
         ? await model.generateContent(contentsOrPrompt)
         : await model.generateContent({ contents: contentsOrPrompt });
       const response = await result.response;
+      const candidate = response?.candidates?.[0];
+      const finishReason = candidate?.finishReason;
+      if (finishReason && finishReason !== "STOP") {
+        console.warn(`[gemini] Model ${modelName} candidate finishReason:`, finishReason);
+      }
       const text = response?.text();
       if (text && text.trim().length > 0) {
-        return { text: text.trim(), model: modelName };
+        return { text: text.trim(), model: modelName, finishReason: finishReason || "STOP" };
       }
     } catch (err) {
       console.warn(`[gemini] Model ${modelName} call failed:`, err.message);
@@ -828,7 +859,7 @@ router.get("/config-status", (req, res) => {
 // System instructions for SHREE ANDAL AI
 export const SHREE_ANDAL_SYSTEM_PROMPT = `You are SHREE ANDAL AI, the SaaISS application and financial assistant.
 
-You answer questions about the application's features, workflows, invoice creation, payments, inventory, bookkeeping, reports, troubleshooting, general accounting concepts, and authorized live financial information.
+You answer questions about the application's features, workflows, invoice creation, payments, inventory, bookkeeping, reports, troubleshooting, general accounting concepts, business taxation, and authorized live financial information.
 
 Do not restrict responses to payables, receivables, sales, expenses, and profit and loss.
 
@@ -836,7 +867,7 @@ For application workflow questions, search the verified SaaISS application knowl
 
 For live company financial questions, execute the appropriate authorized backend financial tool and use its verified result. Never fabricate amounts or present a general explanation as a live financial result.
 
-For general accounting questions, provide an accurate explanation and distinguish general knowledge from company-specific data.
+For general accounting, business, taxation, or educational questions (such as the difference between revenue and cash received, GST fundamentals, accounts receivable definition, working capital, depreciation), provide an authoritative, clear, objective explanation. Distinguish theoretical principles from company-specific live data. Avoid unnecessary conversational hedging, excessive apologies, or disclaimers that you are "only an AI".
 
 For combined questions, retrieve the relevant application knowledge and execute the required financial tools.
 
@@ -844,11 +875,32 @@ For troubleshooting, distinguish confirmed facts from possible causes.
 
 If a feature or workflow cannot be verified, state that limitation honestly.
 
-Never return the old financial-only refusal for a normal application question.
+Never return the old financial-only refusal ("I can currently retrieve payables, receivables, sales, expenses, and profit and loss...") for any normal application, accounting, or conversational question.
 
 Do not claim that a transaction was created, changed, paid, or saved unless the backend confirms the action.
 
 Respect user permissions and company-level data isolation.`;
+
+export const formatGeminiContents = (history = []) => {
+  if (!Array.isArray(history) || history.length === 0) return [];
+  const contents = [];
+  for (const msg of history.slice(-8)) {
+    const role = msg.role === "assistant" || msg.role === "model" ? "model" : "user";
+    const text = typeof msg.content === "string" ? msg.content.trim() : "";
+    if (!text) continue;
+    // Prevent consecutive identical roles by merging text
+    if (contents.length > 0 && contents[contents.length - 1].role === role) {
+      contents[contents.length - 1].parts[0].text += "\n" + text;
+    } else {
+      contents.push({ role, parts: [{ text }] });
+    }
+  }
+  // Ensure the conversation starts with a user turn as required by Gemini API
+  while (contents.length > 0 && contents[0].role !== "user") {
+    contents.shift();
+  }
+  return contents;
+};
 
 // POST /api/ai/cfo-chat
 // Authoritative SaaISS AI CFO Endpoint
@@ -977,7 +1029,38 @@ Provide the expert answer:`;
       });
     }
 
-    // 4. Live Financial Data Execution
+    // 4. General Conversational, Educational, Accounting, and Business Questions
+    if (classification.type === "GENERAL_QUESTION") {
+      let reply = "";
+      const contents = formatGeminiContents(history);
+
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          const geminiRes = await generateGeminiContent(
+            contents.length > 0 ? contents : question,
+            { systemInstruction: SHREE_ANDAL_SYSTEM_PROMPT }
+          );
+          if (geminiRes?.text) {
+            reply = geminiRes.text;
+          }
+        } catch (geminiErr) {
+          console.warn("[financial-assistant] Gemini general question error:", geminiErr.message);
+        }
+      }
+
+      if (!reply) {
+        reply = "I am SHREE ANDAL AI, your SaaISS application and financial assistant. While I am primarily optimized for SaaISS accounting workflows and company financial analytics, here is what I can tell you:\n\n" +
+          "Could you please clarify your request, or ask about SaaISS invoicing, inventory, bookkeeping, or your company's financial metrics?";
+      }
+
+      return res.json({
+        success: true,
+        type: "general_question",
+        reply
+      });
+    }
+
+    // 5. Live Financial Data Execution
     const inferredPeriod = /\blast month\b/i.test(question) ? "last-month"
       : /\bthis quarter\b/i.test(question) ? "this-quarter"
       : /\bthis (year|financial year)\b/i.test(question) ? "this-year"
