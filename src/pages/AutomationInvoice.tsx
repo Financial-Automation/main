@@ -679,9 +679,12 @@ const AutomationInvoice = () => {
         },
         body: JSON.stringify({
           amount: actualAmount,
-          amountPaid: actualAmount,
           paymentMethod: paymentForm.paymentMethod,
           paymentDate: paymentForm.paymentDate,
+          depositAccount: paymentForm.depositAccount,
+          referenceNumber: paymentForm.referenceNumber,
+          notes: paymentForm.notes,
+          idempotencyKey: `pay_${targetId}_${Date.now()}`,
           isCredit
         })
       });
@@ -704,10 +707,10 @@ const AutomationInvoice = () => {
       newPaid = prevPaid;
       newBalance = Math.max(0, grandTotal - newPaid);
     } else if (updatedInvoiceData) {
-      newPaid = Number(updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? (prevPaid + actualAmount));
-      newBalance = Number(updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? Math.max(0, grandTotal - newPaid));
+      newPaid = Math.min(grandTotal, Number(updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? (prevPaid + actualAmount)));
+      newBalance = Math.max(0, Number(updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? (grandTotal - newPaid)));
     } else {
-      newPaid = prevPaid + actualAmount;
+      newPaid = Math.min(grandTotal, prevPaid + actualAmount);
       newBalance = Math.max(0, grandTotal - newPaid);
     }
 
@@ -1382,7 +1385,7 @@ const AutomationInvoice = () => {
   const handlePaymentMethodChange = (mode: string) => {
     const isCredit = mode.toLowerCase() === 'credit';
     setCurrentInvoice(prev => {
-      const defaultPaid = isCredit ? 0 : (prev.paid > 0 ? prev.paid : prev.total);
+      const defaultPaid = isCredit ? 0 : Math.min(prev.total, Math.max(0, prev.paid));
       const defaultBalance = isCredit ? prev.total : Math.max(0, prev.total - defaultPaid);
 
       let newDueDate = prev.dueDate;
@@ -2196,8 +2199,12 @@ const AutomationInvoice = () => {
             colX += colWidth;
           };
 
-          renderCol("Paid Amount", formatPDFCurrency(data.paid || 0, "INR "));
-          renderCol("Balance Due", formatPDFCurrency(data.balance ?? ((data.total || 0) - (data.paid || 0)), "INR "), true, "#e11d48");
+          const pdfTotal = Math.round((Number(data.total || data.grandTotal || 0)) * 100) / 100;
+          const pdfPaid = Math.min(pdfTotal, Math.max(0, Math.round((Number(data.paid ?? data.amountPaid ?? 0)) * 100) / 100));
+          const pdfBalance = Math.max(0, Math.round((pdfTotal - pdfPaid) * 100) / 100);
+
+          renderCol("Paid Amount", formatPDFCurrency(pdfPaid, "INR "));
+          renderCol("Balance Due", formatPDFCurrency(pdfBalance, "INR "), true, "#e11d48");
           if (data.paymentMethod) {
             renderCol("Method", data.paymentMethod);
           }

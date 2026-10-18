@@ -488,15 +488,24 @@ const PublicInvoiceView = () => {
                                 </span>
                             </div>
 
-                            <div className="flex justify-between text-slate-600 text-xs pt-2">
-                                <span>Amount Paid</span>
-                                <span className="text-emerald-600 font-bold">₹{(invoice.amountPaid || 0).toFixed(2)}</span>
-                            </div>
+                            {(() => {
+                                const total = Number(invoice.grandTotal || 0);
+                                const paid = Math.min(total, Math.max(0, Number(invoice.amountPaid || 0)));
+                                const balance = Math.max(0, total - paid);
+                                return (
+                                    <>
+                                        <div className="flex justify-between text-slate-600 text-xs pt-2">
+                                            <span>Amount Paid</span>
+                                            <span className="text-emerald-600 font-bold">₹{paid.toFixed(2)}</span>
+                                        </div>
 
-                            <div className="flex justify-between text-slate-600 text-xs pt-1">
-                                <span>Balance Due</span>
-                                <span className="text-rose-600 font-bold">₹{(invoice.balanceDue ?? (invoice.grandTotal - (invoice.amountPaid || 0))).toFixed(2)}</span>
-                            </div>
+                                        <div className="flex justify-between text-slate-600 text-xs pt-1">
+                                            <span>Balance Due</span>
+                                            <span className="text-rose-600 font-bold">₹{balance.toFixed(2)}</span>
+                                        </div>
+                                    </>
+                                );
+                            })()}
                         </div>
                     </div>
 

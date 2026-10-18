@@ -6,6 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
+import Payment from "../models/Payment.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -222,11 +223,43 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
       invoiceData.invoiceNumber = `INV-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, '0')}`;
     }
 
-    // Calculate balance due
-    invoiceData.balanceDue = invoiceData.grandTotal - (invoiceData.amountPaid || 0);
+    // Calculate balance due and validate amountPaid
+    const grandTotal = Math.round((Number(invoiceData.grandTotal) || 0) * 100) / 100;
+    const initialPaid = Math.round((Number(invoiceData.amountPaid) || 0) * 100) / 100;
+    const validatedPaid = Math.min(grandTotal, Math.max(0, initialPaid));
+    invoiceData.grandTotal = grandTotal;
+    invoiceData.amountPaid = validatedPaid;
+    invoiceData.balanceDue = Math.max(0, Math.round((grandTotal - validatedPaid) * 100) / 100);
+
+    if (invoiceData.balanceDue === 0 && grandTotal > 0) {
+      invoiceData.paymentStatus = 'paid';
+      invoiceData.status = 'paid';
+    } else if (validatedPaid > 0) {
+      invoiceData.paymentStatus = 'partial';
+      if (invoiceData.status === 'draft') invoiceData.status = 'sent';
+    } else {
+      invoiceData.paymentStatus = 'pending';
+    }
 
     const newInvoice = new Invoice(invoiceData);
     await newInvoice.save();
+
+    // If initial payment was recorded at creation, persist Payment audit record
+    if (validatedPaid > 0) {
+      const initialPayment = new Payment({
+        userId: newInvoice.userId || req.user?.id,
+        invoiceId: newInvoice._id,
+        paymentNumber: `PMT-${newInvoice.invoiceNumber}-01`,
+        amount: validatedPaid,
+        paymentDate: newInvoice.invoiceDate || new Date(),
+        paymentMethod: newInvoice.paymentMethod || 'cash',
+        depositAccount: "Cash/Bank",
+        referenceNumber: `init_${newInvoice.invoiceNumber}`,
+        notes: "Initial payment recorded during invoice creation.",
+        idempotencyKey: `init_${newInvoice._id}`
+      });
+      await initialPayment.save();
+    }
 
     // Automatically generate Bookkeeping Entry for sales invoice
     const invUserId = newInvoice.userId || req.user?.id;
@@ -511,18 +544,25 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
     const updateData = req.body;
     const userFilter = getUserFilter(req);
 
-    // Recalculate balance due if payment is updated
-    if (updateData.amountPaid !== undefined) {
+    // Recalculate balance due if payment or grandTotal is updated
+    if (updateData.amountPaid !== undefined || updateData.grandTotal !== undefined) {
       const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
       if (currentInvoice) {
-        updateData.balanceDue = currentInvoice.grandTotal - updateData.amountPaid;
+        const grandTotal = Math.round((Number(updateData.grandTotal !== undefined ? updateData.grandTotal : currentInvoice.grandTotal) || 0) * 100) / 100;
+        const requestedPaid = Math.round((Number(updateData.amountPaid !== undefined ? updateData.amountPaid : currentInvoice.amountPaid) || 0) * 100) / 100;
+        const validatedPaid = Math.min(grandTotal, Math.max(0, requestedPaid));
+        updateData.grandTotal = grandTotal;
+        updateData.amountPaid = validatedPaid;
+        updateData.balanceDue = Math.max(0, Math.round((grandTotal - validatedPaid) * 100) / 100);
 
         // Update payment status based on balance
-        if (updateData.balanceDue === 0) {
+        if (updateData.balanceDue === 0 && grandTotal > 0) {
           updateData.paymentStatus = 'paid';
           updateData.status = 'paid';
-        } else if (updateData.amountPaid > 0) {
+        } else if (validatedPaid > 0) {
           updateData.paymentStatus = 'partial';
+        } else {
+          updateData.paymentStatus = 'pending';
         }
       }
     }
@@ -659,14 +699,25 @@ router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
   }
 });
 
-// ✅ 8. Update Payment Status
+// ✅ 8. Update Payment Status (with Idempotency, Capping, & Audit Trail)
 router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
   if (req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'PUT') {
     return res.status(405).json({ message: "Method not allowed" });
   }
   try {
-    const { amount, amountPaid, paymentMethod, paymentDate, paymentStatus } = req.body;
-    const payAmt = parseFloat(amount || amountPaid || 0);
+    const {
+      amount,
+      amountPaid,
+      paymentMethod,
+      paymentDate,
+      paymentStatus,
+      referenceNumber,
+      transactionReference,
+      notes,
+      depositAccount
+    } = req.body;
+
+    const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || referenceNumber || transactionReference || "").trim();
 
     const userIdStr = req.user?._id ? req.user._id.toString() : req.user?.id;
     const userIdObj = userIdStr && mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
@@ -683,10 +734,87 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
       return res.status(404).json({ message: "Invoice not found" });
     }
 
-    const newAmountPaid = (invoice.amountPaid || 0) + payAmt;
-    const newBalanceDue = Math.max(0, invoice.grandTotal - newAmountPaid);
-    const newStatus = newBalanceDue <= 0 ? 'paid' : newAmountPaid > 0 ? 'partial' : 'pending';
+    // 1. Idempotency Check: prevent duplicate processing on retries or double-clicks
+    if (idempotencyKey) {
+      const existingPayment = await Payment.findOne({
+        invoiceId: invoice._id,
+        idempotencyKey
+      });
+      if (existingPayment) {
+        return res.json({
+          message: "Payment already recorded (idempotent duplicate)",
+          invoice,
+          payment: existingPayment,
+          isDuplicate: true
+        });
+      }
+    }
 
+    // 2. Parse and validate payment increment amount
+    let payAmt = 0;
+    if (amount !== undefined && amount !== null && !isNaN(parseFloat(amount))) {
+      payAmt = parseFloat(amount);
+    } else if (amountPaid !== undefined && amountPaid !== null && !isNaN(parseFloat(amountPaid))) {
+      const parsedAmountPaid = parseFloat(amountPaid);
+      // If amountPaid was provided as the cumulative paid amount:
+      if (parsedAmountPaid > (invoice.amountPaid || 0)) {
+        payAmt = parsedAmountPaid - (invoice.amountPaid || 0);
+      } else {
+        payAmt = parsedAmountPaid;
+      }
+    }
+
+    payAmt = Math.round(payAmt * 100) / 100;
+
+    if (isNaN(payAmt) || payAmt <= 0) {
+      return res.status(400).json({ message: "Invalid payment amount. Amount must be greater than 0." });
+    }
+
+    const grandTotal = Math.round((Number(invoice.grandTotal) || 0) * 100) / 100;
+    const currentPaid = Math.round((Number(invoice.amountPaid) || 0) * 100) / 100;
+    const currentBalance = Math.max(0, Math.round((grandTotal - currentPaid) * 100) / 100);
+
+    if (currentBalance <= 0) {
+      return res.status(400).json({
+        message: "Invoice is already fully paid. Cannot accept further payment.",
+        grandTotal,
+        amountPaid: currentPaid,
+        balanceDue: 0
+      });
+    }
+
+    // Payment cannot exceed remaining balance
+    if (payAmt > currentBalance + 0.01) {
+      return res.status(400).json({
+        message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`,
+        grandTotal,
+        amountPaid: currentPaid,
+        balanceDue: currentBalance
+      });
+    }
+
+    const newAmountPaid = Math.min(grandTotal, Math.round((currentPaid + payAmt) * 100) / 100);
+    const newBalanceDue = Math.max(0, Math.round((grandTotal - newAmountPaid) * 100) / 100);
+    const newStatus = newBalanceDue <= 0 ? 'paid' : 'partial';
+
+    // 3. Persist Payment audit record
+    const pCount = await Payment.countDocuments({ invoiceId: invoice._id });
+    const paymentNumber = `PMT-${invoice.invoiceNumber || invoice._id}-${(pCount + 1).toString().padStart(2, '0')}`;
+    const paymentRecord = new Payment({
+      userId: invoice.userId || req.user?.id,
+      invoiceId: invoice._id,
+      paymentNumber,
+      amount: payAmt,
+      paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
+      paymentMethod: paymentMethod || invoice.paymentMethod || 'cash',
+      depositAccount: depositAccount || "Cash/Bank",
+      referenceNumber: referenceNumber || transactionReference || idempotencyKey || "",
+      notes: notes || `Payment received against invoice ${invoice.invoiceNumber}`,
+      idempotencyKey: idempotencyKey || ""
+    });
+    await paymentRecord.save();
+
+    // 4. Update Invoice
     invoice.amountPaid = newAmountPaid;
     invoice.balanceDue = newBalanceDue;
     invoice.paymentStatus = paymentStatus || newStatus;
@@ -697,9 +825,31 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
 
     await invoice.save();
 
+    // 5. Update Double-Entry Ledger (Debit Cash/Bank, Credit Accounts Receivable)
+    try {
+      const LedgerAccount = mongoose.models.LedgerAccount || mongoose.model("LedgerAccount");
+      if (LedgerAccount && invoice.userId) {
+        const [cashAcc, arAcc] = await Promise.all([
+          LedgerAccount.findOne({ userId: invoice.userId, name: "Cash/Bank" }),
+          LedgerAccount.findOne({ userId: invoice.userId, name: "Accounts Receivable" })
+        ]);
+        if (cashAcc) {
+          cashAcc.balance = Math.round((cashAcc.balance + payAmt) * 100) / 100;
+          await cashAcc.save();
+        }
+        if (arAcc) {
+          arAcc.balance = Math.round((arAcc.balance - payAmt) * 100) / 100;
+          await arAcc.save();
+        }
+      }
+    } catch (ledgerErr) {
+      console.warn("Ledger sync notice:", ledgerErr.message);
+    }
+
     res.json({
-      message: "Payment status updated successfully!",
-      invoice
+      message: "Payment recorded successfully!",
+      invoice,
+      payment: paymentRecord
     });
   } catch (error) {
     console.error("Error updating payment status:", error);

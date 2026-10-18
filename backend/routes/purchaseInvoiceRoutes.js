@@ -379,35 +379,66 @@ router.get("/:id", verifyToken, async (req, res) => {
 });
 
 
-// POST - Record payment for purchase invoice
+// POST - Record payment for purchase invoice (isolated supplier-payable workflow)
 router.post("/:id/payment", verifyToken, async (req, res) => {
     try {
-        const { amount } = req.body;
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ message: "Invalid payment amount" });
+        const { amount, paymentMethod, paymentDate, referenceNumber, notes } = req.body;
+        const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || referenceNumber || "").trim();
+        const payAmt = Math.round((Number(amount) || 0) * 100) / 100;
+
+        if (isNaN(payAmt) || payAmt <= 0) {
+            return res.status(400).json({ message: "Invalid payment amount. Amount must be greater than 0." });
         }
         
         const invoice = await PurchaseInvoice.findOne({ _id: req.params.id, userId: req.user.id });
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
+
+        const grandTotal = Math.round((Number(invoice.total || invoice.subtotal) || 0) * 100) / 100;
+        const currentPaid = Math.round((Number(invoice.paid) || 0) * 100) / 100;
+        const currentBalance = Math.max(0, Math.round((grandTotal - currentPaid) * 100) / 100);
+
+        if (currentBalance <= 0) {
+            return res.status(400).json({
+                message: "Purchase invoice is already fully paid. Cannot accept further payment.",
+                total: grandTotal,
+                paid: currentPaid,
+                balance: 0
+            });
+        }
+
+        // Prevent payment greater than remaining balance
+        if (payAmt > currentBalance + 0.01) {
+            return res.status(400).json({
+                message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`,
+                total: grandTotal,
+                paid: currentPaid,
+                balance: currentBalance
+            });
+        }
+
+        const newPaid = Math.min(grandTotal, Math.round((currentPaid + payAmt) * 100) / 100);
+        const newBalance = Math.max(0, Math.round((grandTotal - newPaid) * 100) / 100);
         
-        // Update paid and balance
-        invoice.paid = (invoice.paid || 0) + Number(amount);
-        invoice.balance = invoice.total - invoice.paid;
-        
-        // Don't allow negative balance
-        if (invoice.balance < 0) {
-            invoice.balance = 0;
-            invoice.paid = invoice.total;
+        invoice.paid = newPaid;
+        invoice.balance = newBalance;
+        if (newBalance === 0) {
+            invoice.status = 'paid';
+        }
+        if (paymentMethod) {
+            invoice.paymentMethod = paymentMethod;
         }
         
         await invoice.save();
         
-        res.json({ message: "Payment recorded successfully", invoice });
+        res.json({
+            message: "Payment recorded successfully",
+            invoice
+        });
     } catch (error) {
         console.error("Error recording payment:", error);
-        res.status(500).json({ message: "Error recording payment" });
+        res.status(500).json({ message: "Error recording payment", error: error.message });
     }
 });
 

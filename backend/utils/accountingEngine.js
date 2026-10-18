@@ -413,15 +413,9 @@ export const processInvoiceEvent = async (invoiceId, eventType, extraData = null
             await cf.save({ session });
           }
 
-          // Create Bookkeeping Payment entry
-          await BookkeepingEntry.create([{
-            userId,
-            date: invoice.invoiceDate,
-            description: `Payment receipt for Invoice ${invoice.invoiceNumber}`,
-            category: "Sales",
-            amount: invoice.amountPaid,
-            type: "income"
-          }], { session });
+          // Note: Payment receipt is a collection on Accounts Receivable, not new sales revenue.
+          // The Sales Invoice already records the revenue entry. Recording payment as an additional
+          // "Sales" income entry would duplicate sales revenue. Cash movement is tracked in CashTransaction.
 
           // Record actual cash transaction
           const cashTx = new CashTransaction({
@@ -501,15 +495,9 @@ export const processInvoiceEvent = async (invoiceId, eventType, extraData = null
         await cf.save({ session });
       }
 
-      // Bookkeeping payment sync
-      await BookkeepingEntry.create([{
-        userId,
-        date: new Date(paymentDate),
-        description: `Payment receipt #${paymentNumber} for Invoice ${invoice.invoiceNumber}`,
-        category: "Sales",
-        amount: amount,
-        type: "income"
-      }], { session });
+      // Note: Payment receipt is a collection on Accounts Receivable, not new sales revenue.
+      // Sales revenue is recognized when the Sales Invoice is finalized. Adding another "Sales"
+      // income entry would duplicate sales revenue in financial reports. Cash is tracked in CashTransaction.
 
       // Record cash transaction
       const cashTx = new CashTransaction({
@@ -524,11 +512,11 @@ export const processInvoiceEvent = async (invoiceId, eventType, extraData = null
       });
       await cashTx.save({ session });
 
-      // Update invoice values
-      invoice.amountPaid = roundDec(invoice.amountPaid + amount);
-      invoice.balanceDue = roundDec(invoice.grandTotal - invoice.amountPaid);
+      // Update invoice values with strict capping
+      invoice.amountPaid = Math.min(invoice.grandTotal, roundDec(invoice.amountPaid + amount));
+      invoice.balanceDue = Math.max(0, roundDec(invoice.grandTotal - invoice.amountPaid));
       invoice.paymentStatus = invoice.balanceDue <= 0 ? 'paid' : 'partial';
-      invoice.status = invoice.balanceDue <= 0 ? 'paid' : 'sent';
+      invoice.status = invoice.balanceDue <= 0 ? 'paid' : (invoice.status === 'draft' ? 'sent' : invoice.status);
       invoice.updatedAt = new Date();
       await invoice.save({ session });
 
