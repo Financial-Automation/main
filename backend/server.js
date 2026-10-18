@@ -4,12 +4,19 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 import Razorpay from "razorpay";
 import Plan from "./models/Plan.js";
 import Subscription from "./models/Subscription.js";
 import { authenticateUser, checkSubscription, checkModuleAccess } from "./utils/authMiddleware.js";
 import { sendResetEmail } from "./utils/emailService.js";
 import crypto from "crypto";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, ".env") });
+dotenv.config();
 
 const planKeyToName = {
   // New plan keys
@@ -48,7 +55,6 @@ import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
 import purchaseInvoiceTemplateRoutes from "./routes/purchaseInvoiceTemplateRoutes.js";
 
-dotenv.config();
 const app = express();
 
 // ✅ Razorpay Configuration

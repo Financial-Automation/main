@@ -14,6 +14,14 @@ import { formatFinancialAnswer, queryFinancialTool, recognizeFinancialIntent, re
 import { formatKnowledgeAnswer } from "../utils/applicationKnowledge.js";
 import { getTotalReceivables, getTotalPayables } from "../utils/financialTools.js";
 import { createRequire } from "module";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+dotenv.config();
 
 const require = createRequire(import.meta.url);
 const Tesseract = require("tesseract.js");
@@ -39,14 +47,46 @@ const verifyToken = (req, res, next) => {
   }
 };
 
-// Initialize Gemini AI lazily (after env is loaded by server.js)
+// Initialize Gemini AI lazily (after env is loaded)
 let genAI = null;
-const getGenAI = () => {
-  if (!genAI && process.env.GEMINI_API_KEY) {
-    genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+export const getGenAI = () => {
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  if (!genAI && apiKey) {
+    genAI = new GoogleGenerativeAI(apiKey);
     console.log("✅ Gemini AI initialized");
   }
   return genAI;
+};
+
+// Authoritative list of active Gemini models in priority order
+export const GEMINI_MODELS = [
+  process.env.GEMINI_MODEL,
+  "gemini-3.8-flash",
+  "gemini-3.8-pro",
+  "gemini-3.5-flash",
+  "gemini-2.5-flash",
+].filter(Boolean);
+
+export const generateGeminiContent = async (contentsOrPrompt) => {
+  const ai = getGenAI();
+  if (!ai || !process.env.GEMINI_API_KEY) return null;
+
+  for (const modelName of GEMINI_MODELS) {
+    try {
+      const model = ai.getGenerativeModel({ model: modelName });
+      const result = typeof contentsOrPrompt === "string"
+        ? await model.generateContent(contentsOrPrompt)
+        : await model.generateContent({ contents: contentsOrPrompt });
+      const response = await result.response;
+      const text = response?.text();
+      if (text && text.trim().length > 0) {
+        return { text: text.trim(), model: modelName };
+      }
+    } catch (err) {
+      console.warn(`[gemini] Model ${modelName} call failed:`, err.message);
+    }
+  }
+  return null;
 };
 
 // OpenRouter fallback - uses OpenAI-compatible API
@@ -185,14 +225,7 @@ const processWithGemini = async (base64Data, mimeType) => {
   const ai = getGenAI();
   if (!ai) throw new Error("Gemini AI not initialized");
 
-  const modelOptions = [
-    "gemini-3.6-flash",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash-lite",
-  ];
+  const modelOptions = GEMINI_MODELS;
 
   let lastError = null;
 
@@ -624,14 +657,7 @@ router.post("/extract-text", async (req, res) => {
 
     // Try Gemini first with multiple model fallbacks
     if (hasGemini) {
-      const modelOptions = [
-        "gemini-3.6-flash",
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-lite",
-      ];
+      const modelOptions = GEMINI_MODELS;
 
       for (const modelName of modelOptions) {
         try {
@@ -786,6 +812,19 @@ router.delete("/chat-history", verifyToken, async (req, res) => {
   }
 });
 
+// GET /api/ai/config-status - Safe AI provider configuration inspection
+router.get("/config-status", (req, res) => {
+  const hasGemini = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim());
+
+  res.json({
+    success: true,
+    configured: hasGemini || hasOpenRouter,
+    provider: hasGemini ? "gemini" : (hasOpenRouter ? "openrouter" : "none"),
+    model: process.env.GEMINI_MODEL || "gemini-3.8-flash"
+  });
+});
+
 // System instructions for SHREE ANDAL AI
 export const SHREE_ANDAL_SYSTEM_PROMPT = `You are SHREE ANDAL AI, the SaaISS application and financial assistant.
 
@@ -843,6 +882,28 @@ router.post("/cfo-chat", verifyToken, async (req, res) => {
       });
     }
 
+    // 0. Conversational Greeting or Introduction
+    const isGreeting = /^(hello|hi|hey|good\s+(morning|afternoon|evening)|greetings|who are you|what can you do)[\s!.]*$/i.test(question);
+    if (isGreeting) {
+      let reply = "Hello! I'm **SHREE ANDAL AI**, your SaaISS application and financial assistant.\n\nI can help you with:\n- 🧾 Sales & Purchase Invoices, Printing, and Payment Application\n- 📦 Inventory, Stock Inflow/Outflow, and Low Stock Alerts\n- 📚 Bookkeeping, General Ledger, and Chart of Accounts\n- 📊 Profit & Loss, Balance Sheet, and Cash Flow Forecasting\n- 🏷️ GST & Tax Liabilities\n- 💰 Authoritative Live Financial Data (Total Payables, Total Receivables, Net Profit)\n\nTry asking: *\"Explain how invoice creation works\"* or *\"What is my Total Payables this month?\"*";
+
+      const geminiGreeting = await generateGeminiContent(`${SHREE_ANDAL_SYSTEM_PROMPT}
+
+USER QUESTION: "${question}"
+
+Provide a professional, friendly greeting introducing yourself as SHREE ANDAL AI, the SaaISS application and financial assistant, and briefly suggest what the user can ask:`);
+
+      if (geminiGreeting?.text) {
+        reply = geminiGreeting.text;
+      }
+
+      return res.json({
+        success: true,
+        type: "greeting",
+        reply
+      });
+    }
+
     const previousIntent = history.slice(0, -1).reverse().map((message) =>
       message.role === "user" ? recognizeFinancialIntent(message.content) : null
     ).find(Boolean);
@@ -864,11 +925,7 @@ router.post("/cfo-chat", verifyToken, async (req, res) => {
     // 2. Verified Application Knowledge (Workflow, Troubleshooting, Accounting Concepts, Calculation Explanations)
     if (classification.type === "APPLICATION_KNOWLEDGE") {
       let reply = formatKnowledgeAnswer(classification.knowledge);
-      const ai = getGenAI();
-      if (ai && process.env.GEMINI_API_KEY) {
-        try {
-          const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
-          const knowledgePrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
+      const knowledgePrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
 
 USER QUESTION: "${question}"
 
@@ -876,14 +933,10 @@ VERIFIED APPLICATION KNOWLEDGE:
 ${JSON.stringify(classification.knowledge, null, 2)}
 
 Provide the expert answer:`;
-          const geminiRes = await model.generateContent(knowledgePrompt);
-          const text = geminiRes.response.text();
-          if (text && text.trim().length > 20) {
-            reply = text.trim();
-          }
-        } catch (geminiError) {
-          console.warn("[financial-assistant] Gemini knowledge fallback:", geminiError.message);
-        }
+
+      const geminiRes = await generateGeminiContent(knowledgePrompt);
+      if (geminiRes?.text && geminiRes.text.length > 20) {
+        reply = geminiRes.text;
       }
 
       return res.json({
@@ -959,11 +1012,9 @@ Provide the expert answer:`;
     // If query is analytical (e.g., "Why did my expenses increase?", "Give me CFO insights") and Gemini AI is active,
     // enhance the answer with CFO-level reasoning strictly grounded in the retrieved tool result.
     const isAnalyticalQuery = /\b(why|explain|insight|recommend|analyze|compare|strategy|projection|advice)\b/i.test(question);
-    const ai = getGenAI();
 
-    if (isAnalyticalQuery && ai && process.env.GEMINI_API_KEY) {
+    if (isAnalyticalQuery && process.env.GEMINI_API_KEY) {
       try {
-        const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
         const analysisPrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
 
 USER QUESTION: "${question}"
@@ -973,10 +1024,9 @@ ${JSON.stringify(result, null, 2)}
 
 Provide the CFO analysis directly:`;
 
-        const geminiRes = await model.generateContent(analysisPrompt);
-        const text = geminiRes.response.text();
-        if (text && text.trim().length > 20) {
-          reply = text.trim();
+        const geminiRes = await generateGeminiContent(analysisPrompt);
+        if (geminiRes?.text && geminiRes.text.length > 20) {
+          reply = geminiRes.text;
         }
       } catch (geminiError) {
         console.warn("[financial-assistant] Gemini analysis fallback to deterministic format:", geminiError.message);
@@ -1319,13 +1369,7 @@ ${ledgerSummary || "No custom ledger accounts configured."}
 
     // ---- 8. Try Gemini AI with model fallback ----
     if (ai) {
-      const modelOptions = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-lite",
-      ];
+      const modelOptions = GEMINI_MODELS;
       for (const modelName of modelOptions) {
         try {
           console.log(`🔷 AI CFO trying model: ${modelName}`);
