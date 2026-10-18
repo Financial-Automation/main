@@ -8,12 +8,13 @@ export interface ChatMessage {
 }
 
 export const SUGGESTED_PROMPTS = [
+  "What is my Total Payables?",
+  "What is my Total Receivables?",
   "What is my net profit this month?",
   "Show me outstanding invoices and overdue AR",
   "What is my GST payable?",
   "Summarize my expenses by category",
   "How is my cash flow looking?",
-  "List top customers by revenue",
   "What inventory is running low?",
   "Show payroll summary",
 ];
@@ -140,10 +141,10 @@ const runLocalFallback = async (
   }
 
   if (userMessage.match(/hello|hi|hey|help|what can/)) {
-    return `Hello! I'm your **AI CFO**, connected to your live accounting database.\n\nI can help with:\n- 📊 Revenue, Expenses & Profit Analysis\n- 🧾 Invoices & Accounts Receivable\n- 🏷️ GST & Tax Summary\n- 📦 Inventory & Stock\n- 👥 Payroll & HR\n- 📋 Balance Sheet & Financial Ratios\n- 💰 Cash Flow Analysis\n\nTry asking: *"What is my net profit this month?"* or *"Show overdue invoices"*`;
+    return `Hello! I'm **SHREE ANDAL AI**, your SaaISS application and financial assistant.\n\nI can help with:\n- 🧾 Sales & Purchase Invoices, Printing, and Payment Application\n- 📦 Inventory, Stock Inflow/Outflow, and Low Stock Alerts\n- 📚 Bookkeeping, General Ledger, and Chart of Accounts\n- 📊 Profit & Loss, Balance Sheet, and Cash Flow Forecasting\n- 🏷️ GST & Tax Liabilities\n- 💰 Authoritative Live Financial Data (Total Payables, Total Receivables, Net Profit)\n\nTry asking: *"Explain how invoice creation works"* or *"What is my Total Payables this month?"*`;
   }
 
-  return `### AI CFO Financial Overview\n\n### Key Numbers\n- Revenue: ${fmt(bkIncome)}\n- Expenses: ${fmt(bkExpense)}\n- **Net Profit: ${fmt(bkNet)}** (${profitMargin}% margin)\n- Outstanding AR: ${fmt(invoiceStats.unpaid)}\n- Overdue Invoices: ${invoiceStats.overdue.length}\n\n### Status\n${invoiceStats.overdue.length > 0 ? `⚠️ ${invoiceStats.overdue.length} overdue invoices need follow-up.` : "✅ No overdue invoices."}\n${bkNet >= 0 ? "✅ Business is profitable." : "⚠️ Business is operating at a loss."}\n\n*Ask me about invoices, expenses, GST, inventory, payroll, or any specific financial metric.*`;
+  return `### SHREE ANDAL AI Financial Overview\n\n### Key Numbers\n- Revenue: ${fmt(bkIncome)}\n- Expenses: ${fmt(bkExpense)}\n- **Net Profit: ${fmt(bkNet)}** (${profitMargin}% margin)\n- Outstanding AR: ${fmt(invoiceStats.unpaid)}\n- Overdue Invoices: ${invoiceStats.overdue.length}\n\n### Status\n${invoiceStats.overdue.length > 0 ? `⚠️ ${invoiceStats.overdue.length} overdue invoices need follow-up.` : "✅ No overdue invoices."}\n${bkNet >= 0 ? "✅ Business is profitable." : "⚠️ Business is operating at a loss."}\n\n*Ask me about invoice workflows, payment application, inventory, bookkeeping, or live company metrics.*`;
 };
 
 // ─── Main export ─────────────────────────────────────────────────────────────

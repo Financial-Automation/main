@@ -10,8 +10,9 @@ import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import CashTransaction from "../models/CashTransaction.js";
 import mongoose from "mongoose";
 import { getFinanceMetrics, getLiveBalanceSheet, getGstAnalytics, resolvePeriod } from "../utils/financeAggregator.js";
-import { formatFinancialAnswer, queryFinancialTool, recognizeFinancialIntent, requestsLiveFinancialData, resolveAssistantPeriod } from "../utils/financialAssistant.js";
-import { findBestMatch, buildKnowledgeContext } from "../utils/knowledgeBase.js";
+import { formatFinancialAnswer, queryFinancialTool, recognizeFinancialIntent, resolveAssistantPeriod, classifyQuestion } from "../utils/financialAssistant.js";
+import { formatKnowledgeAnswer } from "../utils/applicationKnowledge.js";
+import { getTotalReceivables, getTotalPayables } from "../utils/financialTools.js";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
@@ -785,237 +786,215 @@ router.delete("/chat-history", verifyToken, async (req, res) => {
   }
 });
 
+// System instructions for SHREE ANDAL AI
+export const SHREE_ANDAL_SYSTEM_PROMPT = `You are SHREE ANDAL AI, the SaaISS application and financial assistant.
+
+You answer questions about the application's features, workflows, invoice creation, payments, inventory, bookkeeping, reports, troubleshooting, general accounting concepts, and authorized live financial information.
+
+Do not restrict responses to payables, receivables, sales, expenses, and profit and loss.
+
+For application workflow questions, search the verified SaaISS application knowledge base and explain the actual supported steps.
+
+For live company financial questions, execute the appropriate authorized backend financial tool and use its verified result. Never fabricate amounts or present a general explanation as a live financial result.
+
+For general accounting questions, provide an accurate explanation and distinguish general knowledge from company-specific data.
+
+For combined questions, retrieve the relevant application knowledge and execute the required financial tools.
+
+For troubleshooting, distinguish confirmed facts from possible causes.
+
+If a feature or workflow cannot be verified, state that limitation honestly.
+
+Never return the old financial-only refusal for a normal application question.
+
+Do not claim that a transaction was created, changed, paid, or saved unless the backend confirms the action.
+
+Respect user permissions and company-level data isolation.`;
+
 // POST /api/ai/cfo-chat
-//
-// 3-tier pipeline:
-//   Tier 1 — Explicit live-financial request → queryFinancialTool → formatFinancialAnswer
-//   Tier 2 — Application workflow question → Knowledge Base lookup (+ optional Gemini enrichment)
-//   Tier 3 — General / ambiguous question → full LLM with live financial context + KB snippet
-//
-// The old financial-only 422 refusal has been removed. All questions receive a useful answer.
+// Authoritative SaaISS AI CFO Endpoint
 router.post("/cfo-chat", verifyToken, async (req, res) => {
   const startedAt = Date.now();
-  const userId = req.user.id;
-
   try {
     const { history, period: requestedPeriod = "this-month" } = req.body;
     if (!Array.isArray(history) || history.length === 0) {
       return res.status(400).json({ success: false, message: "A non-empty chat history is required." });
     }
+
     const latest = history[history.length - 1];
     if (!latest || latest.role !== "user" || typeof latest.content !== "string") {
       return res.status(400).json({ success: false, message: "The latest chat message must be a user question." });
     }
 
-    const question = latest.content.trim();
-    const debug = process.env.NODE_ENV !== "production";
-    const log = (event, data = {}) => {
-      if (debug) console.info("[saaiss-ai]", JSON.stringify({ event, userId, question: question.slice(0, 60), ...data }));
-    };
-
-    // ── Infer period from question wording ──────────────────────────────────
-    const inferredPeriod = /\blast month\b/i.test(question) ? "last-month"
-      : /\bthis quarter\b/i.test(question) ? "this-quarter"
-      : /\bthis (year|financial year)\b/i.test(question) ? "this-year"
-      : requestedPeriod;
-    const period = resolveAssistantPeriod(inferredPeriod);
-
-    // ── Resolve previous conversation intent for follow-ups ─────────────────
-    const previousIntent = history.slice(0, -1).reverse()
-      .map((m) => m.role === "user" ? recognizeFinancialIntent(m.content) : null)
-      .find(Boolean);
-    const intent = recognizeFinancialIntent(question, previousIntent);
-    const kbMatch = findBestMatch(question);
-    const wantsLiveFinancialData = requestsLiveFinancialData(question);
-    log("received", { intent, period: inferredPeriod });
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // TIER 1 — Financial data question: use authoritative tool dispatcher
-    // ═══════════════════════════════════════════════════════════════════════
-    if (intent && wantsLiveFinancialData) {
-      try {
-        const result = await queryFinancialTool({ userId, intent, period });
-        log("tier1_tool", { tool: result.tool, metric: result.metric, elapsedMs: Date.now() - startedAt });
-        const financialAnswer = formatFinancialAnswer(result);
-        const reply = kbMatch
-          ? `**${kbMatch.record.question}**\n\n${kbMatch.record.answer}\n\n---\n\n**Your live financial data**\n\n${financialAnswer}`
-          : financialAnswer;
-        return res.json({ success: true, reply, tool: result.tool, tier: 1, result, kbId: kbMatch?.record.id });
-      } catch (toolErr) {
-        log("tier1_tool_failed", { error: toolErr.message });
-        // Fall through to Tier 3 with LLM so user still gets an answer
-      }
+    const userId = req.user?._id ? req.user._id.toString() : req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required." });
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // TIER 2 — Application workflow / concept question: search Knowledge Base
-    // ═══════════════════════════════════════════════════════════════════════
-    log("tier2_kb", { matched: !!kbMatch, score: kbMatch?.score?.toFixed(2) || "0" });
+    const question = latest.content.trim();
 
-    // If confidence is high enough AND Gemini is unavailable, return KB answer directly
-    const ai = getGenAI();
-    if (kbMatch && kbMatch.score >= 0.5 && !ai) {
-      return res.json({
-        success: true,
-        reply: `**${kbMatch.record.question}**\n\n${kbMatch.record.answer}`,
-        tier: 2,
-        kbId: kbMatch.record.id,
+    // Check Role-Based Access Control
+    const userRole = req.user?.role || "admin";
+    if (userRole === "instore" && /\b(payroll|salary|salaries|employee compensation)\b/i.test(question)) {
+      return res.status(403).json({
+        success: false,
+        code: "UNAUTHORIZED_FINANCIAL_MODULE",
+        message: "Access to payroll and employee compensation records is restricted to administrators."
       });
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // TIER 3 — LLM with full context (financial data + KB snippet + history)
-    // ═══════════════════════════════════════════════════════════════════════
+    const previousIntent = history.slice(0, -1).reverse().map((message) =>
+      message.role === "user" ? recognizeFinancialIntent(message.content) : null
+    ).find(Boolean);
 
-    // Build live financial snapshot (best-effort — failures return nulls)
-    const now = new Date();
-    const PurchaseInvoice = mongoose.models.PurchaseInvoice ||
-      mongoose.model("PurchaseInvoice", new mongoose.Schema({}, { strict: false }));
-    const InventoryItem = mongoose.models.InventoryItem ||
-      mongoose.model("InventoryItem", new mongoose.Schema({}, { strict: false }));
-    const userObjectId = mongoose.Types.ObjectId.isValid(userId)
-      ? new mongoose.Types.ObjectId(userId) : null;
-    const userFilter = userObjectId
-      ? { $or: [{ userId: userObjectId }, { userId: userId.toString() }] }
-      : { userId: userId.toString() };
+    // Classify question into WORKFLOW, TROUBLESHOOTING, CONCEPT, COMBINED, UNSUPPORTED, or LIVE_FINANCIAL_DATA
+    const classification = classifyQuestion(question, previousIntent, history);
 
-    const [
-      balanceSheet, gstData,
-      allInvoicesRaw, allPurchaseRaw, inventoryItems, customers, bookkeepingEntries
-    ] = await Promise.allSettled([
-      getLiveBalanceSheet(userId, inferredPeriod),
-      getGstAnalytics(userId, inferredPeriod),
-      Invoice.find({ ...userFilter, isDeleted: { $ne: true } }).sort({ invoiceDate: -1 }).limit(300).lean(),
-      PurchaseInvoice.find({ ...userFilter, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).limit(300).lean(),
-      InventoryItem.find({ ...userFilter, isDeleted: { $ne: true } }).limit(100).lean(),
-      Customer.find({ ...userFilter }).limit(50).lean(),
-      BookkeepingEntry.find({ ...userFilter, isDeleted: { $ne: true }, date: { $gte: period.start, $lte: period.end } }).lean(),
-    ]).then((results) => results.map((r) => r.status === "fulfilled" ? r.value : null));
+    // 1. Non-existent / Unsupported feature requested
+    if (classification.type === "UNSUPPORTED_FEATURE") {
+      const reply = formatKnowledgeAnswer(classification.knowledge);
+      return res.json({
+        success: true,
+        type: "unsupported_feature",
+        topic: classification.knowledge.topic,
+        reply
+      });
+    }
 
-    const bs = balanceSheet || {};
-    const gst = gstData || {};
-    const invoices = (allInvoicesRaw || []).filter((i) => {
-      const d = new Date(i.invoiceDate || i.createdAt); return d >= period.start && d <= period.end;
-    });
-    const purchases = (allPurchaseRaw || []).filter((p) => {
-      const d = new Date(p.billDate || p.createdAt); return d >= period.start && d <= period.end;
-    });
-    const bkEntries = bookkeepingEntries || [];
-    const invItems = inventoryItems || [];
-    const custList = customers || [];
-
-    const bkIncome = bkEntries.filter((e) => e.type === "income" || e.type === "Income").reduce((s, e) => s + (e.amount || 0), 0);
-    const bkExpense = bkEntries.filter((e) => e.type === "expense" || e.type === "Expense").reduce((s, e) => s + (e.amount || 0), 0);
-    const netProfit = bkIncome - bkExpense;
-    const invTotal = invoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
-    const invUnpaid = invoices.filter((i) => i.status !== "paid" && i.status !== "cancelled").reduce((s, i) => s + (i.balanceDue || 0), 0);
-    const purTotal = purchases.reduce((s, p) => s + (p.total || p.grandTotal || 0), 0);
-    const purUnpaid = purchases.reduce((s, p) => s + (p.balance || p.balanceDue || 0), 0);
-    const invValue = invItems.reduce((s, it) => s + ((it.quantity || 0) * (it.costPrice || it.price || 0)), 0);
-    const fmt = (n) => `₹${Number(n || 0).toLocaleString("en-IN")}`;
-
-    // Build KB context snippet if available
-    const kbContext = buildKnowledgeContext(question);
-
-    const SYSTEM_PROMPT = `You are SHREE ANDAL AI, the SaaISS application assistant and financial advisor.
-
-You answer questions about:
-- Application features and workflows (invoice creation, payment recording, inventory, bookkeeping, reports, troubleshooting)
-- Live company financial data (using the verified context below)
-- General accounting concepts (GST, P&L, cash flow, AR/AP)
-- Combined questions (workflow + financial data)
-
-RULES:
-1. For application workflow questions, use the Knowledge Base answers below if available. Adapt the wording to the user's question.
-2. For live financial figures, use ONLY the Live Financial Context below. Never fabricate amounts.
-3. If data is zero or not available, state that honestly.
-4. For troubleshooting, distinguish confirmed facts from possible causes.
-5. Never claim a transaction was created, changed, or saved unless confirmed by the backend.
-6. Format currency as ₹ with Indian comma notation.
-7. Keep responses clear, concise, and helpful.
-8. Do NOT refuse to answer application workflow questions with "I can only answer financial questions".
-9. Respect user permissions and company-level data isolation. Use only the authenticated user's authorised data.
-
-${kbContext ? `=== KNOWLEDGE BASE (verified application documentation) ===
-${kbContext}
-
-` : ""}=== LIVE FINANCIAL CONTEXT (${inferredPeriod} | ${period.start.toLocaleDateString("en-IN")} – ${period.end.toLocaleDateString("en-IN")}) ===
-Sales Invoices: ${invoices.length} invoices | Total Billed: ${fmt(invTotal)} | Outstanding AR: ${fmt(invUnpaid)}
-Purchase Bills: ${purchases.length} bills | Total Purchased: ${fmt(purTotal)} | Outstanding AP: ${fmt(purUnpaid)}
-Bookkeeping Income: ${fmt(bkIncome)} | Expenses: ${fmt(bkExpense)} | Net Profit: ${fmt(netProfit)}
-Inventory: ${invItems.length} items | Total Value: ${fmt(invValue)}
-Registered Customers: ${custList.length}
-Balance Sheet — Assets: ${fmt(bs?.assets?.totalAssets)} | Liabilities: ${fmt(bs?.liabilities?.totalLiabilities)} | Equity: ${fmt(bs?.equity?.totalEquity)}
-GST — Output: ${fmt(gst?.gstSummary?.outputGst)} | Input ITC: ${fmt(gst?.gstSummary?.inputGst)} | Net Payable: ${fmt(gst?.gstSummary?.gstPayable)}
-
-> Disclaimer: Verify statutory filings and compliance decisions with a qualified CA.`;
-
-    // Build conversation for LLM
-    const contents = [
-      { role: "user", parts: [{ text: SYSTEM_PROMPT }] },
-      { role: "model", parts: [{ text: "Understood. I am SHREE ANDAL AI — your SaaISS application assistant and financial advisor. I have your live financial data and application knowledge base loaded. How can I help you?" }] },
-    ];
-    history.slice(-8).forEach((msg) => {
-      contents.push({ role: msg.role === "user" ? "user" : "model", parts: [{ text: msg.content }] });
-    });
-
-    // Try Gemini with model fallback
-    let replyText = "";
-    if (ai) {
-      const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash-lite"];
-      for (const modelName of GEMINI_MODELS) {
+    // 2. Verified Application Knowledge (Workflow, Troubleshooting, Accounting Concepts, Calculation Explanations)
+    if (classification.type === "APPLICATION_KNOWLEDGE") {
+      let reply = formatKnowledgeAnswer(classification.knowledge);
+      const ai = getGenAI();
+      if (ai && process.env.GEMINI_API_KEY) {
         try {
-          log("tier3_gemini_try", { model: modelName });
-          const model = ai.getGenerativeModel({ model: modelName });
-          const result = await model.generateContent({ contents });
-          replyText = (await result.response).text().trim();
-          if (replyText) { log("tier3_gemini_ok", { model: modelName, elapsedMs: Date.now() - startedAt }); break; }
-        } catch (geminiErr) {
-          log("tier3_gemini_fail", { model: modelName, error: geminiErr.message });
+          const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
+          const knowledgePrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
+
+USER QUESTION: "${question}"
+
+VERIFIED APPLICATION KNOWLEDGE:
+${JSON.stringify(classification.knowledge, null, 2)}
+
+Provide the expert answer:`;
+          const geminiRes = await model.generateContent(knowledgePrompt);
+          const text = geminiRes.response.text();
+          if (text && text.trim().length > 20) {
+            reply = text.trim();
+          }
+        } catch (geminiError) {
+          console.warn("[financial-assistant] Gemini knowledge fallback:", geminiError.message);
         }
+      }
+
+      return res.json({
+        success: true,
+        type: "application_knowledge",
+        category: classification.knowledge.category,
+        topic: classification.knowledge.canonicalQuestion || classification.knowledge.topic,
+        reply
+      });
+    }
+
+    // 3. Combined Question (e.g., Payables calculation + Live Payables, or Invoice creation + Impact on live Receivables)
+    if (classification.type === "COMBINED") {
+      let reply = formatKnowledgeAnswer(classification.knowledge);
+      let liveData = null;
+      try {
+        if (classification.knowledge.combinedType === "payables") {
+          liveData = await getTotalPayables({ userId, period: "this-month" });
+          if (liveData) {
+            reply += `\n\n### Current Live Total Payables (Dashboard Parity)\n- **Current Total Payables:** ₹${Number(liveData.amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n- **Outstanding Vendor Bills:** ${liveData.outstandingInvoiceCount || 0}\n- **Overdue Payables:** ₹${Number(liveData.overdueAmount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+          }
+        } else {
+          liveData = await getTotalReceivables({ userId, period: "this-month" });
+          if (liveData) {
+            reply += `\n\n### Current Live Receivables (Dashboard Parity)\n- **Current Total Receivables:** ₹${Number(liveData.amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n- **Open Customer Invoices:** ${liveData.outstandingInvoiceCount || 0}\n- **Overdue Balance:** ₹${Number(liveData.overdueAmount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+          }
+        }
+      } catch (e) {
+        // liveData optional fallback
+      }
+
+      return res.json({
+        success: true,
+        type: "combined",
+        topic: classification.knowledge.topic,
+        reply,
+        liveData
+      });
+    }
+
+    // 4. Live Financial Data Execution
+    const inferredPeriod = /\blast month\b/i.test(question) ? "last-month"
+      : /\bthis quarter\b/i.test(question) ? "this-quarter"
+      : /\bthis (year|financial year)\b/i.test(question) ? "this-year"
+      : /\btoday\b/i.test(question) ? "today"
+      : requestedPeriod;
+
+    const intent = classification.intent || recognizeFinancialIntent(question, previousIntent, history);
+
+    const debug = process.env.NODE_ENV !== "production";
+    const audit = (event, data = {}) => {
+      if (debug) console.info("[financial-assistant]", JSON.stringify({ event, userId, ...data }));
+    };
+    audit("received", { intent, period: inferredPeriod, questionLength: question.length });
+
+    // Execute authoritative financial tool
+    const result = await queryFinancialTool({
+      userId,
+      intent,
+      period: inferredPeriod,
+      question
+    });
+
+    audit("tool_completed", {
+      tool: result.tool,
+      metric: result.metric,
+      reportingPeriod: result.reportingDate || result.reporting_period,
+      elapsedMs: Date.now() - startedAt
+    });
+
+    let reply = formatFinancialAnswer(result);
+
+    // If query is analytical (e.g., "Why did my expenses increase?", "Give me CFO insights") and Gemini AI is active,
+    // enhance the answer with CFO-level reasoning strictly grounded in the retrieved tool result.
+    const isAnalyticalQuery = /\b(why|explain|insight|recommend|analyze|compare|strategy|projection|advice)\b/i.test(question);
+    const ai = getGenAI();
+
+    if (isAnalyticalQuery && ai && process.env.GEMINI_API_KEY) {
+      try {
+        const model = ai.getGenerativeModel({ model: "gemini-2.0-flash" });
+        const analysisPrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
+
+USER QUESTION: "${question}"
+
+AUTHORITATIVE FINANCIAL DATA:
+${JSON.stringify(result, null, 2)}
+
+Provide the CFO analysis directly:`;
+
+        const geminiRes = await model.generateContent(analysisPrompt);
+        const text = geminiRes.response.text();
+        if (text && text.trim().length > 20) {
+          reply = text.trim();
+        }
+      } catch (geminiError) {
+        console.warn("[financial-assistant] Gemini analysis fallback to deterministic format:", geminiError.message);
       }
     }
 
-    // OpenRouter fallback
-    if (!replyText && process.env.OPENROUTER_API_KEY) {
-      try {
-        log("tier3_openrouter");
-        const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-          method: "POST",
-          headers: { "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`, "Content-Type": "application/json", "HTTP-Referer": "http://localhost:5001", "X-Title": "SaaISS AI" },
-          body: JSON.stringify({ model: "openrouter/free", messages: [{ role: "user", content: SYSTEM_PROMPT }, { role: "assistant", content: "Understood. I am SHREE ANDAL AI. How can I help?" }, { role: "user", content: question }], max_tokens: 2048 }),
-        });
-        if (orRes.ok) replyText = (await orRes.json()).choices?.[0]?.message?.content || "";
-      } catch (orErr) { log("tier3_openrouter_fail", { error: orErr.message }); }
-    }
-
-    // KB fallback — if LLM unavailable but KB matched, return KB answer
-    if (!replyText && kbMatch) {
-      replyText = `**${kbMatch.record.question}**\n\n${kbMatch.record.answer}`;
-      log("tier2_kb_fallback", { id: kbMatch.record.id });
-    }
-
-    // Final fallback — general financial overview when nothing else worked
-    if (!replyText) {
-      replyText = `### SHREE ANDAL AI — Financial Overview (${inferredPeriod.replace(/-/g, " ")})
-
-**Key Numbers**
-- Revenue: ${fmt(bkIncome)} | Expenses: ${fmt(bkExpense)} | **Net Profit: ${fmt(netProfit)}**
-- Outstanding AR: ${fmt(invUnpaid)} | AP: ${fmt(purUnpaid)}
-- Net GST Payable: ${fmt(gst?.gstSummary?.gstPayable)} | Inventory Value: ${fmt(invValue)}
-
-*Ask me about invoices, expenses, GST, inventory, payroll, balance sheet, or any application feature.*`;
-    }
-
-    log("tier3_complete", { elapsedMs: Date.now() - startedAt });
-    return res.json({ success: true, reply: replyText, tier: 3 });
-
+    return res.json({
+      success: true,
+      reply,
+      tool: result.tool,
+      result
+    });
   } catch (error) {
-    console.error("[saaiss-ai] fatal_error", { userId, error: error.message });
-    return res.status(500).json({
+    console.error("[financial-assistant] tool_failed", { userId: req.user?.id, error: error.message });
+    return res.status(503).json({
       success: false,
-      message: "I encountered an unexpected error. Please try again.",
-      error: error.message,
+      code: "FINANCIAL_DATA_UNAVAILABLE",
+      message: "I could not retrieve the live financial data right now. Please try again or check the relevant accounting records."
     });
   }
 });

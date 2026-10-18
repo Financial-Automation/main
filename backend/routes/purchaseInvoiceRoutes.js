@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import { checkPlanLimit } from "../utils/authMiddleware.js";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
 import User from "../models/User.js";
+import { getTotalPayables } from "../utils/financialTools.js";
 
 const router = express.Router();
 
@@ -347,6 +348,18 @@ router.get("/all", verifyToken, async (req, res) => {
     } catch (error) {
         console.error("Error fetching purchase invoices:", error);
         res.status(500).json({ message: "Error fetching purchase invoices" });
+    }
+});
+
+// GET - Shared Authoritative Payables Summary for Dashboard and AI CFO Parity
+router.get("/payables-summary", verifyToken, async (req, res) => {
+    try {
+        const period = req.query.period || "this-month";
+        const summary = await getTotalPayables({ userId: req.user.id, period });
+        res.json(summary);
+    } catch (error) {
+        console.error("Error fetching payables summary:", error);
+        res.status(500).json({ message: "Failed to fetch payables summary", error: error.message });
     }
 });
 
