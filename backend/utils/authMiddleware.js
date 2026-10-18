@@ -86,6 +86,11 @@ export const checkSubscription = async (req, res, next) => {
     return res.status(401).json({ message: "User not authenticated." });
   }
 
+  // Admin users bypass subscription check
+  if (req.user.role === "admin") {
+    return next();
+  }
+
   if (req.user.subscriptionStatus === "expired" || (req.user.subscriptionEndDate && new Date() > new Date(req.user.subscriptionEndDate))) {
     return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
   }
