@@ -169,6 +169,7 @@ export const recognizeFinancialIntent = (question, previousIntent = null, histor
   }
 
   if (
+    !/\b(gst|tax)\b/.test(text) &&
     /\b(total payables?|payables?|how much do i owe|what do i need to pay|unpaid purchase|outstanding purchase|pending supplier payments?|what payments are due)\b/.test(text)
   ) {
     if (/\b(overdue|due this week)\b/.test(text)) return "outstanding_purchase_invoices";
@@ -233,7 +234,7 @@ export const recognizeFinancialIntent = (question, previousIntent = null, histor
   }
 
   // 11. Inventory Management
-  if (/\b(inventory value|current inventory|stock value|reorder level|low stock|stock on hand|skus?|products? in stock)\b/.test(text)) {
+  if (/\b(inventory|stock value|current inventory|reorder level|low stock|running low|stock on hand|skus?|products? in stock)\b/.test(text)) {
     return "inventory_valuation";
   }
 
