@@ -8,11 +8,13 @@ import Customer from "../models/Customer.js";
 import LedgerAccount from "../models/LedgerAccount.js";
 import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import CashTransaction from "../models/CashTransaction.js";
+import User from "../models/User.js";
 import mongoose from "mongoose";
 import { getFinanceMetrics, getLiveBalanceSheet, getGstAnalytics, resolvePeriod } from "../utils/financeAggregator.js";
 import { formatFinancialAnswer, queryFinancialTool, recognizeFinancialIntent, resolveAssistantPeriod, classifyQuestion } from "../utils/financialAssistant.js";
 import { formatKnowledgeAnswer } from "../utils/applicationKnowledge.js";
-import { getTotalReceivables, getTotalPayables } from "../utils/financialTools.js";
+import { getTotalReceivables, getTotalPayables, getDashboardSummary } from "../utils/financialTools.js";
+import { retrieveKnowledge } from "../utils/qaRetrievalEngine.js";
 import { createRequire } from "module";
 import dotenv from "dotenv";
 import path from "path";
@@ -934,27 +936,14 @@ router.post("/cfo-chat", verifyToken, async (req, res) => {
       });
     }
 
-    // 0. Conversational Greeting or Introduction
+    // 0. Resolve Time Period and User Intents
+    const inferredPeriod = /\blast month\b/i.test(question) ? "last-month"
+      : /\bthis quarter\b/i.test(question) ? "this-quarter"
+      : /\bthis (year|financial year)\b/i.test(question) ? "this-year"
+      : /\btoday\b/i.test(question) ? "today"
+      : requestedPeriod;
+
     const isGreeting = /^(hello|hi|hey|good\s+(morning|afternoon|evening)|greetings|who are you|what can you do)[\s!.]*$/i.test(question);
-    if (isGreeting) {
-      let reply = "Hello! I'm **SHREE ANDAL AI**, your SaaISS application and financial assistant.\n\nI can help you with:\n- 🧾 Sales & Purchase Invoices, Printing, and Payment Application\n- 📦 Inventory, Stock Inflow/Outflow, and Low Stock Alerts\n- 📚 Bookkeeping, General Ledger, and Chart of Accounts\n- 📊 Profit & Loss, Balance Sheet, and Cash Flow Forecasting\n- 🏷️ GST & Tax Liabilities\n- 💰 Authoritative Live Financial Data (Total Payables, Total Receivables, Net Profit)\n\nTry asking: *\"Explain how invoice creation works\"* or *\"What is my Total Payables this month?\"*";
-
-      const geminiGreeting = await generateGeminiContent(`${SHREE_ANDAL_SYSTEM_PROMPT}
-
-USER QUESTION: "${question}"
-
-Provide a professional, friendly greeting introducing yourself as SHREE ANDAL AI, the SaaISS application and financial assistant, and briefly suggest what the user can ask:`);
-
-      if (geminiGreeting?.text) {
-        reply = geminiGreeting.text;
-      }
-
-      return res.json({
-        success: true,
-        type: "greeting",
-        reply
-      });
-    }
 
     const previousIntent = history.slice(0, -1).reverse().map((message) =>
       message.role === "user" ? recognizeFinancialIntent(message.content) : null
@@ -962,165 +951,126 @@ Provide a professional, friendly greeting introducing yourself as SHREE ANDAL AI
 
     // Classify question into WORKFLOW, TROUBLESHOOTING, CONCEPT, COMBINED, UNSUPPORTED, or LIVE_FINANCIAL_DATA
     const classification = classifyQuestion(question, previousIntent, history);
-
-    // 1. Non-existent / Unsupported feature requested
-    if (classification.type === "UNSUPPORTED_FEATURE") {
-      const reply = formatKnowledgeAnswer(classification.knowledge);
-      return res.json({
-        success: true,
-        type: "unsupported_feature",
-        topic: classification.knowledge.topic,
-        reply
-      });
-    }
-
-    // 2. Verified Application Knowledge (Workflow, Troubleshooting, Accounting Concepts, Calculation Explanations)
-    if (classification.type === "APPLICATION_KNOWLEDGE") {
-      let reply = formatKnowledgeAnswer(classification.knowledge);
-      const knowledgePrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
-
-USER QUESTION: "${question}"
-
-VERIFIED APPLICATION KNOWLEDGE:
-${JSON.stringify(classification.knowledge, null, 2)}
-
-Provide the expert answer:`;
-
-      const geminiRes = await generateGeminiContent(knowledgePrompt);
-      if (geminiRes?.text && geminiRes.text.length > 20) {
-        reply = geminiRes.text;
-      }
-
-      return res.json({
-        success: true,
-        type: "application_knowledge",
-        category: classification.knowledge.category,
-        topic: classification.knowledge.canonicalQuestion || classification.knowledge.topic,
-        reply
-      });
-    }
-
-    // 3. Combined Question (e.g., Payables calculation + Live Payables, or Invoice creation + Impact on live Receivables)
-    if (classification.type === "COMBINED") {
-      let reply = formatKnowledgeAnswer(classification.knowledge);
-      let liveData = null;
-      try {
-        if (classification.knowledge.combinedType === "payables") {
-          liveData = await getTotalPayables({ userId, period: "this-month" });
-          if (liveData) {
-            reply += `\n\n### Current Live Total Payables (Dashboard Parity)\n- **Current Total Payables:** ₹${Number(liveData.amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n- **Outstanding Vendor Bills:** ${liveData.outstandingInvoiceCount || 0}\n- **Overdue Payables:** ₹${Number(liveData.overdueAmount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-          }
-        } else {
-          liveData = await getTotalReceivables({ userId, period: "this-month" });
-          if (liveData) {
-            reply += `\n\n### Current Live Receivables (Dashboard Parity)\n- **Current Total Receivables:** ₹${Number(liveData.amount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n- **Open Customer Invoices:** ${liveData.outstandingInvoiceCount || 0}\n- **Overdue Balance:** ₹${Number(liveData.overdueAmount || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-          }
-        }
-      } catch (e) {
-        // liveData optional fallback
-      }
-
-      return res.json({
-        success: true,
-        type: "combined",
-        topic: classification.knowledge.topic,
-        reply,
-        liveData
-      });
-    }
-
-    // 4. General Conversational, Educational, Accounting, and Business Questions
-    if (classification.type === "GENERAL_QUESTION") {
-      let reply = "";
-      const contents = formatGeminiContents(history);
-
-      if (process.env.GEMINI_API_KEY) {
-        try {
-          const geminiRes = await generateGeminiContent(
-            contents.length > 0 ? contents : question,
-            { systemInstruction: SHREE_ANDAL_SYSTEM_PROMPT }
-          );
-          if (geminiRes?.text) {
-            reply = geminiRes.text;
-          }
-        } catch (geminiErr) {
-          console.warn("[financial-assistant] Gemini general question error:", geminiErr.message);
-        }
-      }
-
-      if (!reply) {
-        reply = "I am SHREE ANDAL AI, your SaaISS application and financial assistant. While I am primarily optimized for SaaISS accounting workflows and company financial analytics, here is what I can tell you:\n\n" +
-          "Could you please clarify your request, or ask about SaaISS invoicing, inventory, bookkeeping, or your company's financial metrics?";
-      }
-
-      return res.json({
-        success: true,
-        type: "general_question",
-        reply
-      });
-    }
-
-    // 5. Live Financial Data Execution
-    const inferredPeriod = /\blast month\b/i.test(question) ? "last-month"
-      : /\bthis quarter\b/i.test(question) ? "this-quarter"
-      : /\bthis (year|financial year)\b/i.test(question) ? "this-year"
-      : /\btoday\b/i.test(question) ? "today"
-      : requestedPeriod;
-
     const intent = classification.intent || recognizeFinancialIntent(question, previousIntent, history);
 
-    const debug = process.env.NODE_ENV !== "production";
-    const audit = (event, data = {}) => {
-      if (debug) console.info("[financial-assistant]", JSON.stringify({ event, userId, ...data }));
-    };
-    audit("received", { intent, period: inferredPeriod, questionLength: question.length });
+    // 1. Fetch User Profile for personalizing response
+    let userProfile = null;
+    try {
+      userProfile = await User.findById(userId).select("sellerName sellerGSTIN sellerEmail sellerPhone name");
+    } catch (e) { /* ignore */ }
 
-    // Execute authoritative financial tool
-    const result = await queryFinancialTool({
-      userId,
-      intent,
-      period: inferredPeriod,
-      question
-    });
+    // 2. Fetch Live Dashboard Financial Metrics (Payables, Receivables, Net Profit, Invoices, GST)
+    let summaryData = null;
+    try {
+      summaryData = await getDashboardSummary({ userId, period: inferredPeriod });
+    } catch (e) {
+      console.warn("[cfo-chat] summary retrieval note:", e.message);
+    }
 
-    audit("tool_completed", {
-      tool: result.tool,
-      metric: result.metric,
-      reportingPeriod: result.reportingDate || result.reporting_period,
-      elapsedMs: Date.now() - startedAt
-    });
+    // 3. Execute authoritative financial tool if query is financial or asks about metrics
+    let specificToolResult = null;
+    let toolUsed = null;
+    try {
+      const isFinancialQuery = classification.type === "LIVE_FINANCIAL_DATA" ||
+        classification.type === "COMBINED" ||
+        intent !== "dashboard_summary" ||
+        /\b(payable|receivable|invoice|bill|profit|loss|expense|revenue|tax|gst|cash|inventory|payroll|ratio|balance|debt|sales|cost|vendor|customer|overdue)\b/i.test(question);
 
-    let reply = formatFinancialAnswer(result);
+      if (isFinancialQuery && !isGreeting) {
+        specificToolResult = await queryFinancialTool({
+          userId,
+          intent,
+          period: inferredPeriod,
+          question
+        });
+        toolUsed = specificToolResult?.tool || intent;
+      }
+    } catch (e) {
+      console.warn("[cfo-chat] specific tool query note:", e.message);
+    }
 
-    // If query is analytical (e.g., "Why did my expenses increase?", "Give me CFO insights") and Gemini AI is active,
-    // enhance the answer with CFO-level reasoning strictly grounded in the retrieved tool result.
-    const isAnalyticalQuery = /\b(why|explain|insight|recommend|analyze|compare|strategy|projection|advice)\b/i.test(question);
+    // 4. Retrieve verified SaaISS application knowledge if query relates to workflows
+    let appKnowledgeSnippet = "";
+    if (classification.knowledge) {
+      appKnowledgeSnippet = formatKnowledgeAnswer(classification.knowledge);
+    } else {
+      const qaMatch = retrieveKnowledge(question);
+      if (qaMatch?.bestMatch && qaMatch.score > 0.35) {
+        appKnowledgeSnippet = `Workflow Topic: ${qaMatch.bestMatch.title || qaMatch.bestMatch.topic}\nVerified Steps:\n${qaMatch.bestMatch.answer}`;
+      }
+    }
 
-    if (isAnalyticalQuery && process.env.GEMINI_API_KEY) {
+    // 5. Construct Master System Instruction for Gemini LLM
+    const businessName = userProfile?.sellerName || userProfile?.name || "Your Business";
+    const systemInstruction = `${SHREE_ANDAL_SYSTEM_PROMPT}
+
+### USER BUSINESS CONTEXT:
+- Company / Business Name: ${businessName}
+- GSTIN: ${userProfile?.sellerGSTIN || "N/A"}
+- Active Reporting Period: ${summaryData?.reportingDate || inferredPeriod}
+
+### LIVE AUTHORITATIVE FINANCIAL METRICS (Real-time from SaaISS database for ${businessName}):
+- Total Payables (Money owed to suppliers / outstanding bills): ₹${(summaryData?.totalPayables || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+- Total Receivables (Money owed by customers / unpaid invoices): ₹${(summaryData?.totalReceivables || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+- Net Profit: ₹${(summaryData?.netProfit || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${summaryData?.isProfitable ? "Profitable" : "Operating at loss"})
+- Revenue / Total Invoiced Sales: ₹${(summaryData?.totalRevenue || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+- Total Expenses: ₹${(summaryData?.totalExpenses || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+- Net Profit Margin: ${summaryData?.netProfitMargin || 0}%
+- Open Sales Invoices: ${summaryData?.metrics?.openSalesInvoicesCount || 0}
+- Open Purchase Bills: ${summaryData?.metrics?.openPurchaseInvoicesCount || 0}
+- GST Payable: ₹${(summaryData?.gstPayable || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+
+${specificToolResult ? `### EXACT LIVE QUERY TOOL DATA (${specificToolResult.tool || intent}):\n${JSON.stringify(specificToolResult, null, 2)}\n` : ""}
+
+${appKnowledgeSnippet ? `### VERIFIED APPLICATION WORKFLOW KNOWLEDGE:\n${appKnowledgeSnippet}\n` : ""}
+
+### DIRECT ANSWER INSTRUCTIONS:
+- You are SHREE ANDAL AI, the executive CFO and accounting copilot for SaaISS.
+- Answer the user's specific question directly with high clarity, accuracy, and depth.
+- When answering financial questions about this business, use the EXACT live figures provided above. Never invent, estimate, or fabricate numbers.
+- When answering software workflow questions (e.g. how to create invoices, record payments, print PDFs, manage inventory, bookkeeping), explain the exact steps clearly based on verified SaaISS features.
+- When answering general business, accounting concepts, taxation, or analytical questions, provide an authoritative, clear, and intelligent explanation.
+- Keep formatting clean, structured, and easy to read using markdown bullets and bold numbers.
+- Never output rigid apologies, canned refusals, or claim you can only answer payables and receivables. Always fulfill the user's request.`;
+
+    // 6. Format multi-turn conversation history for Gemini
+    const contents = formatGeminiContents(history);
+    if (contents.length === 0) {
+      contents.push({ role: "user", parts: [{ text: question }] });
+    }
+
+    let reply = "";
+
+    // 7. DIRECT GEMINI LLM INFERENCE
+    if (process.env.GEMINI_API_KEY) {
       try {
-        const analysisPrompt = `${SHREE_ANDAL_SYSTEM_PROMPT}
-
-USER QUESTION: "${question}"
-
-AUTHORITATIVE FINANCIAL DATA:
-${JSON.stringify(result, null, 2)}
-
-Provide the CFO analysis directly:`;
-
-        const geminiRes = await generateGeminiContent(analysisPrompt);
-        if (geminiRes?.text && geminiRes.text.length > 20) {
-          reply = geminiRes.text;
+        const geminiRes = await generateGeminiContent(contents, { systemInstruction });
+        if (geminiRes?.text && geminiRes.text.trim()) {
+          reply = geminiRes.text.trim();
         }
-      } catch (geminiError) {
-        console.warn("[financial-assistant] Gemini analysis fallback to deterministic format:", geminiError.message);
+      } catch (geminiErr) {
+        console.warn("[cfo-chat] Gemini API call error:", geminiErr.message);
+      }
+    }
+
+    // 8. Resilient Deterministic Fallback (if Gemini API key missing or network unreachable)
+    if (!reply) {
+      if (isGreeting) {
+        reply = `Hello! I'm **SHREE ANDAL AI**, your SaaISS application and financial assistant.\n\nI can help you with:\n- 🧾 Sales & Purchase Invoices, Printing, and Payment Application\n- 📦 Inventory, Stock Inflow/Outflow, and Low Stock Alerts\n- 📚 Bookkeeping, General Ledger, and Chart of Accounts\n- 📊 Profit & Loss, Balance Sheet, and Cash Flow Forecasting\n- 🏷️ GST & Tax Liabilities\n- 💰 Live Financial Data (Total Payables, Total Receivables, Net Profit)\n\nWhat would you like to check today?`;
+      } else if (specificToolResult) {
+        reply = formatFinancialAnswer(specificToolResult);
+      } else if (appKnowledgeSnippet) {
+        reply = appKnowledgeSnippet;
+      } else {
+        reply = `I am SHREE ANDAL AI, your SaaISS application and financial assistant.\n\nHere is your financial snapshot for ${summaryData?.period || "this month"}:\n- **Total Receivables:** ₹${(summaryData?.totalReceivables || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n- **Total Payables:** ₹${(summaryData?.totalPayables || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n- **Net Profit:** ₹${(summaryData?.netProfit || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n\nCould you please clarify your request, or ask about your invoicing, inventory, or financial metrics?`;
       }
     }
 
     return res.json({
       success: true,
       reply,
-      tool: result.tool,
-      result
+      tool: toolUsed,
+      result: specificToolResult
     });
   } catch (error) {
     console.error("[financial-assistant] tool_failed", { userId: req.user?.id, error: error.message });
