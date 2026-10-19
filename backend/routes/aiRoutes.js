@@ -934,13 +934,21 @@ export const formatGeminiContents = (history = []) => {
 router.post("/cfo-chat", verifyToken, async (req, res) => {
   const startedAt = Date.now();
   try {
-    const { history, period: requestedPeriod = "this-month" } = req.body;
-    if (!Array.isArray(history) || history.length === 0) {
+    const { period: requestedPeriod = "this-month" } = req.body;
+    let history = Array.isArray(req.body.history) ? [...req.body.history] : [];
+    if (history.length === 0 && typeof req.body.message === "string" && req.body.message.trim()) {
+      history = [{ role: "user", content: req.body.message.trim() }];
+    }
+    history = history.map(entry => ({
+      ...entry,
+      content: typeof entry?.content === "string" ? entry.content : (typeof entry?.text === "string" ? entry.text : "")
+    }));
+    if (history.length === 0) {
       return res.status(400).json({ success: false, message: "A non-empty chat history is required." });
     }
 
     const latest = history[history.length - 1];
-    if (!latest || latest.role !== "user" || typeof latest.content !== "string") {
+    if (!latest || latest.role !== "user" || typeof latest.content !== "string" || !latest.content.trim()) {
       return res.status(400).json({ success: false, message: "The latest chat message must be a user question." });
     }
 
