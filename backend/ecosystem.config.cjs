@@ -16,7 +16,7 @@ module.exports = {
       RAZORPAY_KEY_SECRET: 'IkgmVjTFl76wpRfpni8TBnLR',
       OPENROUTER_API_KEY: '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',
       GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-      GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+      GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
       APP_URL: 'https://software.saaiss.in'
     },
     env: {
@@ -29,7 +29,7 @@ module.exports = {
       RAZORPAY_KEY_SECRET: 'IkgmVjTFl76wpRfpni8TBnLR',
       OPENROUTER_API_KEY: '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',
       GEMINI_API_KEY: process.env.GEMINI_API_KEY,
-      GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+      GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
       APP_URL: 'https://software.saaiss.in'
     },
     error_file: './logs/pm2-error.log',

@@ -33,9 +33,10 @@ jobs:
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
           DEPLOY_SHA: ${{ github.sha }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           ssh ubuntu@"$SERVER_IP" \
-            "DEPLOY_SHA='$DEPLOY_SHA' bash -s" <<'ENDSSH'
+            "DEPLOY_SHA='$DEPLOY_SHA' GEMINI_API_KEY='$GEMINI_API_KEY' bash -s" <<'ENDSSH'
           set -euo pipefail
 
           APP_DIR="/home/ubuntu/main"
@@ -52,6 +53,7 @@ jobs:
             APP_DIR="$APP_DIR" \
             WEB_DIR="$WEB_DIR" \
             DEPLOY_SHA="$DEPLOY_SHA" \
+            GEMINI_API_KEY="${GEMINI_API_KEY:-}" \
             bash -s <<'APPSSH'
           set -euo pipefail
 
@@ -84,6 +86,20 @@ jobs:
 
           if [ -f /tmp/financial-automation-backend.env ]; then
             cp -p /tmp/financial-automation-backend.env backend/.env
+          fi
+
+          if [ -f backend/.env ] && [ -n "${GEMINI_API_KEY:-}" ]; then
+            if grep -q "^GEMINI_API_KEY=" backend/.env; then
+              sed -i "s|^GEMINI_API_KEY=.*|GEMINI_API_KEY=$GEMINI_API_KEY|" backend/.env
+            else
+              echo "GEMINI_API_KEY=$GEMINI_API_KEY" >> backend/.env
+            fi
+          fi
+
+          if [ -f backend/.env ]; then
+            if ! grep -q "^GEMINI_MODEL=" backend/.env; then
+              echo "GEMINI_MODEL=gemini-3.8-flash" >> backend/.env
+            fi
           fi
 
           CURRENT_SHA="$(git rev-parse HEAD)"

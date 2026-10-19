@@ -9,9 +9,10 @@ import { fileURLToPath } from "url";
 import dns from "dns";
 import Razorpay from "razorpay";
 
-// Ensure DNS resolves MongoDB Atlas SRV records reliably across all network environments
+// Ensure DNS resolves MongoDB Atlas SRV records and Google APIs reliably across all network environments
 try {
   dns.setServers(["8.8.8.8", "1.1.1.1"]);
+  dns.setDefaultResultOrder("ipv4first");
 } catch (dnsErr) {
   console.warn("DNS server configuration fallback:", dnsErr.message);
 }
