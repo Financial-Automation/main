@@ -112,9 +112,15 @@ export const generateGeminiContent = async (contentsOrPrompt, options = {}) => {
   for (const modelName of GEMINI_MODELS) {
     try {
       const model = ai.getGenerativeModel({ model: modelName, ...modelConfig });
-      const result = typeof contentsOrPrompt === "string"
-        ? await model.generateContent(contentsOrPrompt)
-        : await model.generateContent({ contents: contentsOrPrompt });
+      const generatePromise = typeof contentsOrPrompt === "string"
+        ? model.generateContent(contentsOrPrompt)
+        : model.generateContent({ contents: contentsOrPrompt });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout invoking ${modelName}`)), 12000)
+      );
+
+      const result = await Promise.race([generatePromise, timeoutPromise]);
       const response = await result.response;
       const candidate = response?.candidates?.[0];
       const finishReason = candidate?.finishReason;
