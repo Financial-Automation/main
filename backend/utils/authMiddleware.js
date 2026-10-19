@@ -98,6 +98,15 @@ export const checkSubscription = async (req, res, next) => {
     return next();
   }
 
+  // Active or trial users bypass subscription check
+  if (
+    req.user.subscriptionStatus === "active" ||
+    req.user.subscriptionStatus === "trial" ||
+    (req.user.trialEndDate && new Date(req.user.trialEndDate) > new Date())
+  ) {
+    return next();
+  }
+
   if (req.user.subscriptionStatus === "expired" || (req.user.subscriptionEndDate && new Date() > new Date(req.user.subscriptionEndDate))) {
     return res.status(403).json({ message: "Subscription has expired. Please upgrade or renew." });
   }

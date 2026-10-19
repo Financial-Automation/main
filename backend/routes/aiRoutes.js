@@ -19,6 +19,11 @@ import { createRequire } from "module";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import dns from "dns";
+
+try {
+  dns.setDefaultResultOrder("ipv4first");
+} catch {}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +38,10 @@ const router = express.Router();
 
 // Middleware to verify JWT token
 const verifyToken = (req, res, next) => {
+  // If already authenticated by parent middleware (authenticateUser), do not overwrite with JWT payload
+  if (req.user && (req.user._id || req.user.id)) {
+    return next();
+  }
   const token = req.headers.authorization?.split(" ")[1];
 
   if (!token) {
@@ -63,11 +72,11 @@ export const getGenAI = () => {
 // Authoritative list of active Gemini models in priority order (verified against Google v1beta ModelService)
 export const GEMINI_MODELS = [
   process.env.GEMINI_MODEL,
-  "gemini-3.5-flash",
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash-lite",
   "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.7-flash",
+  "gemini-flash-latest",
 ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
 // Safety settings configured to prevent probability-based false refusals on business/accounting queries
@@ -92,7 +101,8 @@ export const GEMINI_SAFETY_SETTINGS = [
 
 export const generateGeminiContent = async (contentsOrPrompt, options = {}) => {
   const ai = getGenAI();
-  if (!ai || !process.env.GEMINI_API_KEY) return null;
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  if (!ai || !apiKey) return null;
 
   const modelConfig = {
     safetySettings: GEMINI_SAFETY_SETTINGS,
@@ -847,14 +857,15 @@ router.delete("/chat-history", verifyToken, async (req, res) => {
 
 // GET /api/ai/config-status - Safe AI provider configuration inspection
 router.get("/config-status", (req, res) => {
-  const hasGemini = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  const apiKey = (process.env.GEMINI_API_KEY || "").trim();
+  const hasGemini = Boolean(apiKey);
   const hasOpenRouter = Boolean(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim());
 
   res.json({
     success: true,
     configured: hasGemini || hasOpenRouter,
     provider: hasGemini ? "gemini" : (hasOpenRouter ? "openrouter" : "none"),
-    model: process.env.GEMINI_MODEL || "gemini-3.8-flash"
+    model: process.env.GEMINI_MODEL || "gemini-3.5-flash"
   });
 });
 
@@ -887,7 +898,7 @@ export const formatGeminiContents = (history = []) => {
   if (!Array.isArray(history) || history.length === 0) return [];
   const contents = [];
   for (const msg of history.slice(-8)) {
-    const role = msg.role === "assistant" || msg.role === "model" ? "model" : "user";
+    const role = msg.role === "assistant" || msg.role === "model" || msg.role === "ai" ? "model" : "user";
     const text = typeof msg.content === "string" ? msg.content.trim() : "";
     if (!text) continue;
     // Prevent consecutive identical roles by merging text
@@ -1042,7 +1053,8 @@ ${appKnowledgeSnippet ? `### VERIFIED APPLICATION WORKFLOW KNOWLEDGE:\n${appKnow
     let reply = "";
 
     // 7. DIRECT GEMINI LLM INFERENCE
-    if (process.env.GEMINI_API_KEY) {
+    const activeApiKey = (process.env.GEMINI_API_KEY || "").trim();
+    if (activeApiKey) {
       try {
         const geminiRes = await generateGeminiContent(contents, { systemInstruction });
         if (geminiRes?.text && geminiRes.text.trim()) {
