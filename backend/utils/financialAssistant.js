@@ -60,8 +60,12 @@ export const extractInvoiceIdentifier = (text) => {
   const phraseMatch = text.match(/\b(?:invoice|bill)\s+#?([A-Za-z0-9_-]+)/i);
   if (phraseMatch) {
     const candidate = phraseMatch[1].trim();
-    const stopWords = ["number", "details", "detail", "summary", "balance", "status", "list", "records", "invoices", "bills", "items", "amount"];
-    if (!stopWords.includes(candidate.toLowerCase())) {
+    const stopWords = [
+      "number", "details", "detail", "summary", "balance", "status", "list", "records",
+      "invoices", "bills", "items", "amount", "creation", "in", "for", "to", "from",
+      "with", "and", "or", "of", "workflow", "process", "template", "generator", "format", "history"
+    ];
+    if (!stopWords.includes(candidate.toLowerCase()) && (/\d/.test(candidate) || candidate.length > 2)) {
       return candidate;
     }
   }
