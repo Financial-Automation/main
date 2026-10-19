@@ -22,7 +22,7 @@ cd ..
 # ---- 3. Create .env if missing (ecosystem.config.cjs has env vars built-in) ----
 if [ ! -f backend/.env ]; then
   echo "📝 Creating backend/.env..."
-  cat > backend/.env << 'EOF'
+  cat > backend/.env << EOF
 PORT=5001
 DEV_MODE=false
 PRO_MONGO_URI=mongodb+srv://devsynth01_db_user:UcgRRYzXdhNUX7LH@cluster0.eil2puq.mongodb.net/Financialautomation?retryWrites=true&w=majority
@@ -32,10 +32,19 @@ RAZORPAY_KEY_ID=rzp_live_RWuD5WAyVeoZep
 RAZORPAY_KEY_SECRET=IkgmVjTFl76wpRfpni8TBnLR
 OPENROUTER_API_KEY=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
 APP_URL=https://software.saaiss.in
+GEMINI_API_KEY=${GEMINI_API_KEY:-}
+GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}
 EOF
   echo "✅ backend/.env created"
 else
   echo "✅ backend/.env already exists"
+  if [ -n "${GEMINI_API_KEY:-}" ] && ! grep -q "^GEMINI_API_KEY=" backend/.env; then
+    echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> backend/.env
+    echo "✅ Appended GEMINI_API_KEY to backend/.env"
+  fi
+  if ! grep -q "^GEMINI_MODEL=" backend/.env; then
+    echo "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}" >> backend/.env
+  fi
 fi
 
 # ---- 4. Create logs directory ----
