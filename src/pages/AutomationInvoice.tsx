@@ -48,6 +48,11 @@ import {
 import { parseVoiceInvoiceText, parseInvoiceText } from "@/lib/voiceInvoiceParser";
 import { API_ENDPOINTS, API_BASE_URL } from "@/lib/api";
 import { formatPDFCurrency } from "@/lib/reportBranding";
+import {
+  calculateLineItem,
+  calculateInvoiceTotals as calcInvoiceTotals,
+  determineIsInterState
+} from "@/utils/invoiceCalculator";
 import Tesseract from "tesseract.js";
 import DocScanner from "@/components/DocScanner";
 import { Button } from "@/components/ui/button";
@@ -1068,104 +1073,45 @@ const AutomationInvoice = () => {
   };
 
   // Check if inter-state transaction
-  const isInterStateTransaction = (): boolean => {
-    const customerState = currentInvoice.stateOfSupply;
-    const businessState = currentInvoice.businessState || BUSINESS_STATE;
-    return customerState !== '' && businessState !== '' && customerState !== businessState;
+  const isInterStateTransaction = (customerState?: string, businessState?: string): boolean => {
+    const cState = customerState !== undefined ? customerState : currentInvoice.stateOfSupply;
+    const bState = businessState !== undefined ? businessState : (currentInvoice.businessState || BUSINESS_STATE);
+    return determineIsInterState(cState, bState);
   };
 
-  // Calculate item amounts with GST breakdown
+  // Calculate item amounts with GST breakdown using centralized calculation rules
   const calculateItemAmounts = (item: Partial<InvoiceItem>, forceInterState?: boolean): Partial<InvoiceItem> => {
-    const qty = Number(item.quantity) || 0;
-    const price = Number(item.pricePerUnit) || 0;
-    const discountPct = Number(item.discountPercent) || 0;
-    const priceWithTax = Boolean(item.priceWithTax);
-    const taxPct = Number(item.taxPercent) || 0;
-
-    let baseAmount = qty * price;
-    let discountAmount = (baseAmount * discountPct) / 100;
-    let afterDiscount = baseAmount - discountAmount;
-
-    // Determine if inter-state
     const isInterState = forceInterState !== undefined ? forceInterState : isInterStateTransaction();
-
-    let sgstRate = 0, cgstRate = 0, igstRate = 0;
-    let sgstAmount = 0, cgstAmount = 0, igstAmount = 0;
-    let taxAmount = 0;
-    let finalAmount = afterDiscount;
-
-    if (taxPct > 0) {
-      if (priceWithTax) {
-        // Inclusive tax
-        const totalTaxInclusive = (afterDiscount * taxPct) / (100 + taxPct);
-        if (isInterState) {
-          igstRate = taxPct;
-          igstAmount = totalTaxInclusive;
-          taxAmount = totalTaxInclusive;
-        } else {
-          sgstRate = taxPct / 2;
-          cgstRate = taxPct / 2;
-          sgstAmount = totalTaxInclusive / 2;
-          cgstAmount = totalTaxInclusive / 2;
-          taxAmount = totalTaxInclusive;
-        }
-        finalAmount = afterDiscount;
-      } else {
-        // Exclusive tax
-        if (isInterState) {
-          igstRate = taxPct;
-          igstAmount = (afterDiscount * igstRate) / 100;
-          taxAmount = igstAmount;
-        } else {
-          sgstRate = taxPct / 2;
-          cgstRate = taxPct / 2;
-          sgstAmount = (afterDiscount * sgstRate) / 100;
-          cgstAmount = (afterDiscount * cgstRate) / 100;
-          taxAmount = sgstAmount + cgstAmount;
-        }
-        finalAmount = afterDiscount + taxAmount;
-      }
-    }
-
-    return {
-      ...item,
-      taxPercent: taxPct,
-      discountAmount: Math.round(discountAmount * 100) / 100,
-      taxAmount: Math.round(taxAmount * 100) / 100,
-      sgstRate: Math.round(sgstRate * 100) / 100,
-      sgstAmount: Math.round(sgstAmount * 100) / 100,
-      cgstRate: Math.round(cgstRate * 100) / 100,
-      cgstAmount: Math.round(cgstAmount * 100) / 100,
-      igstRate: Math.round(igstRate * 100) / 100,
-      igstAmount: Math.round(igstAmount * 100) / 100,
-      isInterState,
-      amount: Math.round(finalAmount * 100) / 100
-    };
+    return calculateLineItem(item as any, isInterState) as any;
   };
 
-  // Calculate invoice totals from items
+  // Calculate invoice totals from items using centralized calculation rules
   const calculateInvoiceTotals = (
     items: InvoiceItem[],
     shipping = currentInvoice.shippingCharges || 0,
     packaging = currentInvoice.packagingCharges || 0,
     freight = currentInvoice.freightCharges || 0,
-    adjustment = currentInvoice.adjustment || 0
+    adjustment = currentInvoice.adjustment || 0,
+    placeOfSupply = currentInvoice.stateOfSupply,
+    sellerState = currentInvoice.businessState || BUSINESS_STATE
   ) => {
-    const subtotal = items.reduce((sum, i) => sum + (i.quantity * i.pricePerUnit) - i.discountAmount, 0);
-    const totalSgst = items.reduce((sum, i) => sum + i.sgstAmount, 0);
-    const totalCgst = items.reduce((sum, i) => sum + i.cgstAmount, 0);
-    const totalIgst = items.reduce((sum, i) => sum + i.igstAmount, 0);
-    const totalTax = totalSgst + totalCgst + totalIgst;
-    const itemsTotal = items.reduce((sum, i) => sum + i.amount, 0);
-    const total = itemsTotal + shipping + packaging + freight + adjustment;
+    const res = calcInvoiceTotals({
+      items: items as any,
+      placeOfSupply,
+      sellerState,
+      shippingCharges: shipping,
+      packagingCharges: packaging,
+      freightCharges: freight,
+      adjustment
+    });
 
     return {
-      subtotal: Math.round(subtotal * 100) / 100,
-      totalSgst: Math.round(totalSgst * 100) / 100,
-      totalCgst: Math.round(totalCgst * 100) / 100,
-      totalIgst: Math.round(totalIgst * 100) / 100,
-      totalTax: Math.round(totalTax * 100) / 100,
-      total: Math.round(total * 100) / 100
+      subtotal: res.subtotal,
+      totalSgst: res.sgst,
+      totalCgst: res.cgst,
+      totalIgst: res.igst,
+      totalTax: res.taxAmount,
+      total: res.grandTotal
     };
   };
 
@@ -1659,6 +1605,10 @@ const AutomationInvoice = () => {
     setLastSavedId(idToUse);
     setInvoiceType(inv.type || 'sales');
 
+    const placeOfSupply = inv.stateOfSupply || 'Tamil Nadu';
+    const sellerState = inv.businessState || BUSINESS_STATE;
+    const isInter = isInterStateTransaction(placeOfSupply, sellerState);
+
     const loadedItems: InvoiceItem[] = (inv.items && Array.isArray(inv.items) && inv.items.length > 0)
       ? inv.items.map((item: any) => {
           const rawItem: Partial<InvoiceItem> = {
@@ -1672,9 +1622,10 @@ const AutomationInvoice = () => {
             pricePerUnit: Number(item.pricePerUnit ?? item.unitPrice ?? 0),
             priceWithTax: Boolean(item.priceWithTax),
             discountPercent: Number(item.discountPercent || 0),
+            discountAmount: Number(item.discount ?? item.discountAmount ?? 0),
             taxPercent: Number(item.taxPercent ?? item.taxRate ?? 0)
           };
-          return calculateItemAmounts(rawItem) as InvoiceItem;
+          return calculateLineItem(rawItem as any, isInter) as InvoiceItem;
         })
       : [];
 
@@ -1683,7 +1634,7 @@ const AutomationInvoice = () => {
     const freight = Number(inv.freightCharges) || 0;
     const adjustment = Number(inv.adjustment) || 0;
 
-    const totals = calculateInvoiceTotals(loadedItems, shipping, packaging, freight, adjustment);
+    const totals = calculateInvoiceTotals(loadedItems, shipping, packaging, freight, adjustment, placeOfSupply, sellerState);
 
     const paidAmt = Number(inv.paid ?? inv.amountPaid ?? 0);
     const balanceAmt = Math.max(0, totals.total - paidAmt);
@@ -2121,7 +2072,7 @@ const AutomationInvoice = () => {
         else if (sectionName === "tax" && tax.showSummary) {
           doc.setFont("helvetica", "normal");
           doc.setFontSize(9);
-          doc.text(`Subtotal:`, 130, currentY);
+          doc.text(`Taxable Amount:`, 130, currentY);
           doc.text(formatPDFCurrency(data.subtotal || 0, "INR "), 190, currentY, { align: 'right' });
           let totY = currentY + 6;
 
@@ -2143,13 +2094,16 @@ const AutomationInvoice = () => {
             totY += 6;
           };
 
-          const totalDiscount = (data.items || []).reduce((sum: number, i: any) => sum + (i.discountAmount || 0), 0);
-          if (totalDiscount > 0) addTotalRow("Total Discount:", -totalDiscount);
+          const hasBreakdown = (tax.showCGST && (data.totalCgst || 0) > 0) ||
+                               (tax.showSGST && (data.totalSgst || 0) > 0) ||
+                               (tax.showIGST && (data.totalIgst || 0) > 0);
 
           if (tax.showCGST && (data.totalCgst || 0) > 0) addTotalRow("CGST:", data.totalCgst);
           if (tax.showSGST && (data.totalSgst || 0) > 0) addTotalRow("SGST:", data.totalSgst);
           if (tax.showIGST && (data.totalIgst || 0) > 0) addTotalRow("IGST:", data.totalIgst);
-          if (tax.showTotalTax && (data.totalTax || 0) > 0) addTotalRow("Total Tax:", data.totalTax);
+          if (!hasBreakdown && tax.showTotalTax && (data.totalTax || 0) > 0) {
+            addTotalRow("Total Tax:", data.totalTax);
+          }
 
           const shipping  = data.shippingCharges  || 0;
           const packaging = data.packagingCharges || 0;
@@ -3270,7 +3224,31 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     <Label className="text-slate-800 text-sm font-semibold">State of Supply</Label>
                     <Select
                       value={currentInvoice.stateOfSupply}
-                      onValueChange={(val) => setCurrentInvoice(prev => ({ ...prev, stateOfSupply: val }))}
+                      onValueChange={(val) => {
+                        const isInter = isInterStateTransaction(val, currentInvoice.businessState);
+                        const recalculatedItems = currentInvoice.items.map(item => calculateLineItem(item, isInter) as InvoiceItem);
+                        const totals = calculateInvoiceTotals(
+                          recalculatedItems,
+                          currentInvoice.shippingCharges,
+                          currentInvoice.packagingCharges,
+                          currentInvoice.freightCharges,
+                          currentInvoice.adjustment,
+                          val,
+                          currentInvoice.businessState
+                        );
+                        setCurrentInvoice(prev => ({
+                          ...prev,
+                          stateOfSupply: val,
+                          items: recalculatedItems,
+                          subtotal: totals.subtotal,
+                          totalTax: totals.totalTax,
+                          totalSgst: totals.totalSgst,
+                          totalCgst: totals.totalCgst,
+                          totalIgst: totals.totalIgst,
+                          total: totals.total,
+                          balance: Math.max(0, totals.total - prev.paid)
+                        }));
+                      }}
                     >
                       <SelectTrigger className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300">
                         <SelectValue placeholder="Select State" />
@@ -3561,20 +3539,21 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                           : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                           }`}>
                           {isInterStateTransaction()
-                            ? `Inter-State: ${currentInvoice.businessState} → ${currentInvoice.stateOfSupply} (IGST ${newItem.priceWithTax ? newItem.taxPercent || 0 : 0}%)`
-                            : `Intra-State: ${currentInvoice.stateOfSupply} (SGST ${(newItem.priceWithTax ? newItem.taxPercent || 0 : 0) / 2}% + CGST ${(newItem.priceWithTax ? newItem.taxPercent || 0 : 0) / 2}%)`
+                            ? `Inter-State: ${currentInvoice.businessState || BUSINESS_STATE} → ${currentInvoice.stateOfSupply} (IGST ${newItem.taxPercent || 0}%)`
+                            : `Intra-State: ${currentInvoice.stateOfSupply} (SGST ${(newItem.taxPercent || 0) / 2}% + CGST ${(newItem.taxPercent || 0) / 2}%)`
                           }
+                          {newItem.priceWithTax ? ' [Inclusive of Tax]' : ' [Exclusive of Tax]'}
                         </div>
                       )}
                       <div className="flex justify-between items-center text-slate-800">
                         <div className="flex flex-wrap gap-3 text-sm">
                           <span>Disc: <span className="font-semibold">₹{(itemPreview.discountAmount || 0).toFixed(2)}</span></span>
                           {isInterStateTransaction() ? (
-                            <span>IGST ({newItem.priceWithTax ? newItem.taxPercent || 0 : 0}%): <span className="font-semibold text-orange-700">₹{(itemPreview.igstAmount || 0).toFixed(2)}</span></span>
+                            <span>IGST ({newItem.taxPercent || 0}%): <span className="font-semibold text-orange-700">₹{(itemPreview.igstAmount || 0).toFixed(2)}</span></span>
                           ) : (
                             <>
-                              <span>SGST ({(newItem.priceWithTax ? newItem.taxPercent || 0 : 0) / 2}%): <span className="font-semibold text-emerald-700">₹{(itemPreview.sgstAmount || 0).toFixed(2)}</span></span>
-                              <span>CGST ({(newItem.priceWithTax ? newItem.taxPercent || 0 : 0) / 2}%): <span className="font-semibold text-emerald-700">₹{(itemPreview.cgstAmount || 0).toFixed(2)}</span></span>
+                              <span>SGST ({(newItem.taxPercent || 0) / 2}%): <span className="font-semibold text-emerald-700">₹{(itemPreview.sgstAmount || 0).toFixed(2)}</span></span>
+                              <span>CGST ({(newItem.taxPercent || 0) / 2}%): <span className="font-semibold text-emerald-700">₹{(itemPreview.cgstAmount || 0).toFixed(2)}</span></span>
                             </>
                           )}
                         </div>
@@ -4218,26 +4197,30 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     }
 
                     if (sectionName === "tax" && activeTemplateConfig.tax?.showSummary) {
+                      const totalGross = currentInvoice.items.reduce((sum, i) => sum + ((i as any).grossAmount || (i.quantity * i.pricePerUnit)), 0);
                       const totalDiscount = currentInvoice.items.reduce((sum, i) => sum + (i.discountAmount || 0), 0);
+                      const hasBreakdown = (activeTemplateConfig.tax?.showCGST && currentInvoice.totalCgst > 0) ||
+                                           (activeTemplateConfig.tax?.showSGST && currentInvoice.totalSgst > 0) ||
+                                           (activeTemplateConfig.tax?.showIGST && currentInvoice.totalIgst > 0);
                       return (
                         <div key="tax" className="mb-6 flex justify-end">
                           <div className="w-80 space-y-2 border-t pt-3" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
+                            {totalDiscount > 0 ? (
+                              <>
+                                <div className="flex justify-between items-center text-xs">
+                                  <span className="text-slate-500">Gross Amount</span>
+                                  <span className="font-semibold">₹{totalGross.toFixed(2)}</span>
+                                </div>
+                                <div className="flex justify-between items-center text-xs text-amber-700">
+                                  <span>Total Discount</span>
+                                  <span>-₹{totalDiscount.toFixed(2)}</span>
+                                </div>
+                              </>
+                            ) : null}
                             <div className="flex justify-between items-center text-xs">
-                              <span className="text-slate-500">Subtotal</span>
+                              <span className="text-slate-500">Taxable Amount</span>
                               <span className="font-semibold">₹{currentInvoice.subtotal.toFixed(2)}</span>
                             </div>
-                            {totalDiscount > 0 && (
-                              <div className="flex justify-between items-center text-xs text-amber-700">
-                                <span>Total Discount</span>
-                                <span>-₹{totalDiscount.toFixed(2)}</span>
-                              </div>
-                            )}
-                            {activeTemplateConfig.tax.showTaxableAmount && (
-                              <div className="flex justify-between items-center text-xs">
-                                <span className="text-slate-500">Taxable Amount</span>
-                                <span>₹{currentInvoice.subtotal.toFixed(2)}</span>
-                              </div>
-                            )}
                             {activeTemplateConfig.tax.showCGST && currentInvoice.totalCgst > 0 && (
                               <div className="flex justify-between items-center text-xs text-slate-650">
                                 <span>CGST</span>
@@ -4256,12 +4239,36 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                                 <span>₹{currentInvoice.totalIgst.toFixed(2)}</span>
                               </div>
                             )}
-                            {activeTemplateConfig.tax.showTotalTax && (
+                            {(!hasBreakdown || activeTemplateConfig.tax.showTotalTax) && (
                               <div className="flex justify-between items-center text-xs border-t pt-1.5 font-bold" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
                                 <span className="text-slate-650">Total Tax</span>
                                 <span>₹{currentInvoice.totalTax.toFixed(2)}</span>
                               </div>
                             )}
+                            {currentInvoice.shippingCharges ? (
+                              <div className="flex justify-between items-center text-xs text-slate-600">
+                                <span>Shipping</span>
+                                <span>₹{currentInvoice.shippingCharges.toFixed(2)}</span>
+                              </div>
+                            ) : null}
+                            {currentInvoice.packagingCharges ? (
+                              <div className="flex justify-between items-center text-xs text-slate-600">
+                                <span>Packaging</span>
+                                <span>₹{currentInvoice.packagingCharges.toFixed(2)}</span>
+                              </div>
+                            ) : null}
+                            {currentInvoice.freightCharges ? (
+                              <div className="flex justify-between items-center text-xs text-slate-600">
+                                <span>Freight</span>
+                                <span>₹{currentInvoice.freightCharges.toFixed(2)}</span>
+                              </div>
+                            ) : null}
+                            {currentInvoice.adjustment ? (
+                              <div className="flex justify-between items-center text-xs text-slate-600">
+                                <span>Adjustment</span>
+                                <span>₹{currentInvoice.adjustment.toFixed(2)}</span>
+                              </div>
+                            ) : null}
                             <div className="flex justify-between items-center py-2 border-t" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
                               <span className="font-extrabold text-slate-900">Grand Total</span>
                               <span className="text-base font-black" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>
