@@ -426,35 +426,35 @@ const PublicInvoiceView = () => {
 
                         <div className="w-full md:w-72 space-y-2.5 text-sm">
                             <div className="flex justify-between text-slate-600">
-                                <span>Subtotal</span>
+                                <span>Taxable Amount</span>
                                 <span>₹{invoice.subtotal.toFixed(2)}</span>
                             </div>
 
-                            {tax.showCGST && invoice.cgst && invoice.cgst > 0 && (
+                            {tax.showCGST && invoice.cgst && invoice.cgst > 0 ? (
                                 <div className="flex justify-between text-slate-500 text-xs">
                                     <span>CGST</span>
                                     <span>₹{invoice.cgst.toFixed(2)}</span>
                                 </div>
-                            )}
-                            {tax.showSGST && invoice.sgst && invoice.sgst > 0 && (
+                            ) : null}
+                            {tax.showSGST && invoice.sgst && invoice.sgst > 0 ? (
                                 <div className="flex justify-between text-slate-500 text-xs">
                                     <span>SGST</span>
                                     <span>₹{invoice.sgst.toFixed(2)}</span>
                                 </div>
-                            )}
-                            {tax.showIGST && invoice.igst && invoice.igst > 0 && (
+                            ) : null}
+                            {tax.showIGST && invoice.igst && invoice.igst > 0 ? (
                                 <div className="flex justify-between text-slate-500 text-xs">
                                     <span>IGST</span>
                                     <span>₹{invoice.igst.toFixed(2)}</span>
                                 </div>
-                            )}
+                            ) : null}
 
-                            {tax.showTotalTax && invoice.taxAmount > 0 && (
+                            {!((tax.showCGST && invoice.cgst && invoice.cgst > 0) || (tax.showSGST && invoice.sgst && invoice.sgst > 0) || (tax.showIGST && invoice.igst && invoice.igst > 0)) && tax.showTotalTax && invoice.taxAmount > 0 ? (
                                 <div className="flex justify-between text-slate-600">
                                     <span>Total Tax</span>
                                     <span>₹{invoice.taxAmount.toFixed(2)}</span>
                                 </div>
-                            )}
+                            ) : null}
 
                             {invoice.shippingCharges && invoice.shippingCharges > 0 ? (
                                 <div className="flex justify-between text-slate-600 text-xs">

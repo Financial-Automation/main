@@ -7,6 +7,7 @@ import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
 import Payment from "../models/Payment.js";
+import { validateAndRecalculateInvoice } from "../utils/invoiceCalculator.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -225,22 +226,30 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
       invoiceData.invoiceNumber = `INV-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, '0')}`;
     }
 
-    // Calculate balance due and validate amountPaid
-    const grandTotal = Math.round((Number(invoiceData.grandTotal) || 0) * 100) / 100;
-    const initialPaid = Math.round((Number(invoiceData.amountPaid) || 0) * 100) / 100;
-    const validatedPaid = Math.min(grandTotal, Math.max(0, initialPaid));
-    invoiceData.grandTotal = grandTotal;
-    invoiceData.amountPaid = validatedPaid;
-    invoiceData.balanceDue = Math.max(0, Math.round((grandTotal - validatedPaid) * 100) / 100);
-
-    if (invoiceData.balanceDue === 0 && grandTotal > 0) {
-      invoiceData.paymentStatus = 'paid';
+    // Validate and recalculate invoice line items, tax breakdown, subtotal, and grand total using authoritative calculation rules
+    const validatedData = validateAndRecalculateInvoice(invoiceData, invoiceData.businessState || "Tamil Nadu");
+    invoiceData.stateOfSupply = validatedData.stateOfSupply;
+    invoiceData.businessState = validatedData.businessState;
+    if (Array.isArray(validatedData.items) && validatedData.items.length > 0) {
+      invoiceData.items = validatedData.items;
+    }
+    invoiceData.subtotal = validatedData.subtotal;
+    invoiceData.taxAmount = validatedData.taxAmount;
+    invoiceData.cgst = validatedData.cgst;
+    invoiceData.sgst = validatedData.sgst;
+    invoiceData.igst = validatedData.igst;
+    invoiceData.shippingCharges = validatedData.shippingCharges;
+    invoiceData.packagingCharges = validatedData.packagingCharges;
+    invoiceData.freightCharges = validatedData.freightCharges;
+    invoiceData.adjustment = validatedData.adjustment;
+    invoiceData.grandTotal = validatedData.grandTotal;
+    invoiceData.amountPaid = validatedData.amountPaid;
+    invoiceData.balanceDue = validatedData.balanceDue;
+    invoiceData.paymentStatus = validatedData.paymentStatus;
+    if (invoiceData.balanceDue === 0 && invoiceData.grandTotal > 0) {
       invoiceData.status = 'paid';
-    } else if (validatedPaid > 0) {
-      invoiceData.paymentStatus = 'partial';
-      if (invoiceData.status === 'draft') invoiceData.status = 'sent';
-    } else {
-      invoiceData.paymentStatus = 'pending';
+    } else if (invoiceData.amountPaid > 0 && invoiceData.status === 'draft') {
+      invoiceData.status = 'sent';
     }
 
     const newInvoice = new Invoice(invoiceData);
@@ -546,26 +555,52 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
     const updateData = req.body;
     const userFilter = getUserFilter(req);
 
-    // Recalculate balance due if payment or grandTotal is updated
-    if (updateData.amountPaid !== undefined || updateData.grandTotal !== undefined) {
-      const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
-      if (currentInvoice) {
-        const grandTotal = Math.round((Number(updateData.grandTotal !== undefined ? updateData.grandTotal : currentInvoice.grandTotal) || 0) * 100) / 100;
-        const requestedPaid = Math.round((Number(updateData.amountPaid !== undefined ? updateData.amountPaid : currentInvoice.amountPaid) || 0) * 100) / 100;
-        const validatedPaid = Math.min(grandTotal, Math.max(0, requestedPaid));
-        updateData.grandTotal = grandTotal;
-        updateData.amountPaid = validatedPaid;
-        updateData.balanceDue = Math.max(0, Math.round((grandTotal - validatedPaid) * 100) / 100);
+    const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
+    if (!currentInvoice) {
+      return res.status(404).json({ message: "Invoice not found" });
+    }
 
-        // Update payment status based on balance
-        if (updateData.balanceDue === 0 && grandTotal > 0) {
-          updateData.paymentStatus = 'paid';
-          updateData.status = 'paid';
-        } else if (validatedPaid > 0) {
-          updateData.paymentStatus = 'partial';
-        } else {
-          updateData.paymentStatus = 'pending';
-        }
+    // Recalculate totals if items or place of supply are updated
+    if (Array.isArray(updateData.items) && updateData.items.length > 0) {
+      const mergedInvoice = {
+        ...currentInvoice.toObject(),
+        ...updateData,
+        items: updateData.items
+      };
+      const validatedData = validateAndRecalculateInvoice(mergedInvoice, mergedInvoice.businessState || "Tamil Nadu");
+      updateData.items = validatedData.items;
+      updateData.subtotal = validatedData.subtotal;
+      updateData.taxAmount = validatedData.taxAmount;
+      updateData.cgst = validatedData.cgst;
+      updateData.sgst = validatedData.sgst;
+      updateData.igst = validatedData.igst;
+      updateData.shippingCharges = validatedData.shippingCharges;
+      updateData.packagingCharges = validatedData.packagingCharges;
+      updateData.freightCharges = validatedData.freightCharges;
+      updateData.adjustment = validatedData.adjustment;
+      updateData.grandTotal = validatedData.grandTotal;
+      updateData.amountPaid = validatedData.amountPaid;
+      updateData.balanceDue = validatedData.balanceDue;
+      updateData.paymentStatus = validatedData.paymentStatus;
+      if (updateData.balanceDue === 0 && updateData.grandTotal > 0) {
+        updateData.status = 'paid';
+      }
+    } else if (updateData.amountPaid !== undefined || updateData.grandTotal !== undefined) {
+      const grandTotal = Math.round((Number(updateData.grandTotal !== undefined ? updateData.grandTotal : currentInvoice.grandTotal) || 0) * 100) / 100;
+      const requestedPaid = Math.round((Number(updateData.amountPaid !== undefined ? updateData.amountPaid : currentInvoice.amountPaid) || 0) * 100) / 100;
+      const validatedPaid = Math.min(grandTotal, Math.max(0, requestedPaid));
+      updateData.grandTotal = grandTotal;
+      updateData.amountPaid = validatedPaid;
+      updateData.balanceDue = Math.max(0, Math.round((grandTotal - validatedPaid) * 100) / 100);
+
+      // Update payment status based on balance
+      if (updateData.balanceDue === 0 && grandTotal > 0) {
+        updateData.paymentStatus = 'paid';
+        updateData.status = 'paid';
+      } else if (validatedPaid > 0) {
+        updateData.paymentStatus = 'partial';
+      } else {
+        updateData.paymentStatus = 'pending';
       }
     }
 

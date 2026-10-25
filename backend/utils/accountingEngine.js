@@ -216,8 +216,9 @@ export const processInvoiceEvent = async (invoiceId, eventType, extraData = null
       adjustAccountBalance(arAccount, invoice.grandTotal, 0);
       await arAccount.save({ session });
 
-      // 2. Credit Sales Revenue (subtotal minus discount)
-      const netSales = roundDec(invoice.subtotal - invoice.discountAmount + invoice.shippingCharges + invoice.packagingCharges + invoice.freightCharges + invoice.adjustment);
+      // 2. Credit Sales Revenue (subtotal is net taxable amount; add applicable other charges)
+      const otherCharges = (Number(invoice.shippingCharges) || 0) + (Number(invoice.packagingCharges) || 0) + (Number(invoice.freightCharges) || 0) + (Number(invoice.adjustment) || 0);
+      const netSales = roundDec(invoice.subtotal + otherCharges);
       journalLines.push({
         accountId: salesAccount._id,
         accountName: salesAccount.name,
