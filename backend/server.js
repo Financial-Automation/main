@@ -11,6 +11,8 @@ import Subscription from "./models/Subscription.js";
 import { authenticateUser, checkSubscription, checkModuleAccess } from "./utils/authMiddleware.js";
 import { sendResetEmail } from "./utils/emailService.js";
 import crypto from "crypto";
+import path from "path";
+import { fileURLToPath } from "url";
 
 import { performance } from "perf_hooks";
 import { initMongoAPM } from "./utils/inventoryInstrumentation.js";
@@ -55,10 +57,13 @@ import budgetRoutes from "./routes/budgetRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
 import purchaseInvoiceTemplateRoutes from "./routes/purchaseInvoiceTemplateRoutes.js";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Reliable environment configuration across all execution contexts
 dotenv.config();
-if (!process.env.PRO_MONGO_URI && !process.env.DEV_MONGO_URI) {
-  dotenv.config({ path: "./backend/.env" });
-}
+dotenv.config({ path: path.resolve(__dirname, ".env") });
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 // Enforce production environment variable validation
 if (process.env.NODE_ENV === "production") {
@@ -141,7 +146,48 @@ app.use(cors(corsOptions));
 app.use("/uploads", express.static("uploads"));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok" });
+  const isConnected = mongoose.connection.readyState === 1;
+  const dbStateMap = {
+    0: "disconnected",
+    1: "connected",
+    2: "connecting",
+    3: "disconnecting"
+  };
+  const dbStatus = dbStateMap[mongoose.connection.readyState] || "unknown";
+
+  if (isConnected) {
+    return res.json({ status: "ok", database: dbStatus });
+  }
+
+  return res.status(503).json({
+    status: "degraded",
+    database: dbStatus,
+    message: "Database service is not connected."
+  });
+});
+
+// ✅ Database Readiness Guard: Block DB-dependent requests if MongoDB is not ready
+app.use((req, res, next) => {
+  if (
+    req.method === "OPTIONS" ||
+    req.path === "/api/health" ||
+    req.path === "/health" ||
+    req.path.startsWith("/uploads")
+  ) {
+    return next();
+  }
+
+  if (mongoose.connection.readyState !== 1) {
+    console.warn(`[DB Guard] Blocked request ${req.method} ${req.originalUrl || req.url}: MongoDB not connected (readyState: ${mongoose.connection.readyState})`);
+    return res.status(503).json({
+      success: false,
+      message: "Database service is unavailable. Local MongoDB service is not connected.",
+      error: "Service Unavailable",
+      code: "DATABASE_UNAVAILABLE"
+    });
+  }
+
+  next();
 });
 
 // Security headers for production
@@ -155,14 +201,23 @@ if (process.env.DEV_MODE !== 'true') {
   });
 }
 
-// ✅ MongoDB Connection - Dynamic based on DEV_MODE with fallback
+// ✅ MongoDB Connection - Dynamic based on DEV_MODE with fail-closed guard
 const isDevelopment = process.env.DEV_MODE === 'true';
-let mongoUri = isDevelopment ? process.env.DEV_MONGO_URI : process.env.PRO_MONGO_URI;
+const blockProdFallback = process.env.BLOCK_PROD_FALLBACK !== 'false';
+
+// Strict URI selection: Never fallback to production URI in development
+let mongoUri;
+if (isDevelopment) {
+  mongoUri = process.env.DEV_MONGO_URI || "mongodb://127.0.0.1:27017/Financialautomation";
+} else {
+  mongoUri = process.env.PRO_MONGO_URI;
+}
 
 console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`);
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
+console.log(`🛡️  Fail-Closed Guard (BLOCK_PROD_FALLBACK): ${blockProdFallback ? 'Enabled' : 'Disabled'}`);
 
-// Connect to MongoDB with fallback mechanism
+// Connect to MongoDB with fail-closed mechanism
 const connectToMongoDB = async () => {
   initMongoAPM(mongoose);
   const mongoOptions = {
@@ -179,23 +234,22 @@ const connectToMongoDB = async () => {
     console.log("✅ MongoDB Connected Successfully");
     console.log(`📍 Database: ${isDevelopment ? 'localhost:27017' : 'Cloud Atlas'}`);
   } catch (err) {
-    console.error("❌ Primary MongoDB Connection Failed:", err.message);
+    console.error(`❌ ${isDevelopment ? 'Local' : 'Primary'} MongoDB Connection Failed:`, err.message);
 
     if (isDevelopment) {
-      console.log("🔄 Falling back to Cloud Database...");
-      try {
-        await mongoose.connect(process.env.PRO_MONGO_URI, mongoOptions);
-        console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
-        console.log("📍 Database: Cloud Atlas (Fallback)");
-      } catch (fallbackErr) {
-        console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
-        console.error("💡 Please ensure MongoDB is running locally or check your internet connection");
-        throw fallbackErr; // Throw error to prevent server from starting without DB
+      if (blockProdFallback) {
+        console.error("🚫 BLOCK_PROD_FALLBACK active: Refusing fallback to Cloud Atlas / PRO_MONGO_URI in development mode.");
+        console.error("💡 Local MongoDB service is missing or stopped.");
+        console.error("   To start local MongoDB, run:");
+        console.error("   ./backend/node_modules/.cache/mongodb-memory-server/mongod-arm64-darwin-8.2.6 --dbpath ~/.mongodb/data --port 27017 --bind_ip 127.0.0.1");
+        throw err;
       }
+      console.warn("⚠️ Fallback to production is strictly forbidden by policy.");
+      throw err;
     } else {
       console.error("❌ Production MongoDB Connection Failed");
       console.error("💡 Please check your cloud database configuration");
-      throw err; // Throw error to prevent server from starting without DB
+      throw err;
     }
   }
 };
