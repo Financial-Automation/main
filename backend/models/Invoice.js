@@ -122,7 +122,7 @@ const invoiceSchema = new mongoose.Schema({
 
   // Template Customization Fields
   templateId: {
-    type: mongoose.Schema.Types.ObjectId,
+    type: mongoose.Schema.Types.Mixed,
     ref: "InvoiceTemplate"
   },
   templateSnapshot: {

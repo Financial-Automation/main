@@ -43,6 +43,12 @@ import leadRoutes from "./routes/leadRoutes.js";
 
 import { MongoMemoryServer } from "mongodb-memory-server";
 
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, ".env") });
 dotenv.config();
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
