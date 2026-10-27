@@ -64,15 +64,6 @@ import customerRoutes from "./routes/customerRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
 import purchaseInvoiceTemplateRoutes from "./routes/purchaseInvoiceTemplateRoutes.js";
 
-import { MongoMemoryServer } from "mongodb-memory-server";
-
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.resolve(__dirname, ".env") });
-dotenv.config();
 const app = express();
 
 // ✅ Razorpay Configuration
