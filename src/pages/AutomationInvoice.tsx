@@ -64,6 +64,12 @@ import { toast } from "sonner";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import { useSubscription } from "@/contexts/SubscriptionContext";
+import { 
+  InvoiceTemplateRenderer, 
+  generateTemplateInvoicePDF, 
+  TEMPLATE_REGISTRY,
+  TemplateLayoutKey
+} from "@/components/invoice-templates";
 
 // Indian States for GST
 const INDIAN_STATES = [
@@ -408,66 +414,65 @@ const AutomationInvoice = () => {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
 
   const activeTemplateConfig = useMemo(() => {
-    const active = userTemplates.find((t: any) => t._id === selectedTemplateId);
+    const active = userTemplates.find((t: any) => t._id === selectedTemplateId || t.id === selectedTemplateId);
     if (active?.config) return active.config;
     
-    // Default initialConfig structure
-    return {
-      header: { showLogo: true, logoPosition: "left", logoSize: "medium", logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
-      seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
-      customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
-      invoiceInfo: {
-        showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
-        labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
-      },
-      items: {
-        columns: ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"],
-        labels: { item: "Item", sku: "Item Code", description: "Description", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", discount: "Discount", tax: "Tax", amount: "Amount" }
-      },
-      tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
-      payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
-      notes: { show: true, label: "Notes", defaultText: "Thank you for your business!" },
-      terms: { show: true, label: "Terms & Conditions", defaultText: "Payment is due within 15 days of invoice date." },
-      signature: { show: false, name: "", designation: "", imageUrl: "" },
-      footer: { show: true, text: "" },
-      design: { primaryColor: "#4f46e5", secondaryColor: "#f8fafc", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#cbd5e1", fontFamily: "Inter", fontSize: 12, borderStyle: "light" },
-      sectionsOrder: ["header", "seller", "customer", "invoiceInfo", "items", "tax", "payment", "notes", "terms", "signature", "footer"]
-    };
+    // Default initialConfig structure from registry
+    return TEMPLATE_REGISTRY[0].config;
   }, [userTemplates, selectedTemplateId]);
 
   const fetchUserTemplates = async () => {
+    const standardTemplates = TEMPLATE_REGISTRY.map(t => ({
+      _id: t.id,
+      name: t.name,
+      description: t.description,
+      isDefault: !!t.isDefault,
+      status: 'active' as const,
+      config: t.config
+    }));
+
     try {
       const token = localStorage.getItem("token");
       if (!token) {
-        toast.error("Session expired. Please log in again.");
-        navigate("/auth");
+        setUserTemplates(standardTemplates);
+        setSelectedTemplateId(standardTemplates[0]._id);
         return;
       }
       const res = await fetch(`${API_BASE_URL}/invoice-templates`, {
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (res.status === 401 || res.status === 400) {
-        // Token expired or invalid — clear it and redirect
+        // Token expired or invalid — fall back to standard built-in templates
         localStorage.removeItem("token");
-        toast.error("Session expired. Please log in again.");
-        navigate("/auth");
+        setUserTemplates(standardTemplates);
+        setSelectedTemplateId(standardTemplates[0]._id);
         return;
       }
       if (res.ok) {
         const result = await res.json();
         const list = result.data || [];
-        setUserTemplates(list);
-        const def = list.find((t: any) => t.isDefault);
+        // Ensure all 10 templates are available by merging any missing standards
+        const loadedNames = new Set(list.map((t: any) => (t.name || '').toLowerCase()));
+        const missingStandards = standardTemplates.filter(st => !loadedNames.has(st.name.toLowerCase()));
+        const merged = [...list, ...missingStandards];
+
+        setUserTemplates(merged);
+        const def = merged.find((t: any) => t.isDefault);
         if (def) {
           setSelectedTemplateId(def._id);
           setCurrentInvoice(prev => ({ ...prev, templateId: def._id }));
-        } else if (list.length > 0) {
-          setSelectedTemplateId(list[0]._id);
-          setCurrentInvoice(prev => ({ ...prev, templateId: list[0]._id }));
+        } else if (merged.length > 0) {
+          setSelectedTemplateId(merged[0]._id);
+          setCurrentInvoice(prev => ({ ...prev, templateId: merged[0]._id }));
         }
+      } else {
+        setUserTemplates(standardTemplates);
+        setSelectedTemplateId(standardTemplates[0]._id);
       }
     } catch (err) {
       console.error("Error loading user templates:", err);
+      setUserTemplates(standardTemplates);
+      setSelectedTemplateId(standardTemplates[0]._id);
     }
   };
 
@@ -1406,12 +1411,12 @@ const AutomationInvoice = () => {
         salespersonName: currentInvoice.salespersonName || '',
         currency: currentInvoice.currency || 'INR',
         exchangeRate: currentInvoice.exchangeRate || 1,
-        customerName: currentInvoice.partyName,
+        customerName: currentInvoice.partyName?.trim() || "Cash Customer",
         customerEmail: currentInvoice.customerEmail || `customer@finsmart.in`,
         customerPhone: currentInvoice.phoneNo,
         customerGSTIN: currentInvoice.customerGSTIN,
         customerAddress: currentInvoice.customerAddress || '',
-        businessName: currentInvoice.sellerName || COMPANY_NAME,
+        businessName: currentInvoice.sellerName?.trim() || COMPANY_NAME,
         businessEmail: currentInvoice.sellerEmail || COMPANY_EMAIL,
         businessPhone: currentInvoice.sellerPhone,
         businessGSTIN: currentInvoice.sellerGSTIN,
@@ -1522,7 +1527,7 @@ const AutomationInvoice = () => {
         dueReminderDate,
         ocrJson: buildGstPortalJson({ ...currentInvoice, dueReminderDate }),
         savedAt: new Date().toISOString(),
-        id: backendId || lastSavedId
+        id: backendId || lastSavedId || currentInvoice.invoiceNo
       };
 
       const existingIndex = savedList.findIndex((inv: any) =>
@@ -1788,461 +1793,18 @@ const AutomationInvoice = () => {
     }
   };
 
-  // Generate Invoice PDF using jsPDF and jspdf-autotable
+  // Generate Invoice PDF using template-aware generator
   const generateInvoicePDF = (data: InvoiceData, forceDownload = false) => {
     try {
-      const doc = new jsPDF();
-      const sellerName = data.sellerName || COMPANY_NAME;
-      const customerName = data.partyName || 'Valued Customer';
-
-      // Safe default configuration fallback
-      const initialConfig = {
-        header: { showLogo: true, logoPosition: "left" as const, logoSize: "medium" as const, logoUrl: "", showCompanyName: true, showAddress: true, showPhone: true, showEmail: true },
-        seller: { showName: true, showPhone: true, showEmail: true, showGSTIN: true, showAddress: true },
-        customer: { showName: true, showGSTIN: true, showPhone: true, showEmail: true, showBillingAddress: true, showShippingAddress: true, showPlaceOfSupply: true },
-        invoiceInfo: {
-          showInvoiceNumber: true, showInvoiceDate: true, showDueDate: true, showPaymentTerms: true, showOrderNumber: true, showSalesperson: true,
-          labels: { invoiceNumber: "Invoice No.", invoiceDate: "Invoice Date", dueDate: "Due Date", paymentTerms: "Payment Terms", orderNumber: "Order No.", salespersonName: "Salesperson" }
-        },
-        items: {
-          columns: ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"],
-          labels: { item: "Item", sku: "Item Code", description: "Description", hsn: "HSN/SAC", quantity: "Qty", rate: "Rate", discount: "Discount", tax: "Tax", amount: "Amount" }
-        },
-        tax: { showSummary: true, showCGST: true, showSGST: true, showIGST: true, showTaxableAmount: true, showTotalTax: true },
-        payment: { showPaidAmount: true, showBalance: true, showPaymentMethod: true },
-        notes: { show: true, label: "Notes", defaultText: "Thank you for your business!" },
-        terms: { show: true, label: "Terms & Conditions", defaultText: "Payment is due within 15 days of invoice date." },
-        signature: { show: false, name: "", designation: "", imageUrl: "" },
-        footer: { show: true, text: "" },
-        design: { primaryColor: "#4f46e5", secondaryColor: "#f8fafc", textColor: "#0f172a", backgroundColor: "#ffffff", borderColor: "#cbd5e1", fontFamily: "Inter", fontSize: 12, borderStyle: "light" as const },
-        sectionsOrder: ["header", "seller", "customer", "invoiceInfo", "items", "tax", "payment", "notes", "terms", "signature", "footer"]
-      };
-
-      // Resolve active template config — prefer snapshot, then selected template, then defaults
-      const config = (data as any).templateSnapshot
-        || (userTemplates.find((t: any) => t._id === selectedTemplateId)?.config)
-        || initialConfig;
-
-      const header   = config.header   || initialConfig.header;
-      const seller   = config.seller   || initialConfig.seller;
-      const customer = config.customer || initialConfig.customer;
-      const invoiceInfo = config.invoiceInfo || initialConfig.invoiceInfo;
-      const itemsCfg = config.items   || initialConfig.items;
-      const tax      = config.tax     || initialConfig.tax;
-      const payment  = config.payment || initialConfig.payment;
-      const notes    = config.notes   || initialConfig.notes;
-      const terms    = config.terms   || initialConfig.terms;
-      const signature = config.signature || initialConfig.signature;
-      const footer   = config.footer  || initialConfig.footer;
-      const design   = config.design  || initialConfig.design;
-      const sectionsOrder = config.sectionsOrder || initialConfig.sectionsOrder;
-
-      // Hex to RGB parser helper
-      const hexToRgb = (hex: string): [number, number, number] => {
-        const clean = (hex || "#4f46e5").replace("#", "");
-        const num = parseInt(clean.padEnd(6, "0"), 16);
-        return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
-      };
-      const primaryRgb = hexToRgb(design.primaryColor || "#4f46e5");
-
-      let currentY = 15;
-
-      // Loop through all sections dynamically to respect user-ordered sequence
-      sectionsOrder.forEach((sectionName: string) => {
-        // Enforce page breaks dynamically if layout overflows vertical A4 height (297mm)
-        if (currentY > 250 && sectionName !== "footer") {
-          doc.addPage();
-          currentY = 20;
-        }
-
-        if (sectionName === "header") {
-          // Plain white background
-          doc.setFillColor(255, 255, 255);
-          doc.rect(0, currentY, 210, 35, 'F');
-          
-          let logoX = 15;
-          if (header.showLogo && header.logoUrl) {
-            try {
-              doc.addImage(header.logoUrl, 'PNG', logoX, currentY + 2, 35, 15);
-            } catch (err) {
-              console.warn("Logo failed to load in PDF:", err);
-            }
-          } else {
-            // Draw placeholder dotted-like border
-            doc.setDrawColor(200, 200, 200);
-            doc.setLineDashPattern([2, 2], 0);
-            doc.rect(logoX, currentY + 2, 35, 15);
-            doc.setLineDashPattern([], 0); // reset
-            doc.setTextColor(150, 150, 150);
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            doc.text("[ Company Logo ]", logoX + 6, currentY + 10);
-          }
-
-          // Company info on the right
-          doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(18);
-          
-          if (header.showCompanyName) {
-            doc.text(sellerName.toUpperCase(), 195, currentY + 8, { align: "right" });
-          }
-
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(8.5);
-          doc.setTextColor(100, 116, 139); // slate-500
-          
-          let headerY = currentY + 13;
-          if (header.showAddress && data.sellerAddress) {
-            const addrLines = doc.splitTextToSize(data.sellerAddress, 100);
-            addrLines.forEach((line: string) => {
-              doc.text(line, 195, headerY, { align: "right" });
-              headerY += 4;
-            });
-          }
-          if (header.showPhone && data.sellerPhone) {
-            doc.text(`Phone: ${data.sellerPhone}`, 195, headerY, { align: "right" });
-            headerY += 4;
-          }
-          if (header.showEmail && data.sellerEmail) {
-            doc.text(`Email: ${data.sellerEmail}`, 195, headerY, { align: "right" });
-            headerY += 4;
-          }
-          if (data.sellerGSTIN) {
-            doc.setFont("helvetica", "bold");
-            doc.text(`GSTIN: ${data.sellerGSTIN}`, 195, headerY, { align: "right" });
-            headerY += 4;
-          }
-
-          currentY = Math.max(headerY + 8, currentY + 30);
-        }
-
-        else if (sectionName === "seller") {
-          // Duplicate seller section removed as details are in company letterhead
-        }
-
-        else if (sectionName === "customer" && customer.showName) {
-          doc.setTextColor(100, 116, 139); // slate-500
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(9);
-          doc.text("BILL TO", 15, currentY);
-
-          // Left side: Name, Address, Contact
-          doc.setTextColor(15, 23, 42); // slate-900
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(10);
-          doc.text(customerName, 15, currentY + 7);
-
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(8.5);
-          doc.setTextColor(71, 85, 105); // slate-600
-          let custY = currentY + 12;
-          if (customer.showBillingAddress && data.customerAddress) {
-            const addrLines = doc.splitTextToSize(data.customerAddress, 100);
-            addrLines.forEach((line: string) => {
-              doc.text(line, 15, custY);
-              custY += 4;
-            });
-          }
-          if (customer.showPhone && data.phoneNo) {
-            doc.text(`Phone: ${data.phoneNo}`, 15, custY);
-            custY += 4;
-          }
-          if (customer.showEmail && data.customerEmail) {
-            doc.text(`Email: ${data.customerEmail}`, 15, custY);
-            custY += 4;
-          }
-
-          // Right side: GSTIN, Place of Supply
-          let rightY = currentY + 7;
-          if (customer.showGSTIN && data.customerGSTIN) {
-            doc.setTextColor(15, 23, 42);
-            doc.setFont("helvetica", "normal");
-            doc.text("Customer GSTIN: ", 130, rightY);
-            doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-            doc.setFont("helvetica", "bold");
-            doc.text(data.customerGSTIN, 195, rightY, { align: "right" });
-            rightY += 5;
-          }
-
-          if (customer.showPlaceOfSupply && data.stateOfSupply) {
-            doc.setTextColor(100, 116, 139);
-            doc.setFont("helvetica", "normal");
-            doc.text("Place of Supply: ", 130, rightY);
-            doc.setTextColor(15, 23, 42);
-            doc.setFont("helvetica", "bold");
-            doc.text(data.stateOfSupply, 195, rightY, { align: "right" });
-          }
-
-          currentY = Math.max(custY + 5, rightY + 8);
-        }
-
-        else if (sectionName === "invoiceInfo") {
-          // Draw container border box
-          const boxHeight = 18;
-          doc.setFillColor(255, 255, 255);
-          doc.setDrawColor(226, 232, 240);
-          doc.roundedRect(15, currentY, 180, boxHeight, 3, 3, 'FD');
-
-          let colWidth = 45;
-          let colX = 20;
-
-          const renderCol = (label: string, value: string, isColored = false) => {
-            doc.setTextColor(100, 116, 139); // slate-500
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(8);
-            doc.text(label.toUpperCase(), colX, currentY + 6);
-
-            if (isColored) {
-              doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-            } else {
-              doc.setTextColor(15, 23, 42);
-            }
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(9);
-            doc.text(value, colX, currentY + 12);
-            colX += colWidth;
-          };
-
-          if (invoiceInfo.showInvoiceNumber && data.invoiceNo) {
-            renderCol(invoiceInfo.labels?.invoiceNumber || "INVOICE NO.", `#${data.invoiceNo}`, true);
-          }
-          if (invoiceInfo.showInvoiceDate && data.invoiceDate) {
-            renderCol(invoiceInfo.labels?.invoiceDate || "INVOICE DATE", data.invoiceDate);
-          }
-          if (invoiceInfo.showDueDate && data.dueDate) {
-            renderCol(invoiceInfo.labels?.dueDate || "DUE DATE", data.dueDate);
-          }
-          if (invoiceInfo.showPaymentTerms && data.paymentTerms) {
-            renderCol(invoiceInfo.labels?.paymentTerms || "PAYMENT TERMS", data.paymentTerms);
-          }
-
-          currentY += boxHeight + 8;
-        }
-
-        else if (sectionName === "items") {
-          // Render item table
-          const activeCols = itemsCfg.columns || ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"];
-          const colMapping: any = {
-            item: itemsCfg.labels?.item || "Item",
-            sku: itemsCfg.labels?.sku || "Item Code",
-            description: itemsCfg.labels?.description || "Description",
-            hsn: itemsCfg.labels?.hsn || "HSN/SAC",
-            quantity: itemsCfg.labels?.quantity || "Qty",
-            rate: itemsCfg.labels?.rate || "Rate",
-            discount: itemsCfg.labels?.discount || "Discount",
-            tax: itemsCfg.labels?.tax || "Tax",
-            amount: itemsCfg.labels?.amount || "Amount"
-          };
-
-          const tableHead = activeCols.map(col => colMapping[col] || col);
-          const tableBody = data.items.map((item: InvoiceItem) => {
-            return activeCols.map(col => {
-              switch (col) {
-                case "item":        return item.itemName || "";
-                case "sku":         return item.itemCode || "-";
-                case "description": return item.description || "-";
-                case "hsn":         return item.hsnCode || "-";
-                case "quantity":    return `${item.quantity} ${item.unit || 'Pcs'}`;
-                case "rate":        return formatPDFCurrency(item.pricePerUnit || 0, "INR ");
-                case "discount":    return item.discountPercent ? `${item.discountPercent}%` : (item.discountAmount ? formatPDFCurrency(item.discountAmount, "INR ") : "0%");
-                case "tax":         return `${item.taxPercent || 0}%`;
-                case "amount":      return formatPDFCurrency(item.amount || 0, "INR ");
-                default:            return "";
-              }
-            });
-          });
-
-          autoTable(doc, {
-            startY: currentY,
-            head: [tableHead],
-            body: tableBody,
-            theme: design.borderStyle === 'none' ? 'plain' : 'striped',
-            headStyles: { fillColor: primaryRgb as [number,number,number], textColor: [255, 255, 255] as [number,number,number], fontStyle: 'bold', fontSize: 9 },
-            bodyStyles: { textColor: [15, 23, 42] as [number,number,number], fontSize: 9 },
-            columnStyles: activeCols.reduce((acc: any, col: string, i: number) => {
-              if (col === 'amount' || col === 'rate') acc[i] = { halign: 'right' };
-              return acc;
-            }, {})
-          });
-
-          currentY = ((doc as any).lastAutoTable?.finalY ?? (currentY + 50)) + 8;
-        }
-
-        else if (sectionName === "tax" && tax.showSummary) {
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(9);
-          doc.text(`Taxable Amount:`, 130, currentY);
-          doc.text(formatPDFCurrency(data.subtotal || 0, "INR "), 190, currentY, { align: 'right' });
-          let totY = currentY + 6;
-
-          const addTotalRow = (label: string, value: number, isBold = false) => {
-            if (isBold) {
-              doc.setFillColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-              doc.rect(125, totY - 4, 70, 8, 'F');
-              doc.setTextColor(255, 255, 255);
-              doc.setFont("helvetica", "bold");
-              doc.setFontSize(10);
-            }
-            doc.text(label, 130, totY);
-            doc.text(formatPDFCurrency(value || 0, "INR "), 190, totY, { align: 'right' });
-            if (isBold) {
-              doc.setTextColor(15, 23, 42);
-              doc.setFont("helvetica", "normal");
-              doc.setFontSize(9);
-            }
-            totY += 6;
-          };
-
-          const hasBreakdown = (tax.showCGST && (data.totalCgst || 0) > 0) ||
-                               (tax.showSGST && (data.totalSgst || 0) > 0) ||
-                               (tax.showIGST && (data.totalIgst || 0) > 0);
-
-          if (tax.showCGST && (data.totalCgst || 0) > 0) addTotalRow("CGST:", data.totalCgst);
-          if (tax.showSGST && (data.totalSgst || 0) > 0) addTotalRow("SGST:", data.totalSgst);
-          if (tax.showIGST && (data.totalIgst || 0) > 0) addTotalRow("IGST:", data.totalIgst);
-          if (!hasBreakdown && tax.showTotalTax && (data.totalTax || 0) > 0) {
-            addTotalRow("Total Tax:", data.totalTax);
-          }
-
-          const shipping  = data.shippingCharges  || 0;
-          const packaging = data.packagingCharges || 0;
-          const freight   = data.freightCharges   || 0;
-          const adjustment = data.adjustment      || 0;
-
-          if (shipping  > 0) addTotalRow("Shipping:", shipping);
-          if (packaging > 0) addTotalRow("Packaging:", packaging);
-          if (freight   > 0) addTotalRow("Freight:", freight);
-          if (adjustment !== 0) addTotalRow("Adjustment:", adjustment);
-
-          addTotalRow("GRAND TOTAL:", data.total || 0, true);
-          currentY = totY + 4;
-        }
-
-        else if (sectionName === "payment") {
-          // Draw rounded container box matching preview styles
-          const boxHeight = 24;
-          const bgCol = hexToRgb(design.secondaryColor || "#f8fafc");
-          const borderCol = hexToRgb(design.borderColor || "#cbd5e1");
-          const radius = design.cornerRadius || 3;
-          
-          doc.setFillColor(bgCol[0], bgCol[1], bgCol[2]);
-          doc.setDrawColor(borderCol[0], borderCol[1], borderCol[2]);
-          doc.roundedRect(15, currentY, 180, boxHeight, radius, radius, 'FD');
-
-          let colWidth = 45;
-          let colX = 20;
-
-          const renderCol = (label: string, value: string, isColored = false, colorHex = "") => {
-            doc.setTextColor(100, 116, 139); // slate-500
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(8);
-            doc.text(label.toUpperCase(), colX, currentY + 6);
-
-            if (isColored && colorHex) {
-              const rgb = hexToRgb(colorHex);
-              doc.setTextColor(rgb[0], rgb[1], rgb[2]);
-            } else if (isColored) {
-              doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-            } else {
-              doc.setTextColor(15, 23, 42); // slate-900
-            }
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(9);
-            doc.text(value, colX, currentY + 12);
-            colX += colWidth;
-          };
-
-          const pdfTotal = Math.round((Number(data.total || data.grandTotal || 0)) * 100) / 100;
-          const pdfPaid = Math.min(pdfTotal, Math.max(0, Math.round((Number(data.paid ?? data.amountPaid ?? 0)) * 100) / 100));
-          const pdfBalance = Math.max(0, Math.round((pdfTotal - pdfPaid) * 100) / 100);
-
-          renderCol("Paid Amount", formatPDFCurrency(pdfPaid, "INR "));
-          renderCol("Balance Due", formatPDFCurrency(pdfBalance, "INR "), true, "#e11d48");
-          if (data.paymentMethod) {
-            renderCol("Method", data.paymentMethod);
-          }
-
-          // Banking details in PDF
-          doc.setTextColor(100, 116, 139);
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(7.5);
-          doc.text(`BANKING DETAILS: ${data.bankName || 'ABC Bank'} | A/C: ${data.accountNumber || 'XXXXXXXX'} (${data.accountType || 'Current'}) | IFSC: ${data.ifscCode || 'ABCD0001234'}`, 20, currentY + 19);
-
-          currentY += boxHeight + 8;
-        }
-
-        else if (sectionName === "notes" && notes.show) {
-          const notesText = data.notes || notes.defaultText;
-          if (notesText) {
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(9);
-            doc.text(notes.label || "Notes:", 15, currentY);
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            const noteLines = doc.splitTextToSize(notesText, 100);
-            doc.text(noteLines, 15, currentY + 5);
-            currentY += (noteLines.length * 4) + 8;
-          }
-        }
-
-        else if (sectionName === "terms" && terms.show) {
-          const termsText = data.termsAndConditions || terms.defaultText;
-          if (termsText) {
-            doc.setFont("helvetica", "bold");
-            doc.setFontSize(9);
-            doc.text(terms.label || "Terms & Conditions:", 15, currentY);
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
-            const termLines = doc.splitTextToSize(termsText, 100);
-            doc.text(termLines, 15, currentY + 5);
-            currentY += (termLines.length * 4) + 8;
-          }
-        }
-
-        else if (sectionName === "signature") {
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(9);
-          const sigName = data.authorisedSignature || signature.name || "Authorized Signatory";
-          doc.text(sigName, 150, currentY + 18);
-          doc.line(150, currentY + 20, 195, currentY + 20);
-          doc.text("Authorised Signature", 150, currentY + 25);
-          if (signature.designation) doc.text(signature.designation, 150, currentY + 29);
-          if (signature.imageUrl) {
-            try {
-              doc.addImage(signature.imageUrl, 'PNG', 150, currentY + 2, 30, 12);
-            } catch (e) {
-              console.log("Signature image loading error:", e);
-            }
-          }
-          currentY += 32;
-        }
-
-        else if (sectionName === "footer") {
-          doc.setFont("helvetica", "italic");
-          doc.setFontSize(8);
-          doc.setTextColor(100, 116, 139);
-          doc.text(footer.text || "This is a digitally generated invoice.", 15, 282, { maxWidth: 180 });
-        }
-      });
-
-      // Generate Blob URL and open print preview natively
-      const pdfBlob = doc.output('blob');
-      const blobURL = URL.createObjectURL(pdfBlob);
-      
-      if (forceDownload) {
-        doc.save(`invoice_${data.invoiceNo}.pdf`);
-        toast.success("PDF saved! Please check your downloads.");
-      } else {
-        const printWindow = window.open(blobURL);
-        if (printWindow) {
-          toast.success("Opening print preview...");
-        } else {
-          doc.save(`invoice_${data.invoiceNo}.pdf`);
-          toast.success("PDF saved! Please check your downloads.");
-        }
-      }
-    } catch (e) {
+      const active = userTemplates.find((t: any) => t._id === selectedTemplateId || t.id === selectedTemplateId);
+      const layoutKey = (active?.config?.layout || activeTemplateConfig?.layout) as TemplateLayoutKey;
+      generateTemplateInvoicePDF(
+        { ...currentInvoice, ...data },
+        activeTemplateConfig,
+        layoutKey,
+        { action: forceDownload ? "download" : "print", filename: `invoice_${data.invoiceNo || currentInvoice.invoiceNo || "INV"}.pdf` }
+      );
+      if (!forceDownload) toast.success("Opening print preview...");    } catch (e) {
       console.error(e);
       toast.error("Failed to generate PDF");
     }
@@ -2594,9 +2156,9 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
   // Calculate item preview
   const itemPreview = calculateItemAmounts(newItem);
 
-  // Filter invoice history (Sales invoices only)
+  // Filter invoice history (Supports Sales & Purchase invoices)
   const filteredHistory = invoiceHistory.filter(invoice => {
-    if (invoice.type === 'purchase') return false;
+    if (historyFilter !== 'all' && invoice.type !== historyFilter) return false;
 
     const query = searchTerm.toLowerCase().trim();
     if (!query) return true;
@@ -3992,387 +3554,27 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
             {/* Print Preview Copy */}
             {currentInvoice.items.length > 0 && (
               <div className="lg:col-span-3 mt-8">
-                <h3 className="text-xl font-bold text-slate-950 mb-4 no-print">Invoice Print Preview</h3>
-                <div 
-                  id="invoice-official-copy" 
-                  className="w-[210mm] min-h-[297mm] bg-white p-12 shadow-2xl relative border rounded-sm mx-auto overflow-x-auto text-slate-950"
-                  style={{
-                    backgroundColor: activeTemplateConfig.design?.backgroundColor || "#ffffff",
-                    borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1",
-                    color: activeTemplateConfig.design?.textColor || "#0f172a",
-                    fontFamily: activeTemplateConfig.design?.fontFamily || "Inter",
-                    fontSize: `${activeTemplateConfig.design?.fontSize || 12}px`,
-                    lineHeight: "1.5"
-                  }}
-                >
-                  {activeTemplateConfig.sectionsOrder.map((sectionName: string) => {
-                    if (sectionName === "header") {
-                      return (
-                        <div 
-                          key="header" 
-                          className={`mb-6 flex ${activeTemplateConfig.header?.logoPosition === 'center' ? 'flex-col items-center text-center' : activeTemplateConfig.header?.logoPosition === 'right' ? 'flex-row-reverse justify-between items-start' : 'justify-between items-start'}`}
-                        >
-                          {activeTemplateConfig.header?.showLogo && (
-                            <div className="mb-2">
-                              {activeTemplateConfig.header.logoUrl ? (
-                                <img 
-                                  src={activeTemplateConfig.header.logoUrl} 
-                                  alt="Logo" 
-                                  className={`object-contain ${activeTemplateConfig.header.logoSize === 'small' ? 'h-10 w-24' : activeTemplateConfig.header.logoSize === 'large' ? 'h-20 w-44' : 'h-14 w-32'}`} 
-                                />
-                              ) : (
-                                <div 
-                                  className={`bg-slate-100 border border-dashed border-slate-300 flex items-center justify-center text-slate-400 text-xs font-bold rounded-lg ${activeTemplateConfig.header.logoSize === 'small' ? 'h-10 w-24' : activeTemplateConfig.header.logoSize === 'large' ? 'h-20 w-44' : 'h-14 w-32'}`}
-                                  style={{ borderRadius: `${activeTemplateConfig.design?.cornerRadius || 0}px` }}
-                                >
-                                  [ Company Logo ]
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          <div className={`max-w-md ${activeTemplateConfig.header?.logoPosition === 'right' ? 'text-left' : activeTemplateConfig.header?.logoPosition === 'center' ? 'text-center' : 'text-right'}`}>
-                            {activeTemplateConfig.header?.showCompanyName && (
-                              <h2 className="text-xl font-black" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>
-                                {currentInvoice.sellerName || 'SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED'}
-                              </h2>
-                            )}
-                            {activeTemplateConfig.header?.showAddress && (
-                              <p className="text-slate-500 text-xs mt-1">
-                                {currentInvoice.sellerAddress || '3/124 Main Road, Andal Nagar, Trichy, Tamil Nadu - 620001'}
-                              </p>
-                            )}
-                            {activeTemplateConfig.header?.showPhone && (
-                              <p className="text-slate-500 text-xs">
-                                Phone: {currentInvoice.sellerPhone || '+91 94432 10101'}
-                              </p>
-                            )}
-                            {activeTemplateConfig.header?.showEmail && (
-                              <p className="text-slate-500 text-xs">
-                                Email: {currentInvoice.sellerEmail || 'support@saaiss.in'}
-                              </p>
-                            )}
-                            {currentInvoice.sellerGSTIN && (
-                              <p className="text-xs font-bold mt-1" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>
-                                GSTIN: {currentInvoice.sellerGSTIN}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "seller") {
-                      // Duplicate seller details section removed as information is in company letterhead
-                      return null;
-                    }
-
-                    if (sectionName === "customer" && activeTemplateConfig.customer?.showName) {
-                      return (
-                        <div key="customer" className="mb-6 grid grid-cols-2 gap-4 text-left">
-                          <div>
-                            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Bill To</h4>
-                            {activeTemplateConfig.customer.showName && <p className="font-bold text-sm">{currentInvoice.partyName || 'Valued Customer'}</p>}
-                            {activeTemplateConfig.customer.showBillingAddress && (
-                              <p className="text-slate-600 text-xs mt-0.5">
-                                {currentInvoice.customerAddress || 'Billing Address'}
-                              </p>
-                            )}
-                            {activeTemplateConfig.customer.showPhone && currentInvoice.phoneNo && <p className="text-slate-650 text-xs">Phone: {currentInvoice.phoneNo}</p>}
-                            {activeTemplateConfig.customer.showEmail && currentInvoice.customerEmail && <p className="text-slate-650 text-xs">Email: {currentInvoice.customerEmail}</p>}
-                          </div>
-                          <div className="text-right">
-                            {activeTemplateConfig.customer.showGSTIN && currentInvoice.customerGSTIN && (
-                              <p className="text-xs font-bold mt-6">
-                                Customer GSTIN: <span style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>{currentInvoice.customerGSTIN}</span>
-                              </p>
-                            )}
-                            {activeTemplateConfig.customer.showPlaceOfSupply && currentInvoice.stateOfSupply && (
-                              <p className="text-xs text-slate-600">
-                                Place of Supply: <span className="font-medium text-slate-900">{currentInvoice.stateOfSupply}</span>
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "invoiceInfo") {
-                      return (
-                        <div 
-                          key="invoiceInfo" 
-                          className="mb-6 grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 border bg-white text-left" 
-                          style={{ 
-                            borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1",
-                            borderRadius: `${activeTemplateConfig.design?.cornerRadius || 0}px` 
-                          }}
-                        >
-                          {activeTemplateConfig.invoiceInfo?.showInvoiceNumber && (
-                            <div>
-                              <p className="text-[10px] text-slate-500 uppercase font-bold">{activeTemplateConfig.invoiceInfo.labels?.invoiceNumber || "Invoice Number"}</p>
-                              <p className="font-extrabold text-sm" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>#{currentInvoice.invoiceNo}</p>
-                            </div>
-                          )}
-                          {activeTemplateConfig.invoiceInfo?.showInvoiceDate && (
-                            <div>
-                              <p className="text-[10px] text-slate-500 uppercase font-bold">{activeTemplateConfig.invoiceInfo.labels?.invoiceDate || "Invoice Date"}</p>
-                              <p className="font-bold text-slate-900">{currentInvoice.invoiceDate}</p>
-                            </div>
-                          )}
-                          {activeTemplateConfig.invoiceInfo?.showDueDate && (
-                            <div>
-                              <p className="text-[10px] text-slate-500 uppercase font-bold">{activeTemplateConfig.invoiceInfo.labels?.dueDate || "Due Date"}</p>
-                              <p className="font-bold text-slate-900">{currentInvoice.dueDate || currentInvoice.invoiceDate}</p>
-                            </div>
-                          )}
-                          {activeTemplateConfig.invoiceInfo?.showPaymentTerms && (
-                            <div>
-                              <p className="text-[10px] text-slate-500 uppercase font-bold">{activeTemplateConfig.invoiceInfo.labels?.paymentTerms || "Payment Terms"}</p>
-                              <p className="text-slate-700">{currentInvoice.paymentTerms || "Net 15 Days"}</p>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "items") {
-                      return (
-                        <div key="items" className="mb-6">
-                          <table 
-                            className={`w-full text-left border-collapse ${
-                              activeTemplateConfig.design?.borderStyle === 'light' 
-                                ? 'border' 
-                                : activeTemplateConfig.design?.borderStyle === 'medium' 
-                                  ? 'border-2' 
-                                  : 'border-none'
-                            }`}
-                            style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}
-                          >
-                            <thead>
-                              <tr 
-                                className="text-white text-xs font-bold"
-                                style={{ backgroundColor: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}
-                              >
-                                <th className="py-2.5 px-3">#</th>
-                                {(activeTemplateConfig.items?.columns || ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"]).map((col: string) => (
-                                  <th key={col} className="py-2.5 px-3 text-left">
-                                    {(activeTemplateConfig.items?.labels as any)[col] || col}
-                                  </th>
-                                ))}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {currentInvoice.items.map((item, idx) => (
-                                <tr 
-                                  key={item.id || idx} 
-                                  className="border-b text-xs hover:bg-slate-50"
-                                  style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}
-                                >
-                                  <td className="py-3 px-3">{idx + 1}</td>
-                                  {(activeTemplateConfig.items?.columns || ["item", "sku", "description", "hsn", "quantity", "rate", "discount", "tax", "amount"]).map((col: string) => {
-                                    if (col === "item") {
-                                      return (
-                                        <td key={col} className="py-3 px-3 font-bold text-left">
-                                          {item.itemName}
-                                          {item.itemCode && <p className="text-[10px] text-slate-500 font-normal">Code: {item.itemCode}</p>}
-                                        </td>
-                                      );
-                                    }
-                                    if (col === "description") return <td key={col} className="py-3 px-3 text-slate-500 text-[11px] text-left">{item.description || "-"}</td>;
-                                    if (col === "sku") return <td key={col} className="py-3 px-3 text-slate-650 text-left">{item.sku || "-"}</td>;
-                                    if (col === "hsn") return <td key={col} className="py-3 px-3 text-left">{item.hsnCode || "-"}</td>;
-                                    if (col === "quantity") return <td key={col} className="py-3 px-3 text-left">{item.quantity} {item.unit || "Pcs"}</td>;
-                                    if (col === "rate") return <td key={col} className="py-3 px-3 text-left">₹{item.pricePerUnit.toFixed(2)}</td>;
-                                    if (col === "discount") return <td key={col} className="py-3 px-3 text-left text-amber-700 font-medium">{item.discountPercent ? `${item.discountPercent}%` : (item.discountAmount ? `₹${item.discountAmount.toFixed(2)}` : "0%")}</td>;
-                                    if (col === "tax") return <td key={col} className="py-3 px-3 text-left">{item.taxPercent}% GST</td>;
-                                    if (col === "amount") return <td key={col} className="py-3 px-3 font-bold text-slate-950 text-left">₹{item.amount.toFixed(2)}</td>;
-                                    return <td key={col} className="text-left">-</td>;
-                                  })}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "tax" && activeTemplateConfig.tax?.showSummary) {
-                      const totalGross = currentInvoice.items.reduce((sum, i) => sum + ((i as any).grossAmount || (i.quantity * i.pricePerUnit)), 0);
-                      const totalDiscount = currentInvoice.items.reduce((sum, i) => sum + (i.discountAmount || 0), 0);
-                      const hasBreakdown = (activeTemplateConfig.tax?.showCGST && currentInvoice.totalCgst > 0) ||
-                                           (activeTemplateConfig.tax?.showSGST && currentInvoice.totalSgst > 0) ||
-                                           (activeTemplateConfig.tax?.showIGST && currentInvoice.totalIgst > 0);
-                      return (
-                        <div key="tax" className="mb-6 flex justify-end">
-                          <div className="w-80 space-y-2 border-t pt-3" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
-                            {totalDiscount > 0 ? (
-                              <>
-                                <div className="flex justify-between items-center text-xs">
-                                  <span className="text-slate-500">Gross Amount</span>
-                                  <span className="font-semibold">₹{totalGross.toFixed(2)}</span>
-                                </div>
-                                <div className="flex justify-between items-center text-xs text-amber-700">
-                                  <span>Total Discount</span>
-                                  <span>-₹{totalDiscount.toFixed(2)}</span>
-                                </div>
-                              </>
-                            ) : null}
-                            <div className="flex justify-between items-center text-xs">
-                              <span className="text-slate-500">Taxable Amount</span>
-                              <span className="font-semibold">₹{currentInvoice.subtotal.toFixed(2)}</span>
-                            </div>
-                            {activeTemplateConfig.tax.showCGST && currentInvoice.totalCgst > 0 && (
-                              <div className="flex justify-between items-center text-xs text-slate-650">
-                                <span>CGST</span>
-                                <span>₹{currentInvoice.totalCgst.toFixed(2)}</span>
-                              </div>
-                            )}
-                            {activeTemplateConfig.tax.showSGST && currentInvoice.totalSgst > 0 && (
-                              <div className="flex justify-between items-center text-xs text-slate-650">
-                                <span>SGST</span>
-                                <span>₹{currentInvoice.totalSgst.toFixed(2)}</span>
-                              </div>
-                            )}
-                            {activeTemplateConfig.tax.showIGST && currentInvoice.totalIgst > 0 && (
-                              <div className="flex justify-between items-center text-xs text-slate-650">
-                                <span>IGST</span>
-                                <span>₹{currentInvoice.totalIgst.toFixed(2)}</span>
-                              </div>
-                            )}
-                            {(!hasBreakdown || activeTemplateConfig.tax.showTotalTax) && (
-                              <div className="flex justify-between items-center text-xs border-t pt-1.5 font-bold" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
-                                <span className="text-slate-650">Total Tax</span>
-                                <span>₹{currentInvoice.totalTax.toFixed(2)}</span>
-                              </div>
-                            )}
-                            {currentInvoice.shippingCharges ? (
-                              <div className="flex justify-between items-center text-xs text-slate-600">
-                                <span>Shipping</span>
-                                <span>₹{currentInvoice.shippingCharges.toFixed(2)}</span>
-                              </div>
-                            ) : null}
-                            {currentInvoice.packagingCharges ? (
-                              <div className="flex justify-between items-center text-xs text-slate-600">
-                                <span>Packaging</span>
-                                <span>₹{currentInvoice.packagingCharges.toFixed(2)}</span>
-                              </div>
-                            ) : null}
-                            {currentInvoice.freightCharges ? (
-                              <div className="flex justify-between items-center text-xs text-slate-600">
-                                <span>Freight</span>
-                                <span>₹{currentInvoice.freightCharges.toFixed(2)}</span>
-                              </div>
-                            ) : null}
-                            {currentInvoice.adjustment ? (
-                              <div className="flex justify-between items-center text-xs text-slate-600">
-                                <span>Adjustment</span>
-                                <span>₹{currentInvoice.adjustment.toFixed(2)}</span>
-                              </div>
-                            ) : null}
-                            <div className="flex justify-between items-center py-2 border-t" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
-                              <span className="font-extrabold text-slate-900">Grand Total</span>
-                              <span className="text-base font-black" style={{ color: activeTemplateConfig.design?.primaryColor || "#4f46e5" }}>
-                                ₹{currentInvoice.total.toFixed(2)}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "payment") {
-                      return (
-                        <div 
-                          key="payment" 
-                          className="mb-6 p-4 border text-left space-y-3" 
-                          style={{ 
-                            backgroundColor: activeTemplateConfig.design?.secondaryColor || "#f8fafc", 
-                            borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1",
-                            borderRadius: `${activeTemplateConfig.design?.cornerRadius || 0}px` 
-                          }}
-                        >
-                          <div className="grid grid-cols-3 gap-2 text-xs">
-                            <div>
-                              <span className="text-slate-500 block">Amount Paid</span>
-                              <span className="font-bold text-emerald-600">₹{(currentInvoice.paid || 0).toFixed(2)}</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-500 block">Balance Due</span>
-                              <span className="font-black text-rose-600">₹{(currentInvoice.balance ?? (currentInvoice.total - currentInvoice.paid)).toFixed(2)}</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-500 block">Method</span>
-                              <span className="text-slate-700 capitalize">{currentInvoice.paymentMethod || "Cash"}</span>
-                            </div>
-                          </div>
-
-                          <div className="pt-2 border-t border-slate-200 text-[11px] text-slate-650">
-                            <span className="font-bold uppercase text-[10px] text-slate-500 block mb-1">BANKING DETAILS</span>
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                              <div><span className="text-slate-400 block text-[9px]">Bank Name</span>{currentInvoice.bankName || 'ABC Bank'}</div>
-                              <div><span className="text-slate-400 block text-[9px]">Account Type</span>{currentInvoice.accountType || 'Current'}</div>
-                              <div><span className="text-slate-400 block text-[9px]">Account Number</span>{currentInvoice.accountNumber || 'XXXXXXXX'}</div>
-                              <div><span className="text-slate-400 block text-[9px]">IFSC Code</span>{currentInvoice.ifscCode || 'ABCD0001234'}</div>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "notes" && activeTemplateConfig.notes?.show) {
-                      return (
-                        <div key="notes" className="mb-6 text-left">
-                          <h5 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">{activeTemplateConfig.notes.label}</h5>
-                          <p className="text-xs text-slate-600 whitespace-pre-line">{currentInvoice.notes || activeTemplateConfig.notes.defaultText}</p>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "terms" && activeTemplateConfig.terms?.show) {
-                      return (
-                        <div key="terms" className="mb-6 text-left">
-                          <h5 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">{activeTemplateConfig.terms.label}</h5>
-                          <p className="text-xs text-slate-500 whitespace-pre-line leading-relaxed">{currentInvoice.termsAndConditions || activeTemplateConfig.terms.defaultText}</p>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "signature") {
-                      return (
-                        <div key="signature" className="mb-6 flex flex-col items-end">
-                          <div className="text-center w-48 mt-4">
-                            {activeTemplateConfig.signature?.imageUrl ? (
-                              <img 
-                                src={activeTemplateConfig.signature.imageUrl} 
-                                alt="Signature" 
-                                className="h-10 object-contain mx-auto mb-1.5" 
-                              />
-                            ) : null}
-                            <div className="border-t pt-1 border-slate-900">
-                              {currentInvoice.authorisedSignature ? (
-                                <p className="font-bold text-xs text-slate-900 mb-0.5">{currentInvoice.authorisedSignature}</p>
-                              ) : null}
-                              <p className="font-bold text-xs text-slate-900 uppercase tracking-wider">Authorised Signature</p>
-                              {activeTemplateConfig.signature?.designation && (
-                                <p className="text-[10px] text-slate-500">{activeTemplateConfig.signature.designation}</p>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
-
-                    if (sectionName === "footer" && activeTemplateConfig.footer?.show) {
-                      return (
-                        <div key="footer" className="mt-12 pt-4 border-t text-center text-[10px] text-slate-450" style={{ borderColor: activeTemplateConfig.design?.borderColor || "#cbd5e1" }}>
-                          <p className="leading-relaxed">{activeTemplateConfig.footer.text || "This is a digitally generated invoice. No signature required."}</p>
-                        </div>
-                      );
-                    }
-
-                    return null;
-                  })}
+                <div className="flex justify-between items-center mb-4 no-print">
+                  <h3 className="text-xl font-bold text-slate-950">Invoice Live Preview</h3>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={printInvoice}
+                      size="sm"
+                      variant="outline"
+                      className="rounded-xl border-slate-200 bg-white text-slate-800 hover:bg-slate-50 flex items-center gap-1.5"
+                    >
+                      <Printer className="h-4 w-4 text-indigo-600" />
+                      Print / PDF
+                    </Button>
+                  </div>
                 </div>
+
+                <div id="invoice-official-copy">
+                  <InvoiceTemplateRenderer
+                    invoice={currentInvoice}
+                    templateConfig={activeTemplateConfig}
+                    layoutKey={activeTemplateConfig?.layout}
+                  />                </div>
               </div>
             )}
           </div>
@@ -4579,16 +3781,31 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                 <div>
                   <h2 className="text-2xl font-semibold tracking-tight text-slate-950 flex items-center gap-3">
                     <Eye className="h-6 w-6 text-slate-900" />
-                    Sales Invoice History
+                    Invoice History
                   </h2>
-                  <p className="text-slate-500 mt-1">{filteredHistory.length} sales invoice{filteredHistory.length !== 1 ? 's' : ''} recorded</p>
+                  <p className="text-slate-500 mt-1">{filteredHistory.length} invoice{filteredHistory.length !== 1 ? 's' : ''} recorded</p>
                 </div>
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <div className="flex gap-2">
+                    {(['all', 'sales', 'purchase'] as const).map(f => (
+                      <button
+                        key={f}
+                        onClick={() => setHistoryFilter(f)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize transition-all ${
+                          historyFilter === f
+                            ? 'bg-slate-900 text-white shadow-sm'
+                            : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {f === 'all' ? 'All' : f === 'sales' ? 'Sales' : 'Purchase'}
+                      </button>
+                    ))}
+                  </div>
                   <div className="relative">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-slate-500" />
                     <input
                       type="text"
-                      placeholder="Search sales invoices..."
+                      placeholder="Search invoices..."
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
                       className="pl-12 pr-4 py-2.5 h-11 border border-slate-200 text-slate-900 rounded-[14px] focus:ring-2 focus:ring-slate-350 focus:border-slate-350 w-full sm:w-64"
@@ -4700,23 +3917,17 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              generateInvoicePDF(invoice as any, false);
-                            }}
+                              const id = (invoice as any).id || (invoice as any)._id || invoice.invoiceNo;
+                              if (invoice.type === "purchase") {
+                                window.open(`/purchase-invoice/view/${id}`, "_blank");
+                              } else {
+                                window.open(`/invoice/view/${id}`, "_blank");
+                              }                            }}
                             className="rounded-full border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                            title="View / Print"
                           >
                             <Printer className="mr-1.5 h-4 w-4" />
                             Print
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              generateInvoicePDF(invoice as any, true);
-                            }}
-                            className="rounded-full border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
-                          >
-                            <Download className="mr-1.5 h-4 w-4" />
-                            Download PDF
                           </Button>
                           <Button
                             variant="outline"
@@ -4726,6 +3937,23 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                           >
                             <MessageCircle className="mr-1.5 h-4 w-4" />
                             WhatsApp
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              const id = (invoice as any).id || (invoice as any)._id || invoice.invoiceNo;
+                              if (invoice.type === 'purchase') {
+                                window.open(`/purchase-invoice/view/${id}?download=true`, '_blank');
+                              } else {
+                                window.open(`/invoice/view/${id}?download=true`, '_blank');
+                              }
+                            }}
+                            className="rounded-full border-amber-200 bg-amber-50/50 text-amber-800 hover:bg-amber-100"
+                            title="Download PDF"
+                          >
+                            <Download className="mr-1.5 h-4 w-4" />
+                            PDF
                           </Button>
                           <Button
                             variant="outline"

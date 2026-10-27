@@ -16,6 +16,8 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { parseVoiceInventoryText } from "@/lib/voiceInventoryParser";
 import { API_BASE_URL } from "@/lib/api";
+import { generateTemplateInvoicePDF, getTemplateLayoutKey } from "@/components/invoice-templates";
+import { STANDARD_PURCHASE_TEMPLATES, getPurchaseLayoutKey } from "./PurchaseInvoiceTemplates";
 import {
     AlertDialog,
     AlertDialogAction,
@@ -312,8 +314,8 @@ const Inventory = () => {
         config: DEFAULT_PURCHASE_CONFIG
     };
 
-    const [userTemplates, setUserTemplates] = useState<any[]>([DEFAULT_PURCHASE_TEMPLATE_ITEM]);
-    const [selectedTemplateId, setSelectedTemplateId] = useState<string>("default-amber-purchase-template");
+    const [userTemplates, setUserTemplates] = useState<any[]>(STANDARD_PURCHASE_TEMPLATES);
+    const [selectedTemplateId, setSelectedTemplateId] = useState<string>(STANDARD_PURCHASE_TEMPLATES[0]._id);
 
     const [isPurchaseTemplateModalOpen, setIsPurchaseTemplateModalOpen] = useState(false);
     const [isEditingPurchaseTemplate, setIsEditingPurchaseTemplate] = useState(false);
@@ -344,28 +346,31 @@ const Inventory = () => {
     const fetchUserTemplates = async () => {
         try {
             const token = localStorage.getItem("token");
-            if (!token) return;
-            const res = await fetch(`${API_BASE_URL}/purchase-templates`, {
-                headers: { "Authorization": `Bearer ${token}` }
-            });
-            if (res.ok) {
-                const result = await res.json();
-                const list = (result.data && result.data.length > 0) ? result.data : [DEFAULT_PURCHASE_TEMPLATE_ITEM];
-                setUserTemplates(list);
-                const def = list.find((t: any) => t.isDefault);
-                if (def) {
-                    setSelectedTemplateId(def._id);
-                } else if (list.length > 0) {
-                    setSelectedTemplateId(list[0]._id);
+            let list = [...STANDARD_PURCHASE_TEMPLATES];
+            if (token) {
+                const res = await fetch(`${API_BASE_URL}/purchase-templates`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
+                if (res.ok) {
+                    const result = await res.json();
+                    if (result.data && result.data.length > 0) {
+                        const loadedNames = new Set(result.data.map((t: any) => (t.name || "").toLowerCase()));
+                        const missing = STANDARD_PURCHASE_TEMPLATES.filter(st => !loadedNames.has(st.name.toLowerCase()));
+                        list = [...result.data, ...missing];
+                    }
                 }
-            } else {
-                setUserTemplates([DEFAULT_PURCHASE_TEMPLATE_ITEM]);
-                setSelectedTemplateId("default-amber-purchase-template");
+            }
+            setUserTemplates(list);
+            const def = list.find((t: any) => t.isDefault);
+            if (def) {
+                setSelectedTemplateId(def._id);
+            } else if (list.length > 0) {
+                setSelectedTemplateId(list[0]._id);
             }
         } catch (err) {
             console.error("Error loading purchase templates:", err);
-            setUserTemplates([DEFAULT_PURCHASE_TEMPLATE_ITEM]);
-            setSelectedTemplateId("default-amber-purchase-template");
+            setUserTemplates(STANDARD_PURCHASE_TEMPLATES);
+            setSelectedTemplateId(STANDARD_PURCHASE_TEMPLATES[0]._id);
         }
     };
 
@@ -933,12 +938,19 @@ const Inventory = () => {
         setIsPurchaseSaving(true);
         try {
             const token = localStorage.getItem("token");
-            const activeTemplate = userTemplates.find((t: any) => t._id === selectedTemplateId);
+            const activeTemplate = userTemplates.find((t: any) => t._id === selectedTemplateId) || STANDARD_PURCHASE_TEMPLATES[0];
+            const resolvedLayout = getPurchaseLayoutKey(activeTemplate);
             const payload = {
                 ...purchaseInvoice,
                 status,
-                templateId: selectedTemplateId || undefined,
-                templateSnapshot: activeTemplate ? activeTemplate.config : undefined,
+                templateId: selectedTemplateId || activeTemplate._id,
+                templateName: activeTemplate.name,
+                templateLayout: resolvedLayout,
+                templateSnapshot: {
+                    ...(activeTemplate.config || {}),
+                    name: activeTemplate.name,
+                    layout: resolvedLayout
+                },
             };
 
             const targetId = lastSavedPurchaseId || (purchaseInvoice as any)._id;
@@ -1267,7 +1279,7 @@ const Inventory = () => {
             toast.error("Please save the invoice first before printing.");
             return;
         }
-        const url = `${window.location.origin}/purchase-invoice/view/${lastSavedPurchaseId}`;
+        const url = `${window.location.origin}/purchase-invoice/view/${lastSavedPurchaseId}?print=true`;
         window.open(url, '_blank');
     };
 
@@ -1370,7 +1382,7 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
         window.open(`https://wa.me/?text=${encodedMessage}`, '_blank');
     };
 
-    // Direct PDF download for Purchase Invoice matching official print view design
+    // Direct PDF download for Purchase Invoice matching selected template layout
     const downloadPurchaseInvoicePDF = (inv: any) => {
         const targetId = inv?._id || lastSavedPurchaseId;
         if (targetId) {
@@ -1379,314 +1391,22 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
             return;
         }
         try {
-            const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+            const billNo = inv.billNo || inv.invoiceNumber || 'bill';
+            const activeTemplate = userTemplates.find((t: any) => t._id === inv.templateId) ||
+                STANDARD_PURCHASE_TEMPLATES.find(t => t._id === inv.templateId || t.name === inv.templateName);
+            const templateConfig = inv.templateSnapshot || activeTemplate?.config;
+            const layoutKey = inv.templateSnapshot?.layout || (activeTemplate ? getPurchaseLayoutKey(activeTemplate) : undefined);
 
-            const sellerName = inv.supplierName || 'SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED';
-            const customerName = inv.customerName || 'Valued Customer';
-            const billNo = inv.billNo || 'N/A';
-            const billDate = inv.billDate || (inv.createdAt ? new Date(inv.createdAt).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN'));
-            const stateOfSupply = inv.stateOfSupply || 'Tamil Nadu';
-            const paymentMethod = inv.paymentMethod || 'Cash';
-            const customerType = inv.customerType || 'B2C';
-
-            // Top Header Banner (Amber Theme Header - matching print view)
-            doc.setFillColor(217, 119, 6);
-            doc.rect(10, 10, 190, 32, "F");
-
-            // Subtitle
-            doc.setTextColor(255, 255, 255);
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text("TAX INVOICE / PURCHASE BILL", 16, 17);
-
-            // Supplier Name Header Title
-            doc.setFontSize(15);
-            doc.setFont("helvetica", "bold");
-            doc.text(sellerName.toUpperCase(), 16, 25);
-
-            // Contact Info Subtitle
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "normal");
-            const sellerDetails = [
-                inv.phone ? `Ph: ${inv.phone}` : '',
-                inv.gstin ? `GSTIN: ${inv.gstin}` : '',
-                `State: ${stateOfSupply}`
-            ].filter(Boolean).join("  |  ");
-            doc.text(sellerDetails, 16, 32);
-
-            // Right side of Header Banner
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "normal");
-            doc.text("Bill No.", 194, 17, { align: "right" });
-
-            doc.setFontSize(16);
-            doc.setFont("helvetica", "bold");
-            doc.text(`#${billNo}`, 194, 24, { align: "right" });
-
-            // Badge Box Right
-            doc.setFillColor(255, 255, 255);
-            doc.rect(160, 27, 34, 6, "F");
-            doc.setTextColor(217, 119, 6);
-            doc.setFontSize(7);
-            doc.setFont("helvetica", "bold");
-            doc.text(`${customerType} | A4`, 177, 31.2, { align: "center" });
-
-            // Party Details Section (Two Columns)
-            // Left Column: Supplier & Customer
-            let yLeft = 48;
-
-            // Supplier Accent Line & Title
-            doc.setFillColor(217, 119, 6);
-            doc.rect(12, yLeft, 1.5, 4, "F");
-
-            doc.setTextColor(217, 119, 6);
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text("SUPPLIER (VENDOR)", 16, yLeft + 3);
-
-            yLeft += 7;
-            doc.setTextColor(15, 23, 42);
-            doc.setFontSize(9);
-            doc.setFont("helvetica", "bold");
-            doc.text(sellerName, 16, yLeft);
-
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8.5);
-            doc.setTextColor(71, 85, 105);
-            yLeft += 4.5;
-            if (inv.phone) { doc.text(`Ph: ${inv.phone}`, 16, yLeft); yLeft += 4.5; }
-            if (inv.gstin) { doc.text(`GSTIN: ${inv.gstin}`, 16, yLeft); yLeft += 4.5; }
-            doc.text(`State of Supply: ${stateOfSupply}`, 16, yLeft);
-            yLeft += 8;
-
-            // Customer Accent Line & Title
-            doc.setFillColor(217, 119, 6);
-            doc.rect(12, yLeft, 1.5, 4, "F");
-
-            doc.setTextColor(217, 119, 6);
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "bold");
-            doc.text("BILL TO (CUSTOMER)", 16, yLeft + 3);
-
-            yLeft += 7;
-            doc.setTextColor(15, 23, 42);
-            doc.setFontSize(9);
-            doc.setFont("helvetica", "bold");
-            doc.text(customerName, 16, yLeft);
-
-            doc.setFont("helvetica", "normal");
-            doc.setFontSize(8.5);
-            doc.setTextColor(71, 85, 105);
-            yLeft += 4.5;
-            doc.text(`Type: ${customerType}`, 16, yLeft);
-            yLeft += 4.5;
-            if (inv.customerPhone) { doc.text(`Phone: ${inv.customerPhone}`, 16, yLeft); yLeft += 4.5; }
-            if (inv.customerGstin) { doc.text(`GSTIN: ${inv.customerGstin}`, 16, yLeft); yLeft += 4.5; }
-
-            // Right Column: Info Cards
-            const cardX = 145;
-            const cardW = 55;
-
-            // Bill Date Card
-            doc.setFillColor(248, 250, 252);
-            doc.setDrawColor(226, 232, 240);
-            doc.rect(cardX, 48, cardW, 12, "FD");
-            doc.setFontSize(7.5);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(100, 116, 139);
-            doc.text("BILL DATE", cardX + 3, 52.5);
-            doc.setFontSize(9);
-            doc.setTextColor(15, 23, 42);
-            doc.text(billDate, cardX + 3, 57.5);
-
-            // Payment Method Card
-            doc.setFillColor(248, 250, 252);
-            doc.rect(cardX, 63, cardW, 12, "FD");
-            doc.setFontSize(7.5);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(100, 116, 139);
-            doc.text("PAYMENT METHOD", cardX + 3, 67.5);
-            doc.setFontSize(9);
-            doc.setTextColor(15, 23, 42);
-            doc.text(paymentMethod, cardX + 3, 72.5);
-
-            // State Card
-            doc.setFillColor(248, 250, 252);
-            doc.rect(cardX, 78, cardW, 12, "FD");
-            doc.setFontSize(7.5);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(100, 116, 139);
-            doc.text("STATE OF SUPPLY", cardX + 3, 82.5);
-            doc.setFontSize(9);
-            doc.setTextColor(15, 23, 42);
-            doc.text(stateOfSupply, cardX + 3, 87.5);
-
-            const startTableY = Math.max(yLeft, 95) + 6;
-
-            // Items Table (Amber Table Header matching Print View)
-            const tableBody = (inv.items || []).map((item: any, idx: number) => {
-                const qty = item.quantity || 1;
-                const price = item.pricePerUnit || item.price || 0;
-                const taxRate = item.taxPercent || item.gstRate || 0;
-                const total = item.amount || item.subtotal || (qty * price * (1 + taxRate / 100));
-
-                return [
-                    idx + 1,
-                    item.itemName || 'Item',
-                    item.hsnCode || item.itemCode || '-',
-                    qty,
-                    item.unit || 'Pcs',
-                    `Rs. ${price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-                    `${taxRate}%`,
-                    `Rs. ${total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                ];
+            generateTemplateInvoicePDF(inv, templateConfig, layoutKey, {
+                action: 'save',
+                filename: `Purchase_Invoice_${billNo}.pdf`
             });
 
-            autoTable(doc, {
-                startY: startTableY,
-                margin: { left: 10, right: 10 },
-                head: [["#", "Item Description", "HSN/SAC", "Qty", "Unit", "Price", "Tax", "Total"]],
-                body: tableBody,
-                headStyles: {
-                    fillColor: [217, 119, 6],
-                    textColor: [255, 255, 255],
-                    fontStyle: "bold",
-                    fontSize: 9,
-                    cellPadding: 3.5
-                },
-                bodyStyles: {
-                    textColor: [15, 23, 42],
-                    lineWidth: 0.1,
-                    lineColor: [226, 232, 240],
-                    fontSize: 8.5,
-                    cellPadding: 3
-                },
-                alternateRowStyles: {
-                    fillColor: [248, 250, 252]
-                },
-                columnStyles: {
-                    0: { cellWidth: 10, halign: "center" },
-                    1: { cellWidth: 55 },
-                    2: { cellWidth: 25 },
-                    3: { cellWidth: 15, halign: "center" },
-                    4: { cellWidth: 15, halign: "center" },
-                    5: { cellWidth: 25, halign: "right" },
-                    6: { cellWidth: 15, halign: "center" },
-                    7: { cellWidth: 30, halign: "right" }
-                },
-                theme: "grid"
-            });
-
-            const finalY = (doc as any).lastAutoTable?.finalY || 140;
-
-            let currentYCalc = finalY + 8;
-            if (currentYCalc > 225) {
-                doc.addPage();
-                currentYCalc = 20;
-            }
-
-            const summaryX = 120;
-            const summaryY = currentYCalc;
-            const summaryWidth = 80;
-
-            // Summary Card Box (Right)
-            doc.setFillColor(248, 250, 252);
-            doc.setDrawColor(226, 232, 240);
-            doc.rect(summaryX, summaryY, summaryWidth, 38, "FD");
-
-            const subtotal = inv.subtotal || inv.total || 0;
-            const totalTax = inv.totalTax || inv.gstAmount || 0;
-            const grandTotal = inv.total || 0;
-            const paidAmt = inv.paid || 0;
-            const balanceAmt = inv.balance ?? Math.max(0, grandTotal - paidAmt);
-
-            doc.setFontSize(8.5);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(71, 85, 105);
-            doc.text("Subtotal:", summaryX + 4, summaryY + 8);
-            doc.text(`Rs. ${subtotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 8, { align: "right" });
-
-            doc.text("Tax Amount:", summaryX + 4, summaryY + 16);
-            doc.text(`Rs. ${totalTax.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 16, { align: "right" });
-
-            doc.setDrawColor(226, 232, 240);
-            doc.line(summaryX + 4, summaryY + 20, summaryX + summaryWidth - 4, summaryY + 20);
-
-            doc.setFontSize(11);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(15, 23, 42);
-            doc.text("Grand Total:", summaryX + 4, summaryY + 29);
-            doc.setTextColor(217, 119, 6);
-            doc.text(`Rs. ${grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, summaryX + summaryWidth - 4, summaryY + 29, { align: "right" });
-
-            // Payment Details Box (Left Side)
-            doc.setFillColor(240, 253, 244);
-            doc.setDrawColor(187, 247, 208);
-            doc.rect(10, currentYCalc, 105, 16, "FD");
-
-            doc.setFontSize(7.5);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(22, 101, 52);
-            doc.text("PAYMENT STATUS", 14, currentYCalc + 5);
-
-            doc.setFontSize(8.5);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(15, 23, 42);
-            doc.text(`Paid: Rs. ${paidAmt.toFixed(2)}  |  Balance: Rs. ${balanceAmt.toFixed(2)}  |  Mode: ${paymentMethod}`, 14, currentYCalc + 11);
-
-            // Banking Details Box (Left Side under Payment Box)
-            const bankY = currentYCalc + 19;
-            doc.setFillColor(248, 250, 252);
-            doc.setDrawColor(226, 232, 240);
-            doc.rect(10, bankY, 105, 22, "FD");
-
-            const bankName = inv.bankName || "ABC Bank";
-            const accountType = inv.accountType || "Current";
-            const accountNumber = inv.accountNumber || "123456789012";
-            const ifscCode = inv.ifscCode || "ABCD0001234";
-
-            doc.setFontSize(7.5);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(100, 116, 139);
-            doc.text("BANKING DETAILS FOR PAYMENT", 14, bankY + 5);
-
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(51, 65, 85);
-            doc.text(`Bank Name: ${bankName} (${accountType})`, 14, bankY + 10);
-            doc.text(`A/C No: ${accountNumber}   |   IFSC: ${ifscCode}`, 14, bankY + 16);
-
-            // Signature area (Right side under summary)
-            const sigY = summaryY + 44;
-            const sigName = inv.authorisedSignature || "Store Manager / Stock Receiver";
-            doc.setFontSize(8.5);
-            doc.setFont("helvetica", "bold");
-            doc.setTextColor(15, 23, 42);
-            doc.text(sigName, 150, sigY);
-            doc.setDrawColor(148, 163, 184);
-            doc.line(150, sigY + 2, 195, sigY + 2);
-            doc.setFontSize(7.5);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(100, 116, 139);
-            doc.text("Authorised Signature", 150, sigY + 6);
-
-            // Footer
-            const footerY = 282;
-            doc.setDrawColor(226, 232, 240);
-            doc.line(10, footerY - 5, 200, footerY - 5);
-
-            doc.setFontSize(8);
-            doc.setFont("helvetica", "normal");
-            doc.setTextColor(148, 163, 184);
-            doc.text("This is a computer generated invoice and does not require a physical signature.", 10, footerY);
-            doc.text("Powered by Sri Andal AI Financial Automation", 200, footerY, { align: "right" });
-
-            doc.save(`Purchase_Invoice_${billNo}.pdf`);
             toast.success(`Purchase Invoice #${billNo} PDF downloaded successfully!`);
         } catch (error) {
             console.error("PDF generation failed:", error);
             toast.error("Opening invoice print view...");
-            window.open(`/purchase-invoice/view/${inv._id}`, '_blank');
+            window.open(`/purchase-invoice/view/${inv._id}?download=true`, '_blank');
         }
     };
 

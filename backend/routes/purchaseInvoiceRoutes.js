@@ -19,15 +19,15 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     customerName: { type: String, default: "" },
     customerPhone: { type: String, default: "" },
     customerGstin: { type: String, default: "" },
-    supplierName: { type: String, required: true },
+    supplierName: { type: String, default: "Supplier" },
     phone: { type: String, default: "" },
     gstin: { type: String, default: "" },
-    billNo: { type: String, required: true },
-    billDate: { type: String, required: true },
+    billNo: { type: String, default: "" },
+    billDate: { type: String, default: "" },
     paymentMethod: { type: String, enum: ["Cash", "Credit", "G Pay", "Net Banking"], default: "Cash" },
     invoiceSize: { type: String, enum: ["A4", "A5"], default: "A4" },
     invoiceFormat: { type: String, enum: ["Supermarket", "Hotel", "Stationery Shop"], default: "Supermarket" },
-    stateOfSupply: { type: String, required: true },
+    stateOfSupply: { type: String, default: "Tamil Nadu" },
     businessState: { type: String, default: "Tamil Nadu" },
     items: [{
         itemName: { type: String, required: true },
@@ -121,10 +121,87 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-// GET - Public (no auth) purchase invoice by ID
+// GET - Public (no auth) purchase invoice by ID or Bill No
 router.get("/public/:id", async (req, res) => {
     try {
-        const invoice = await PurchaseInvoice.findById(req.params.id);
+        const idParam = req.params.id;
+        let invoice = null;
+
+        if (idParam && mongoose.Types.ObjectId.isValid(idParam)) {
+            invoice = await PurchaseInvoice.findById(idParam);
+        }
+
+        if (!invoice && idParam) {
+            invoice = await PurchaseInvoice.findOne({ billNo: idParam });
+        }
+
+        if (!invoice && idParam) {
+            invoice = await PurchaseInvoice.findOne({
+                billNo: { $regex: new RegExp(`^${idParam}$`, "i") }
+            });
+        }
+
+        // Secondary fallback to standard Invoice collection (if created from AutomationInvoice)
+        if (!invoice && idParam) {
+            try {
+                const Invoice = mongoose.models.Invoice;
+                if (Invoice) {
+                    let inv = null;
+                    if (mongoose.Types.ObjectId.isValid(idParam)) {
+                        inv = await Invoice.findOne({ _id: idParam, isDeleted: false });
+                    }
+                    if (!inv) {
+                        inv = await Invoice.findOne({ invoiceNumber: idParam, isDeleted: false });
+                    }
+                    if (!inv) {
+                        inv = await Invoice.findOne({
+                            invoiceNumber: { $regex: new RegExp(`^${idParam}$`, "i") },
+                            isDeleted: false
+                        });
+                    }
+                    if (inv) {
+                        invoice = {
+                            _id: inv._id,
+                            billNo: inv.invoiceNumber,
+                            billDate: inv.invoiceDate ? new Date(inv.invoiceDate).toISOString().split("T")[0] : "",
+                            supplierName: inv.businessName || inv.sellerName || "Supplier",
+                            customerName: inv.customerName || "Customer",
+                            customerType: inv.transactionType || "B2C",
+                            phone: inv.businessPhone || inv.sellerPhone || "",
+                            gstin: inv.businessGSTIN || inv.sellerGSTIN || "",
+                            customerPhone: inv.customerPhone || "",
+                            customerGstin: inv.customerGSTIN || "",
+                            stateOfSupply: inv.stateOfSupply || "Tamil Nadu",
+                            items: (inv.items || []).map((it) => ({
+                                itemName: it.productName || it.name || "Item",
+                                itemCode: it.itemCode || it.sku || "",
+                                quantity: it.quantity,
+                                unit: it.unit || "Pcs",
+                                pricePerUnit: it.unitPrice,
+                                taxPercent: it.taxRate || 0,
+                                discountAmount: it.discount || 0,
+                                amount: it.total
+                            })),
+                            subtotal: inv.subtotal,
+                            totalTax: inv.taxAmount,
+                            total: inv.grandTotal,
+                            paid: inv.amountPaid || 0,
+                            paymentMethod: inv.paymentMethod,
+                            bankName: inv.bankName,
+                            accountType: inv.accountType,
+                            accountNumber: inv.accountNumber,
+                            ifscCode: inv.ifscCode,
+                            authorisedSignature: inv.authorisedSignature,
+                            templateId: inv.templateId,
+                            templateSnapshot: inv.templateSnapshot
+                        };
+                    }
+                }
+            } catch (invErr) {
+                console.warn("Secondary Invoice lookup notice:", invErr);
+            }
+        }
+
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
@@ -153,6 +230,23 @@ router.post("/create", verifyToken, async (req, res) => {
             if (!invoiceData.accountNumber) invoiceData.accountNumber = user.accountNumber || "123456789012";
             if (!invoiceData.ifscCode) invoiceData.ifscCode = user.ifscCode || "ABCD0001234";
             if (!invoiceData.authorisedSignature) invoiceData.authorisedSignature = user.authorisedSignature || "Store Manager";
+        }
+
+        if (!invoiceData.supplierName || invoiceData.supplierName.trim() === "") {
+            invoiceData.supplierName = invoiceData.partyName || "Supplier";
+        }
+        if (!invoiceData.billNo || invoiceData.billNo.trim() === "") {
+            const count = await PurchaseInvoice.countDocuments();
+            invoiceData.billNo = `BILL-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, "0")}`;
+        }
+        if (!invoiceData.billDate || invoiceData.billDate.trim() === "") {
+            invoiceData.billDate = new Date().toISOString().split("T")[0];
+        }
+        if (!invoiceData.stateOfSupply || invoiceData.stateOfSupply.trim() === "") {
+            invoiceData.stateOfSupply = "Tamil Nadu";
+        }
+        if (!invoiceData.items || !Array.isArray(invoiceData.items)) {
+            invoiceData.items = [];
         }
 
         const newInvoice = new PurchaseInvoice({
@@ -230,6 +324,7 @@ router.post("/create", verifyToken, async (req, res) => {
         res.status(201).json({
             message: newInvoice.status === 'draft' ? "Purchase invoice drafted!" : "Purchase invoice saved & items added to stock!",
             invoice: newInvoice,
+            invoiceId: newInvoice._id,
             stockUpdates: stockResults,
         });
     } catch (error) {

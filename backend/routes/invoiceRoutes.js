@@ -52,8 +52,8 @@ const invoiceSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   // Invoice Details
   invoiceNumber: { type: String, required: true },
-  invoiceDate: { type: Date, required: true },
-  dueDate: { type: Date, required: true },
+  invoiceDate: { type: Date, required: true, default: Date.now },
+  dueDate: { type: Date, default: () => new Date(Date.now() + 15 * 24 * 60 * 60 * 1000) },
 
   // Customer Details
   customerName: { type: String, required: true },
@@ -141,7 +141,7 @@ const invoiceSchema = new mongoose.Schema({
   gstPortalJson: { type: mongoose.Schema.Types.Mixed },
 
   // Template Design Fields
-  templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'InvoiceTemplate' },
+  templateId: { type: mongoose.Schema.Types.Mixed, ref: 'InvoiceTemplate' },
   templateSnapshot: { type: mongoose.Schema.Types.Mixed },
 
   // System Fields
@@ -158,14 +158,20 @@ const invoiceSchema = new mongoose.Schema({
 });
 
 invoiceSchema.index({ userId: 1, invoiceNumber: 1 }, { unique: true });
-
 const Invoice = mongoose.models.Invoice || mongoose.model("Invoice", invoiceSchema);
 
 const getInvoiceIdFilter = (idParam) => {
-  if (mongoose.Types.ObjectId.isValid(idParam)) {
-    return { _id: idParam };
+  if (!idParam) return { _id: null };
+  const cleanId = String(idParam).trim();
+  if (mongoose.Types.ObjectId.isValid(cleanId)) {
+    return {
+      $or: [
+        { _id: new mongoose.Types.ObjectId(cleanId) },
+        { invoiceNumber: cleanId }
+      ]
+    };
   }
-  return { invoiceNumber: idParam };
+  return { invoiceNumber: cleanId };
 };
 
 const getUserFilter = (req) => {
@@ -187,10 +193,27 @@ const getUserFilter = (req) => {
 // ✅ 0. Public Invoice View (no auth required — for WhatsApp/email sharing links)
 router.get("/public/:id", async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      ...getInvoiceIdFilter(req.params.id),
-      isDeleted: false
-    });
+    const idParam = req.params.id;
+    let invoice = null;
+
+    if (idParam && mongoose.Types.ObjectId.isValid(idParam)) {
+      invoice = await Invoice.findOne({ _id: idParam, isDeleted: false });
+    }
+
+    if (!invoice && idParam) {
+      invoice = await Invoice.findOne({
+        invoiceNumber: idParam,
+        isDeleted: false
+      });
+    }
+
+    if (!invoice && idParam) {
+      // Case-insensitive match on invoiceNumber
+      invoice = await Invoice.findOne({
+        invoiceNumber: { $regex: new RegExp(`^${idParam}$`, 'i') },
+        isDeleted: false
+      });
+    }
 
     if (!invoice) {
       return res.status(404).json({ message: "Invoice not found" });
@@ -220,10 +243,44 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
       }
     }
 
+    // Default required text fields to avoid validation rejections
+    if (!invoiceData.customerName || invoiceData.customerName.trim() === '') {
+      invoiceData.customerName = invoiceData.partyName || "Cash Customer";
+    }
+    if (!invoiceData.businessName || invoiceData.businessName.trim() === '') {
+      invoiceData.businessName = invoiceData.sellerName || "My Business";
+    }
+
     // Generate invoice number if not provided
-    if (!invoiceData.invoiceNumber) {
+    if (!invoiceData.invoiceNumber || invoiceData.invoiceNumber.trim() === '') {
       const count = await Invoice.countDocuments();
       invoiceData.invoiceNumber = `INV-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, '0')}`;
+    }
+
+    if (!invoiceData.dueDate) {
+      const baseDate = invoiceData.invoiceDate ? new Date(invoiceData.invoiceDate) : new Date();
+      invoiceData.dueDate = new Date(baseDate.getTime() + 15 * 24 * 60 * 60 * 1000);
+    }
+
+    // Resolve templateId if preset key is provided
+    if (invoiceData.templateId && typeof invoiceData.templateId === 'string' && !mongoose.Types.ObjectId.isValid(invoiceData.templateId)) {
+      try {
+        const InvoiceTemplate = mongoose.models.InvoiceTemplate;
+        if (InvoiceTemplate) {
+          const cleanKey = invoiceData.templateId.replace(/^tpl-/, "");
+          const matched = await InvoiceTemplate.findOne({
+            $or: [
+              { "config.layout": cleanKey },
+              { name: new RegExp(`^${cleanKey.replace(/-/g, " ")}$`, "i") }
+            ]
+          });
+          if (matched) {
+            invoiceData.templateId = matched._id;
+          }
+        }
+      } catch (tErr) {
+        // Fallback to storing as string/mixed
+      }
     }
 
     // Validate and recalculate invoice line items, tax breakdown, subtotal, and grand total using authoritative calculation rules
@@ -606,6 +663,26 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
 
     // Set updated timestamp
     updateData.updatedAt = new Date();
+
+    if (updateData.templateId && typeof updateData.templateId === 'string' && !mongoose.Types.ObjectId.isValid(updateData.templateId)) {
+      try {
+        const InvoiceTemplate = mongoose.models.InvoiceTemplate;
+        if (InvoiceTemplate) {
+          const cleanKey = updateData.templateId.replace(/^tpl-/, "");
+          const matched = await InvoiceTemplate.findOne({
+            $or: [
+              { "config.layout": cleanKey },
+              { name: new RegExp(`^${cleanKey.replace(/-/g, " ")}$`, "i") }
+            ]
+          });
+          if (matched) {
+            updateData.templateId = matched._id;
+          }
+        }
+      } catch (tErr) {
+        // Fallback to storing as string/mixed
+      }
+    }
 
     const updatedInvoice = await Invoice.findOneAndUpdate(
       { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
