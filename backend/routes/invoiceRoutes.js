@@ -313,6 +313,7 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
     await newInvoice.save();
 
     // If initial payment was recorded at creation, persist Payment audit record
+    const validatedPaid = validatedData.amountPaid || 0;
     if (validatedPaid > 0) {
       const initialPayment = new Payment({
         userId: newInvoice.userId || req.user?.id,

@@ -54,8 +54,8 @@ const Bookkeeping = () => {
     const [companyName, setCompanyName] = useState(DEFAULT_REPORT_COMPANY_NAME);
     const [selectedDate, setSelectedDate] = useState<Date>(new Date());
     const [dateRange, setDateRange] = useState<{ from: Date | undefined; to: Date | undefined }>({
-        from: new Date(new Date().getFullYear(), new Date().getMonth(), 1), // Start of month
-        to: new Date()
+        from: undefined,
+        to: undefined
     });
 
     // Form State
@@ -154,7 +154,7 @@ const Bookkeeping = () => {
                     id: entry._id, // Map MongoDB _id to id
                     date: new Date(entry.date),
                     createdAt: new Date(entry.createdAt),
-                    type: (entry.type === 'income' || entry.type === 'Income') ? 'Income' : 'Expenses'
+                    type: String(entry.type || '').trim().toLowerCase() === 'income' ? 'Income' : 'Expenses'
                 })));
             } else {
                 console.error("Failed to fetch bookkeeping entries");
@@ -223,7 +223,11 @@ const Bookkeeping = () => {
     }, [filteredEntries]);
 
     // Handle Date Presets
-    const handlePreset = (preset: 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth') => {
+    const handlePreset = (preset: 'all' | 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth') => {
+        if (preset === 'all') {
+            setDateRange({ from: undefined, to: undefined });
+            return;
+        }
         const today = new Date();
         let from = today;
         let to = today;
@@ -680,6 +684,46 @@ const Bookkeeping = () => {
                                                 ))}
                                             </SelectContent>
                                         </Select>
+
+                                        <Popover>
+                                            <PopoverTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    className="h-11 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300 text-xs sm:text-sm font-normal"
+                                                >
+                                                    <CalendarIcon className="mr-2 h-4 w-4 text-slate-600" />
+                                                    {dateRange?.from ? (
+                                                        dateRange.to ? (
+                                                            <span>
+                                                                {format(dateRange.from, "MMM dd")} - {format(dateRange.to, "MMM dd, yyyy")}
+                                                            </span>
+                                                        ) : (
+                                                            <span>{format(dateRange.from, "MMM dd, yyyy")}</span>
+                                                        )
+                                                    ) : (
+                                                        <span>All Dates</span>
+                                                    )}
+                                                </Button>
+                                            </PopoverTrigger>
+                                            <PopoverContent className="w-auto p-3 bg-white border border-slate-200" align="end">
+                                                <div className="flex flex-wrap gap-1.5 mb-2 pb-2 border-b border-slate-100">
+                                                    <Button size="sm" variant={!dateRange.from ? "default" : "ghost"} className="h-7 text-xs rounded-lg" onClick={() => handlePreset('all')}>All Time</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('today')}>Today</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('week')}>7 Days</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('month')}>This Month</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('lastMonth')}>Last Month</Button>
+                                                </div>
+                                                <Calendar
+                                                    initialFocus
+                                                    mode="range"
+                                                    defaultMonth={dateRange?.from || new Date()}
+                                                    selected={{ from: dateRange.from, to: dateRange.to }}
+                                                    onSelect={(range: any) => setDateRange(range || { from: undefined, to: undefined })}
+                                                    numberOfMonths={1}
+                                                    className="bg-white text-slate-900"
+                                                />
+                                            </PopoverContent>
+                                        </Popover>
 
                                         <Button
                                             onClick={exportToPDF}
