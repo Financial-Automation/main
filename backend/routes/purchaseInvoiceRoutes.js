@@ -249,6 +249,12 @@ router.post("/create", verifyToken, async (req, res) => {
             invoiceData.items = [];
         }
 
+        const tot = Number(invoiceData.total || invoiceData.grandTotal) || 0;
+        const pd = Number(invoiceData.paid || invoiceData.amountPaid) || 0;
+        if (invoiceData.balance === undefined || invoiceData.balance === null || isNaN(Number(invoiceData.balance))) {
+            invoiceData.balance = Math.max(0, Math.round((tot - pd) * 100) / 100);
+        }
+
         const newInvoice = new PurchaseInvoice({
             userId: req.user.id,
             ...invoiceData,
@@ -346,6 +352,12 @@ router.put("/:id", verifyToken, async (req, res) => {
         const wasDraft = existingInvoice.status === "draft" || existingInvoice.status === undefined;
         const isNowCompleted = invoiceData.status !== "draft";
         
+        const tot = Number(invoiceData.total !== undefined ? invoiceData.total : existingInvoice.total) || 0;
+        const pd = Number(invoiceData.paid !== undefined ? invoiceData.paid : existingInvoice.paid) || 0;
+        if (invoiceData.balance === undefined || invoiceData.balance === null || isNaN(Number(invoiceData.balance))) {
+            invoiceData.balance = Math.max(0, Math.round((tot - pd) * 100) / 100);
+        }
+
         Object.assign(existingInvoice, invoiceData);
         await existingInvoice.save();
 
@@ -425,7 +437,12 @@ router.get("/all", verifyToken, async (req, res) => {
         const invoices = await PurchaseInvoice.find({ userId: req.user.id }).sort({ createdAt: -1 });
         const user = await User.findById(req.user.id);
         const enrichedInvoices = invoices.map(inv => {
-            const obj = inv.toObject();
+            const obj = inv.toObject ? inv.toObject() : { ...inv };
+            const tot = Number(obj.total || obj.grandTotal || 0);
+            const pd = Number(obj.paid || obj.amountPaid || 0);
+            if (obj.balance === undefined || obj.balance === null || isNaN(Number(obj.balance))) {
+                obj.balance = Math.max(0, Math.round((tot - pd) * 100) / 100);
+            }
             if (user) {
                 if (!obj.bankName) obj.bankName = user.bankName || "ABC Bank";
                 if (!obj.accountType) obj.accountType = user.accountType || "Current";
@@ -541,15 +558,32 @@ router.post("/:id/payment", verifyToken, async (req, res) => {
 
 router.delete("/:id", verifyToken, async (req, res) => {
     try {
-        const deleted = await PurchaseInvoice.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+        const cleanId = String(req.params.id).trim();
+        const idFilter = mongoose.Types.ObjectId.isValid(cleanId)
+            ? { $or: [{ _id: cleanId }, { billNo: cleanId }] }
+            : { billNo: cleanId };
+
+        const userIdObj = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+        const deleted = await PurchaseInvoice.findOneAndDelete({
+            ...idFilter,
+            userId: { $in: [req.user.id, userIdObj] }
+        });
         if (!deleted) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
 
         // Remove automated Bookkeeping Entry
-        await removeAutomatedBookkeepingEntry({
-            userId: req.user.id,
-            referenceId: `purchase_inv_${req.params.id}`
+        const refIds = [
+            `purchase_inv_${deleted._id}`,
+            `purchase_inv_${deleted.billNo}`,
+            `purchase_${deleted._id}`,
+            `purchase_${deleted.billNo}`
+        ];
+        await BookkeepingEntry.deleteMany({
+            $or: [
+                { referenceId: { $in: refIds } },
+                { description: new RegExp(`Purchase Invoice ${deleted.billNo}\\b`, 'i') }
+            ]
         });
 
         res.json({ message: "Purchase invoice deleted" });

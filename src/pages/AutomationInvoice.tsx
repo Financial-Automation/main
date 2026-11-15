@@ -60,6 +60,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel
+} from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
@@ -408,6 +417,8 @@ const AutomationInvoice = () => {
 
   // State for invoice history
   const [invoiceHistory, setInvoiceHistory] = useState<InvoiceData[]>([]);
+  const [invoiceToDelete, setInvoiceToDelete] = useState<any | null>(null);
+  const [isDeletingInvoice, setIsDeletingInvoice] = useState(false);
 
   // State for invoice templates theme selection
   const [userTemplates, setUserTemplates] = useState<any[]>([]);
@@ -552,6 +563,7 @@ const AutomationInvoice = () => {
   // Record Manual Payment State
   const [selectedPaymentInvoiceId, setSelectedPaymentInvoiceId] = useState<string | null>(null);
   const [isRecordPaymentOpen, setIsRecordPaymentOpen] = useState(false);
+  const [isPaymentRecorded, setIsPaymentRecorded] = useState(false);
   const [paymentForm, setPaymentForm] = useState({
     amount: 0,
     paymentDate: new Date().toISOString().split('T')[0],
@@ -639,148 +651,173 @@ const AutomationInvoice = () => {
 
   // Record Manual Payment
   const handleRecordPaymentSubmit = async () => {
-    const targetId = selectedPaymentInvoiceId || lastSavedId;
-
-    if (!targetId) {
-      toast.error("No invoice selected to apply payment.");
-      return;
-    }
-
+    const isPayingFromHistory = Boolean(selectedPaymentInvoiceId);
+    const targetId = isPayingFromHistory ? selectedPaymentInvoiceId : null;
     const isCredit = paymentForm.paymentMethod === 'credit';
 
-    // Locate target invoice from invoiceHistory
-    const targetInvoice = invoiceHistory.find((inv: any) =>
+    // Locate target invoice from invoiceHistory ONLY if paying from history
+    const targetInvoice = isPayingFromHistory ? invoiceHistory.find((inv: any) =>
       targetId && (
         String(inv.id) === String(targetId) ||
         String(inv._id) === String(targetId) ||
         inv.invoiceNo === targetId
       )
-    ) || (
-      (!selectedPaymentInvoiceId && lastSavedId) ? currentInvoice : null
-    );
+    ) : null;
 
-    const prevPaid = Number(targetInvoice?.paid ?? targetInvoice?.amountPaid ?? (targetInvoice ? 0 : (currentInvoice.paid || 0)));
-    const grandTotal = Number(targetInvoice?.total ?? targetInvoice?.grandTotal ?? (targetInvoice ? 0 : (currentInvoice.total || 0)));
-    const currentBalance = targetInvoice ? Number(targetInvoice.balance ?? targetInvoice.balanceDue ?? Math.max(0, grandTotal - prevPaid)) : Math.max(0, (currentInvoice.total || 0) - (currentInvoice.paid || 0));
+    const prevPaid = isPayingFromHistory
+      ? Number(targetInvoice?.paid ?? targetInvoice?.amountPaid ?? 0)
+      : Number(currentInvoice.paid || 0);
+
+    const grandTotal = isPayingFromHistory
+      ? Number(targetInvoice?.total ?? targetInvoice?.grandTotal ?? 0)
+      : Number(currentInvoice.total || 0);
+
+    const currentBalance = isPayingFromHistory
+      ? (targetInvoice ? Number(targetInvoice.balance ?? targetInvoice.balanceDue ?? Math.max(0, grandTotal - prevPaid)) : 0)
+      : Math.max(0, grandTotal - prevPaid);
 
     // Validation
-    if (!isCredit) {
-      if (isNaN(paymentForm.amount) || paymentForm.amount <= 0) {
-        toast.error("Please enter a valid payment amount greater than zero.");
-        return;
-      }
-      if (paymentForm.amount > currentBalance + 0.01) {
-        toast.error(`Payment amount (₹${paymentForm.amount.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`);
-        return;
-      }
+    const enteredAmount = isNaN(paymentForm.amount) ? 0 : Number(paymentForm.amount);
+
+    if (enteredAmount < 0) {
+      toast.error("Payment amount cannot be negative.");
+      return;
     }
 
-    const actualAmount = isCredit ? 0 : paymentForm.amount;
+    if (!isCredit && enteredAmount <= 0) {
+      toast.error("Please enter a valid payment amount greater than zero.");
+      return;
+    }
+
+    const maxAllowed = isPayingFromHistory ? currentBalance : grandTotal;
+    if (enteredAmount > maxAllowed + 0.01) {
+      toast.error(
+        isPayingFromHistory
+          ? `Payment amount (₹${enteredAmount.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`
+          : `Payment amount (₹${enteredAmount.toFixed(2)}) cannot exceed invoice total (₹${grandTotal.toFixed(2)}).`
+      );
+      return;
+    }
+
+    // If pure credit (credit method with 0 amount), actual paid is 0.
+    // If credit with an amount > 0 (down payment on credit sale), actual paid is that amount!
+    const actualAmount = Math.max(0, enteredAmount);
 
     let updatedInvoiceData: any = null;
 
-    try {
-      const token = localStorage.getItem("token");
-      const res = await fetch(`${API_BASE_URL}/invoice/${targetId}/payment`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          amount: actualAmount,
-          paymentMethod: paymentForm.paymentMethod,
-          paymentDate: paymentForm.paymentDate,
-          depositAccount: paymentForm.depositAccount,
-          referenceNumber: paymentForm.referenceNumber,
-          notes: paymentForm.notes,
-          idempotencyKey: `pay_${targetId}_${Date.now()}`,
-          isCredit
-        })
-      });
+    if (isPayingFromHistory && targetId) {
+      const isPurchase = Boolean(
+        targetInvoice?.type === 'purchase' ||
+        String(targetId).startsWith('PUR') ||
+        String(targetInvoice?.invoiceNo || '').startsWith('PUR')
+      );
+      const endpoint = isPurchase ? `${API_BASE_URL}/purchase-invoice` : `${API_BASE_URL}/invoice`;
 
-      if (res.ok) {
-        const data = await res.json();
-        updatedInvoiceData = data.invoice;
-      } else {
-        console.warn("Backend payment route warning");
+      try {
+        const token = localStorage.getItem("token");
+        const res = await fetch(`${endpoint}/${encodeURIComponent(targetId)}/payment`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            amount: actualAmount,
+            paymentMethod: paymentForm.paymentMethod,
+            paymentDate: paymentForm.paymentDate,
+            depositAccount: paymentForm.depositAccount,
+            referenceNumber: paymentForm.referenceNumber,
+            notes: paymentForm.notes,
+            idempotencyKey: `pay_${targetId}_${Date.now()}`,
+            isCredit: isCredit && actualAmount === 0
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          updatedInvoiceData = data.invoice;
+        } else {
+          console.warn("Backend payment route warning");
+        }
+      } catch (error) {
+        console.warn("Error submitting payment to API:", error);
       }
-    } catch (error) {
-      console.warn("Error submitting payment to API:", error);
     }
 
     // Calculate new paid & balance amounts
     let newPaid: number;
     let newBalance: number;
 
-    if (isCredit) {
-      newPaid = prevPaid;
-      newBalance = Math.max(0, grandTotal - newPaid);
-    } else if (updatedInvoiceData) {
-      newPaid = Math.min(grandTotal, Number(updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? (prevPaid + actualAmount)));
-      newBalance = Math.max(0, Number(updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? (grandTotal - newPaid)));
+    if (isCredit && actualAmount === 0 && !isPayingFromHistory) {
+      newPaid = 0;
+      newBalance = grandTotal;
+    } else if (isPayingFromHistory) {
+      if (updatedInvoiceData) {
+        newPaid = Math.min(grandTotal, Number(updatedInvoiceData.amountPaid ?? updatedInvoiceData.paid ?? (prevPaid + actualAmount)));
+        newBalance = Math.max(0, Number(updatedInvoiceData.balanceDue ?? updatedInvoiceData.balance ?? (grandTotal - newPaid)));
+      } else {
+        newPaid = Math.min(grandTotal, Math.round((prevPaid + actualAmount) * 100) / 100);
+        newBalance = Math.max(0, Math.round((grandTotal - newPaid) * 100) / 100);
+      }
     } else {
-      newPaid = Math.min(grandTotal, prevPaid + actualAmount);
-      newBalance = Math.max(0, grandTotal - newPaid);
+      newPaid = Math.min(grandTotal, actualAmount);
+      newBalance = Math.max(0, Math.round((grandTotal - newPaid) * 100) / 100);
     }
 
-    const newPaymentStatus = newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
-    const newStatus = isCredit ? (targetInvoice?.status || 'sent') : (newBalance <= 0 ? 'paid' : newPaid > 0 ? 'partial' : 'pending');
+    const newPaymentStatus = newBalance <= 0 && grandTotal > 0 ? 'paid' : (newPaid > 0 ? 'partial' : 'pending');
+    const newStatus = isCredit && newPaid === 0 ? 'sent' : (newBalance <= 0 && grandTotal > 0 ? 'paid' : 'sent');
 
-    // 1. Update localStorage ('savedInvoices')
-    const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
-    const idx = savedList.findIndex((inv: any) =>
-      targetId && (
-        String(inv.id) === String(targetId) ||
-        String(inv._id) === String(targetId) ||
-        inv.invoiceNo === targetId ||
-        (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
-      )
-    );
-
-    if (idx !== -1) {
-      savedList[idx].paid = newPaid;
-      savedList[idx].amountPaid = newPaid;
-      savedList[idx].balance = newBalance;
-      savedList[idx].balanceDue = newBalance;
-      savedList[idx].paymentStatus = newPaymentStatus;
-      savedList[idx].status = isCredit ? (savedList[idx].status || 'sent') : newStatus;
-      savedList[idx].isCredit = isCredit;
-      localStorage.setItem('savedInvoices', JSON.stringify(savedList));
-    }
-
-    // 2. Update state ('invoiceHistory')
-    setInvoiceHistory(prevList => prevList.map((inv: any) => {
-      const isMatch = targetId && (
-        String(inv.id) === String(targetId) ||
-        String(inv._id) === String(targetId) ||
-        inv.invoiceNo === targetId ||
-        (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+    // 1. Update localStorage ('savedInvoices') if paying from history
+    if (isPayingFromHistory && targetId) {
+      const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
+      const idx = savedList.findIndex((inv: any) =>
+        targetId && (
+          String(inv.id) === String(targetId) ||
+          String(inv._id) === String(targetId) ||
+          inv.invoiceNo === targetId ||
+          (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+        )
       );
-      if (!isMatch) return inv;
-      return {
-        ...inv,
-        paid: newPaid,
-        amountPaid: newPaid,
-        balance: newBalance,
-        balanceDue: newBalance,
-        paymentStatus: newPaymentStatus as any,
-        status: isCredit ? (inv.status || 'sent') : newStatus as any,
-        isCredit
-      };
-    }));
 
-    // 3. Update active currentInvoice ONLY if it's the target invoice
-    const isCurrentInvoiceTarget = Boolean(
-      (targetId && (
-        String(currentInvoice.id) === String(targetId) ||
-        String((currentInvoice as any)._id) === String(targetId) ||
-        currentInvoice.invoiceNo === targetId
-      )) || (targetInvoice && currentInvoice.invoiceNo === targetInvoice.invoiceNo) ||
-      (!selectedPaymentInvoiceId && lastSavedId)
-    );
+      if (idx !== -1) {
+        savedList[idx].paid = newPaid;
+        savedList[idx].amountPaid = newPaid;
+        savedList[idx].balance = newBalance;
+        savedList[idx].balanceDue = newBalance;
+        savedList[idx].paymentStatus = newPaymentStatus;
+        savedList[idx].paymentMethod = paymentForm.paymentMethod;
+        savedList[idx].saleType = paymentForm.paymentMethod;
+        savedList[idx].status = isCredit && newPaid === 0 ? (savedList[idx].status || 'sent') : newStatus;
+        savedList[idx].isCredit = isCredit && newPaid === 0;
+        localStorage.setItem('savedInvoices', JSON.stringify(savedList));
+      }
 
-    if (isCurrentInvoiceTarget) {
+      // 2. Update state ('invoiceHistory')
+      setInvoiceHistory(prevList => prevList.map((inv: any) => {
+        const isMatch = targetId && (
+          String(inv.id) === String(targetId) ||
+          String(inv._id) === String(targetId) ||
+          inv.invoiceNo === targetId ||
+          (targetInvoice && inv.invoiceNo === targetInvoice.invoiceNo)
+        );
+        if (!isMatch) return inv;
+        return {
+          ...inv,
+          paid: newPaid,
+          amountPaid: newPaid,
+          balance: newBalance,
+          balanceDue: newBalance,
+          paymentStatus: newPaymentStatus as any,
+          paymentMethod: paymentForm.paymentMethod,
+          saleType: paymentForm.paymentMethod as any,
+          status: isCredit && newPaid === 0 ? (inv.status || 'sent') : newStatus as any,
+          isCredit: isCredit && newPaid === 0
+        };
+      }));
+    }
+
+    // 3. If paying for active invoice in editor, update currentInvoice
+    if (!isPayingFromHistory) {
       setCurrentInvoice(prev => ({
         ...prev,
         paid: newPaid,
@@ -788,13 +825,23 @@ const AutomationInvoice = () => {
         balance: newBalance,
         balanceDue: newBalance,
         paymentStatus: newPaymentStatus as any,
-        status: isCredit ? prev.status : newStatus as any
+        paymentMethod: paymentForm.paymentMethod,
+        saleType: paymentForm.paymentMethod as any,
+        status: isCredit && newPaid === 0 ? 'sent' : newStatus as any
       }));
+      setIsPaymentRecorded(true);
     }
 
-    const msg = isCredit
-      ? "Recorded as credit (unpaid). Invoice marked as Unpaid in history."
-      : "Payment recorded & applied successfully!";
+    const msg = isPayingFromHistory
+      ? (newPaid === 0
+          ? `Invoice #${targetInvoice?.invoiceNo || targetId} updated as Credit (Unpaid)! Auto-saved.`
+          : (newBalance <= 0
+              ? `Payment of ₹${actualAmount.toFixed(2)} recorded & saved! Invoice #${targetInvoice?.invoiceNo || targetId} is now FULLY PAID.`
+              : `Payment of ₹${actualAmount.toFixed(2)} recorded & saved! Total Paid: ₹${newPaid.toFixed(2)}, Remaining Due: ₹${newBalance.toFixed(2)}.`))
+      : (newPaid === 0
+          ? "Recorded as credit (unpaid). You can now click Save Invoice."
+          : `Payment of ₹${newPaid.toFixed(2)} recorded! You can now click Save Invoice.`);
+
     toast.success(msg);
     setIsRecordPaymentOpen(false);
     setSelectedPaymentInvoiceId(null);
@@ -1221,18 +1268,20 @@ const AutomationInvoice = () => {
     );
 
     setCurrentInvoice(prev => {
-      const isCredit = prev.saleType === 'credit';
-      const paidVal = isCredit ? 0 : prev.paid;
-      const balanceVal = isCredit ? totals.total : totals.total - paidVal;
+      const paidVal = prev.paid > 0 ? Math.min(totals.total, prev.paid) : 0;
+      const balanceVal = Math.max(0, Math.round((totals.total - paidVal) * 100) / 100);
+      const pStatus = balanceVal <= 0 && totals.total > 0 ? 'paid' : (paidVal > 0 ? 'partial' : 'pending');
       return {
         ...prev,
         items: updatedItems,
         ...totals,
         paid: paidVal,
-        balance: balanceVal
+        balance: balanceVal,
+        paymentStatus: pStatus
       };
     });
 
+    setIsPaymentRecorded(false);
     // Reset new item form
     setNewItem({
       inventoryItemId: undefined,
@@ -1310,17 +1359,19 @@ const AutomationInvoice = () => {
     );
 
     setCurrentInvoice(prev => {
-      const isCredit = prev.saleType === 'credit';
-      const paidVal = isCredit ? 0 : prev.paid;
-      const balanceVal = isCredit ? totals.total : totals.total - paidVal;
+      const paidVal = prev.paid > 0 ? Math.min(totals.total, prev.paid) : 0;
+      const balanceVal = Math.max(0, Math.round((totals.total - paidVal) * 100) / 100);
+      const pStatus = balanceVal <= 0 && totals.total > 0 ? 'paid' : (paidVal > 0 ? 'partial' : 'pending');
       return {
         ...prev,
         items: updatedItems,
         ...totals,
         paid: paidVal,
-        balance: balanceVal
+        balance: balanceVal,
+        paymentStatus: pStatus
       };
     });
+    setIsPaymentRecorded(false);
   };
 
   // Update paid amount
@@ -1355,6 +1406,7 @@ const AutomationInvoice = () => {
         dueDate: newDueDate
       };
     });
+    setIsPaymentRecorded(false);
   };
 
   // Handle file upload for purchase bill
@@ -1396,10 +1448,27 @@ const AutomationInvoice = () => {
     }
 
 
+    if (statusOverride !== 'draft' && !isPaymentRecorded && !lastSavedId) {
+      toast.error("Please record payment before saving invoice.");
+      setSelectedPaymentInvoiceId(null);
+      setPaymentForm(prev => ({
+        ...prev,
+        amount: currentInvoice.balance > 0 ? currentInvoice.balance : (currentInvoice.paid > 0 ? currentInvoice.paid : currentInvoice.total),
+        paymentMethod: (currentInvoice.saleType || currentInvoice.paymentMethod || 'cash').toLowerCase()
+      }));
+      setIsRecordPaymentOpen(true);
+      return null;
+    }
+
     setIsSaving(true);
 
     try {
-      const statusValue = statusOverride || (currentInvoice.balance <= 0 ? 'paid' : 'sent');
+      const effectivePaid = Math.min(currentInvoice.total || 0, Math.max(0, Number(currentInvoice.paid) || 0));
+      const effectiveBalance = Math.max(0, Math.round(((currentInvoice.total || 0) - effectivePaid) * 100) / 100);
+      const effectivePaymentStatus = effectiveBalance <= 0 && (currentInvoice.total || 0) > 0
+        ? 'paid'
+        : (effectivePaid > 0 ? 'partial' : 'pending');
+      const statusValue = statusOverride || (effectiveBalance <= 0 && (currentInvoice.total || 0) > 0 ? 'paid' : (effectivePaid > 0 ? 'partial' : 'sent'));
       const dueReminderDate = getDueReminderDate(currentInvoice.invoiceDate, currentInvoice.dueReminderDays);
 
       const backendData = {
@@ -1434,6 +1503,8 @@ const AutomationInvoice = () => {
         eWayBillNo: currentInvoice.eWayBillNo,
         stateOfSupply: currentInvoice.stateOfSupply,
         items: currentInvoice.items.map(item => ({
+          productId: item.inventoryItemId,
+          inventoryItemId: item.inventoryItemId,
           productName: item.itemName,
           description: `${item.codeType}: ${item.hsnCode || 'N/A'} | Unit: ${item.unit}`,
           codeType: item.codeType,
@@ -1457,9 +1528,10 @@ const AutomationInvoice = () => {
         cgst: currentInvoice.totalCgst,
         igst: currentInvoice.totalIgst,
         grandTotal: currentInvoice.total,
-        amountPaid: currentInvoice.paid,
-        balanceDue: currentInvoice.balance,
-        paymentMethod: currentInvoice.saleType || 'cash',
+        amountPaid: effectivePaid,
+        balanceDue: effectiveBalance,
+        paymentMethod: currentInvoice.saleType || currentInvoice.paymentMethod || 'cash',
+        paymentStatus: effectivePaymentStatus,
         gstPortalJson: buildGstPortalJson({ ...currentInvoice, dueReminderDate }),
         notes: currentInvoice.notes || '',
         termsAndConditions: currentInvoice.termsAndConditions || '',
@@ -1523,6 +1595,11 @@ const AutomationInvoice = () => {
       const invoiceToSave = {
         ...currentInvoice,
         userId: user?.id,
+        paid: effectivePaid,
+        amountPaid: effectivePaid,
+        balance: effectiveBalance,
+        balanceDue: effectiveBalance,
+        paymentStatus: effectivePaymentStatus,
         status: statusValue,
         dueReminderDate,
         ocrJson: buildGstPortalJson({ ...currentInvoice, dueReminderDate }),
@@ -1595,11 +1672,14 @@ const AutomationInvoice = () => {
   // Helper to check if an invoice is a draft
   const isDraftInvoice = (inv: any) => {
     if (!inv) return false;
-    const st = String(inv.status || '').toLowerCase();
-    if (st === 'sent' || st === 'paid' || st === 'viewed' || st === 'overdue' || st === 'cancelled') {
+    const st = String(inv.status || '').toLowerCase().trim();
+    if (st === 'sent' || st === 'paid' || st === 'partial' || st === 'viewed' || st === 'overdue' || st === 'cancelled' || st === 'completed' || st === 'unpaid') {
       return false;
     }
-    return true;
+    if (Number(inv.paid || inv.amountPaid || 0) > 0) {
+      return false;
+    }
+    return st === 'draft';
   };
 
   // Re-load a draft or history invoice into the form for editing
@@ -1608,6 +1688,7 @@ const AutomationInvoice = () => {
 
     const idToUse = inv.id || inv._id || inv.invoiceNo || null;
     setLastSavedId(idToUse);
+    setIsPaymentRecorded(Boolean(inv.paid || inv.amountPaid || inv.paymentStatus === 'paid' || inv.saleType === 'credit' || inv.paymentMethod === 'credit'));
     setInvoiceType(inv.type || 'sales');
 
     const placeOfSupply = inv.stateOfSupply || 'Tamil Nadu';
@@ -1714,6 +1795,7 @@ const AutomationInvoice = () => {
   // Reset form
   const resetForm = () => {
     setLastSavedId(null);
+    setIsPaymentRecorded(false);
     setCurrentInvoice(prev => ({
       type: invoiceType,
       saleType: 'cash',
@@ -1749,6 +1831,7 @@ const AutomationInvoice = () => {
       notes: '',
       termsAndConditions: ''
     }));
+    setIsPaymentRecorded(false);
     // Reset new item form
     setNewItem({
       inventoryItemId: undefined,
@@ -2175,31 +2258,94 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
     ].some(value => String(value || '').toLowerCase().includes(query));
   });
 
-  const deleteHistoryInvoice = async (invoiceId?: string, invoiceNo?: string, type?: string) => {
-    if (invoiceId) {
-      try {
-        const token = localStorage.getItem("token");
-        const isPurchase = type === 'purchase' || (invoiceNo && invoiceNo.startsWith('PUR'));
-        const endpoint = isPurchase ? `${API_BASE_URL}/purchase-invoice` : API_ENDPOINTS.INVOICE;
-        await fetch(`${endpoint}/${invoiceId}`, {
-          method: "DELETE",
-          headers: { "Authorization": `Bearer ${token}` }
-        });
-      } catch (err) {
-        console.error("Error deleting invoice from server:", err);
+  const confirmDeleteInvoice = async () => {
+    if (!invoiceToDelete) return;
+    const invoice = invoiceToDelete;
+    setIsDeletingInvoice(true);
+
+    try {
+      const token = localStorage.getItem("token");
+      const invoiceId = invoice._id || invoice.id || invoice.invoiceNo;
+      const invoiceNo = invoice.invoiceNo || invoice.invoiceNumber;
+      const isPurchase = invoice.type === 'purchase' || (invoiceNo && String(invoiceNo).startsWith('PUR'));
+      const endpoint = isPurchase ? `${API_BASE_URL}/purchase-invoice` : API_ENDPOINTS.INVOICE;
+
+      // 1. Delete on backend server
+      if (invoiceId) {
+        try {
+          const res = await fetch(`${endpoint}/${encodeURIComponent(invoiceId)}`, {
+            method: "DELETE",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            }
+          });
+          if (!res.ok && invoiceNo && invoiceId !== invoiceNo) {
+            // Fallback retry using invoiceNo if ID returned 404
+            await fetch(`${endpoint}/${encodeURIComponent(invoiceNo)}`, {
+              method: "DELETE",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`
+              }
+            });
+          }
+        } catch (serverErr) {
+          console.error("Backend delete call failed:", serverErr);
+        }
       }
+
+      // 2. Remove from localStorage savedInvoices
+      const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
+      const updatedList = savedList.filter((inv: any) => {
+        const invMatchId = inv._id || inv.id;
+        const targetMatchId = invoice._id || invoice.id;
+        if (targetMatchId && invMatchId && String(invMatchId) === String(targetMatchId)) return false;
+        if (invoiceNo && (inv.invoiceNo === invoiceNo || inv.invoiceNumber === invoiceNo)) return false;
+        if (invoiceId && (inv._id === invoiceId || inv.id === invoiceId || inv.invoiceNo === invoiceId)) return false;
+        return true;
+      });
+      localStorage.setItem('savedInvoices', JSON.stringify(updatedList));
+
+      // 3. Remove from invoiceHistory state
+      setInvoiceHistory(prev => prev.filter((inv: any) => {
+        const invMatchId = inv._id || inv.id;
+        const targetMatchId = invoice._id || invoice.id;
+        if (targetMatchId && invMatchId && String(invMatchId) === String(targetMatchId)) return false;
+        if (invoiceNo && (inv.invoiceNo === invoiceNo || inv.invoiceNumber === invoiceNo)) return false;
+        if (invoiceId && (inv._id === invoiceId || inv.id === invoiceId || inv.invoiceNo === invoiceId)) return false;
+        return true;
+      }));
+
+      // 4. Reset current editor state if the deleted invoice was currently loaded
+      if (lastSavedId && (lastSavedId === invoiceId || lastSavedId === invoice._id || lastSavedId === invoice.id)) {
+        setLastSavedId('');
+      }
+
+      // 5. Refresh inventory items and trigger storage event to notify Dashboard and other tabs
+      refreshInventory();
+      window.dispatchEvent(new Event('storage'));
+
+      toast.success(`Invoice ${invoiceNo || ''} deleted successfully. Dashboard and Bookkeeping updated.`);
+      setInvoiceToDelete(null);
+    } catch (err: any) {
+      console.error("Error deleting invoice:", err);
+      toast.error(err.message || "Failed to delete invoice");
+    } finally {
+      setIsDeletingInvoice(false);
     }
-    const savedList = JSON.parse(localStorage.getItem('savedInvoices') || '[]');
-    const updatedList = savedList.filter((invoice: InvoiceData & { id?: string }) => {
-      if (invoiceId) return invoice.id !== invoiceId;
-      return invoice.invoiceNo !== invoiceNo;
-    });
-    localStorage.setItem('savedInvoices', JSON.stringify(updatedList));
-    setInvoiceHistory(prev => prev.filter(inv => {
-      if (invoiceId) return (inv as any).id !== invoiceId && (inv as any)._id !== invoiceId;
-      return inv.invoiceNo !== invoiceNo;
-    }));
-    toast.success("Invoice deleted from history and server");
+  };
+
+  const deleteHistoryInvoice = (invoiceId?: string, invoiceNo?: string, type?: string) => {
+    const found = invoiceHistory.find((inv: any) =>
+      (invoiceId && (inv._id === invoiceId || inv.id === invoiceId)) ||
+      (invoiceNo && (inv.invoiceNo === invoiceNo || inv.invoiceNumber === invoiceNo))
+    );
+    if (found) {
+      setInvoiceToDelete(found);
+    } else {
+      setInvoiceToDelete({ _id: invoiceId, id: invoiceId, invoiceNo, type });
+    }
   };
 
   // Handle back to dashboard
@@ -2315,33 +2461,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
             <div className="lg:col-span-2 space-y-6 no-print">
               {/* Document Options */}
               <Card className="liquid-panel overflow-hidden rounded-[36px] border-white/55 p-5 space-y-4">
-                <div>
-                  <Label className="text-slate-900 mb-2.5 block font-bold text-sm">Payment Method</Label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                    {[
-                      { type: 'cash', label: 'Cash', icon: Banknote, activeClass: 'bg-emerald-600 text-white border-emerald-600' },
-                      { type: 'upi', label: 'UPI', icon: Smartphone, activeClass: 'bg-violet-600 text-white border-violet-600' },
-                      { type: 'card', label: 'Card', icon: CreditCard, activeClass: 'bg-blue-600 text-white border-blue-600' },
-                      { type: 'credit', label: 'Credit', icon: Wallet, activeClass: 'bg-amber-600 text-white border-amber-600' }
-                    ].map((mode) => (
-                      <button
-                        key={mode.type}
-                        type="button"
-                        onClick={() => handlePaymentMethodChange(mode.type)}
-                        className={`py-2.5 px-3 rounded-[14px] font-bold text-xs transition-all flex items-center justify-center gap-2 border shadow-sm ${
-                          (currentInvoice.saleType || 'cash').toLowerCase() === mode.type.toLowerCase()
-                            ? mode.activeClass
-                            : 'bg-white/80 border-slate-200 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        <mode.icon className="h-4 w-4 shrink-0" />
-                        <span>{mode.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3 pt-2">
+                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3">
                   <div className="space-y-2">
                     <Label className="text-slate-800 text-sm font-semibold">Print Size</Label>
                     <Select value={currentInvoice.invoiceSize} onValueChange={(val: 'A4' | 'QUARTER_A4' | 'A6') => setCurrentInvoice(prev => ({ ...prev, invoiceSize: val }))}>
@@ -3420,8 +3540,6 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </span>
                   </div>
 
-
-
                   <div className="flex justify-between items-center py-2 border-t border-slate-200">
                     <span className="text-slate-600 font-semibold">Balance</span>
                     <span className={`text-xl font-bold ${currentInvoice.balance > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
@@ -3442,33 +3560,41 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                   )}
                 </div>
 
-                {lastSavedId && (
-                  <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
-                    {currentInvoice.paid > 0 && (
-                      <div className="flex justify-between items-center text-sm mb-3">
-                        <span className="text-slate-600 font-semibold">Amount Paid</span>
-                        <span className="font-semibold text-emerald-600">₹{currentInvoice.paid.toFixed(2)}</span>
-                      </div>
-                    )}
-                    {currentInvoice.balance > 0 && (
-                      <Button
-                        onClick={() => {
-                          setSelectedPaymentInvoiceId(lastSavedId);
-                          setPaymentForm(prev => ({ ...prev, amount: currentInvoice.balance }));
-                          setIsRecordPaymentOpen(true);
-                        }}
-                        className="w-full bg-slate-950 text-white hover:bg-slate-800 rounded-xl py-6 font-bold"
-                      >
-                        <CreditCard className="h-5 w-5 mr-2" />
-                        Record Payment
-                      </Button>
-                    )}
-                    <Button onClick={printInvoice} variant="outline" className="w-full bg-white/60 border-slate-200 text-slate-700 hover:bg-slate-50 rounded-xl py-6 font-bold">
-                      <Printer className="h-5 w-5 mr-2" />
-                      Print Invoice
-                    </Button>
-                  </div>
-                )}
+                <div className="mt-4 pt-4 border-t border-slate-200 space-y-2">
+                  {currentInvoice.paid > 0 && (
+                    <div className="flex justify-between items-center text-sm mb-3">
+                      <span className="text-slate-600 font-semibold">Amount Paid</span>
+                      <span className="font-semibold text-emerald-600">₹{currentInvoice.paid.toFixed(2)}</span>
+                    </div>
+                  )}
+                  <Button
+                    onClick={() => {
+                      if (currentInvoice.items.length === 0) {
+                        toast.error("Please add at least one item before recording payment.");
+                        return;
+                      }
+                      setSelectedPaymentInvoiceId(null);
+                      setPaymentForm(prev => ({
+                        ...prev,
+                        amount: currentInvoice.paid > 0 ? currentInvoice.paid : currentInvoice.total,
+                        paymentMethod: (currentInvoice.saleType || currentInvoice.paymentMethod || 'cash').toLowerCase()
+                      }));
+                      setIsRecordPaymentOpen(true);
+                    }}
+                    className={`w-full text-white rounded-xl py-6 font-bold shadow-sm transition-all ${
+                      isPaymentRecorded
+                        ? "bg-emerald-600 hover:bg-emerald-700"
+                        : "bg-slate-950 hover:bg-slate-800"
+                    }`}
+                  >
+                    <CreditCard className="h-5 w-5 mr-2" />
+                    {isPaymentRecorded ? "Edit / Update Payment" : "Record Payment"}
+                  </Button>
+                  <Button onClick={printInvoice} variant="outline" className="w-full bg-white/60 border-slate-200 text-slate-700 hover:bg-slate-50 rounded-xl py-6 font-bold">
+                    <Printer className="h-5 w-5 mr-2" />
+                    Print Invoice
+                  </Button>
+                </div>
 
                 {/* Template Selection */}
                 <div className="mt-4 pt-4 border-t border-slate-200 space-y-1.5">
@@ -3514,14 +3640,38 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       Save Draft
                     </Button>
                     <Button
-                      onClick={() => saveInvoice('sent')}
-                      disabled={isSaving || currentInvoice.items.length === 0}
-                      className="h-12 rounded-xl bg-slate-950 font-semibold text-white transition-all duration-300 hover:bg-slate-800"
+                      onClick={() => {
+                        if (!isPaymentRecorded && !lastSavedId) {
+                          toast.error("Please record payment before saving invoice.");
+                          setSelectedPaymentInvoiceId(null);
+                          setPaymentForm(prev => ({
+                            ...prev,
+                            amount: currentInvoice.total,
+                            paymentMethod: (currentInvoice.saleType || currentInvoice.paymentMethod || 'cash').toLowerCase()
+                          }));
+                          setIsRecordPaymentOpen(true);
+                          return;
+                        }
+                        saveInvoice('sent');
+                      }}
+                      disabled={isSaving || currentInvoice.items.length === 0 || (!isPaymentRecorded && !lastSavedId)}
+                      className={`h-12 rounded-xl font-semibold transition-all duration-300 ${
+                        !isPaymentRecorded && !lastSavedId
+                          ? "bg-slate-200 text-slate-400 cursor-not-allowed hover:bg-slate-200"
+                          : "bg-slate-950 text-white hover:bg-slate-800"
+                      }`}
                     >
                       {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
                       Save Invoice
                     </Button>
                   </div>
+
+                  {!isPaymentRecorded && !lastSavedId && currentInvoice.items.length > 0 && (
+                    <div className="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold">
+                      <CreditCard className="h-3.5 w-3.5 text-amber-600" />
+                      <span>Record payment above to enable Save Invoice</span>
+                    </div>
+                  )}
 
 
 
@@ -3888,9 +4038,13 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                             <Button
                               size="sm"
                               onClick={() => {
-                                const id = (invoice as any).id || (invoice as any)._id;
+                                const id = (invoice as any).id || (invoice as any)._id || invoice.invoiceNo;
                                 setSelectedPaymentInvoiceId(id);
-                                setPaymentForm(prev => ({ ...prev, amount: invoice.balance }));
+                                setPaymentForm(prev => ({
+                                  ...prev,
+                                  amount: invoice.balance,
+                                  paymentMethod: (invoice.saleType || invoice.paymentMethod || 'cash').toLowerCase()
+                                }));
                                 setIsRecordPaymentOpen(true);
                               }}
                               className="rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold flex items-center gap-1.5"
@@ -3958,7 +4112,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => deleteHistoryInvoice((invoice as InvoiceData & { id?: string }).id, invoice.invoiceNo, invoice.type)}
+                            onClick={() => setInvoiceToDelete(invoice)}
                             className="rounded-full border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
                           >
                             <Trash2 className="mr-1.5 h-4 w-4" />
@@ -4171,6 +4325,81 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
           </div>
         </div>
       )}
+
+      {/* Delete Invoice Confirmation Modal */}
+      <AlertDialog open={!!invoiceToDelete} onOpenChange={(open) => { if (!open) setInvoiceToDelete(null); }}>
+        <AlertDialogContent className="liquid-panel rounded-[28px] border-white/60 p-6 max-w-lg bg-white/95 backdrop-blur-xl shadow-2xl">
+          <AlertDialogHeader>
+            <div className="flex items-center gap-3 text-rose-600 mb-1">
+              <div className="p-2.5 rounded-full bg-rose-100 text-rose-600">
+                <Trash2 className="h-6 w-6" />
+              </div>
+              <AlertDialogTitle className="text-xl font-bold text-slate-900">
+                Delete Invoice {invoiceToDelete?.invoiceNo || invoiceToDelete?.invoiceNumber}?
+              </AlertDialogTitle>
+            </div>
+            <AlertDialogDescription className="text-slate-600 space-y-3 pt-2">
+              <p className="text-sm font-medium">
+                Are you sure you want to delete this invoice? The following updates will be applied:
+              </p>
+
+              {invoiceToDelete && (
+                <div className="rounded-2xl bg-slate-50 border border-slate-200/80 p-3.5 space-y-2 text-xs">
+                  <div className="flex justify-between items-center text-slate-700">
+                    <span className="font-semibold">Customer / Party:</span>
+                    <span className="font-bold text-slate-900">{invoiceToDelete.partyName || invoiceToDelete.customerName || 'Cash Customer'}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-slate-700">
+                    <span className="font-semibold">Total Amount:</span>
+                    <span className="font-bold text-slate-900">₹{Number(invoiceToDelete.total || invoiceToDelete.grandTotal || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-emerald-700">
+                    <span className="font-semibold">Paid Amount (Bookkeeping Income):</span>
+                    <span className="font-bold">₹{Number(invoiceToDelete.paid !== undefined ? invoiceToDelete.paid : (invoiceToDelete.amountPaid || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-rose-700">
+                    <span className="font-semibold">Outstanding Due (Dashboard Receivables):</span>
+                    <span className="font-bold">₹{Number(invoiceToDelete.balance !== undefined ? invoiceToDelete.balance : (invoiceToDelete.balanceDue || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                </div>
+              )}
+
+              <ul className="text-xs space-y-1.5 list-disc pl-4 text-slate-600">
+                <li>Permanently removes this invoice from history and database records.</li>
+                <li>Deducts linked <strong>Sales Income (₹{Number(invoiceToDelete?.paid !== undefined ? invoiceToDelete?.paid : (invoiceToDelete?.amountPaid || 0)).toFixed(2)})</strong> from Bookkeeping.</li>
+                <li>Recalculates and updates <strong>Total Receivables & Revenue</strong> on Dashboard.</li>
+                <li className="text-rose-600 font-semibold">This action cannot be undone. Do you wish to proceed?</li>
+              </ul>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="mt-4 gap-2 sm:gap-2">
+            <AlertDialogCancel
+              disabled={isDeletingInvoice}
+              onClick={() => setInvoiceToDelete(null)}
+              className="rounded-full border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              disabled={isDeletingInvoice}
+              onClick={confirmDeleteInvoice}
+              className="rounded-full bg-rose-600 hover:bg-rose-700 text-white font-bold flex items-center gap-2 shadow-md shadow-rose-600/20"
+            >
+              {isDeletingInvoice ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4" />
+                  Yes, Delete Invoice
+                </>
+              )}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };

@@ -1,9 +1,89 @@
 import express from "express";
+import mongoose from "mongoose";
 import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import Category from "../models/Category.js";
+import Invoice from "../models/Invoice.js";
 import jwt from "jsonwebtoken";
 
 const router = express.Router();
+
+/**
+ * Ensures credit sales without payment or unpaid invoice amounts are NOT shown in bookkeeping.
+ * Only actual collected/paid income amounts appear in bookkeeping.
+ */
+const filterValidBookkeepingEntries = async (entries) => {
+    try {
+        const paymentRefs = entries
+            .filter(e => e.referenceId && typeof e.referenceId === 'string' && e.referenceId.startsWith('payment_'))
+            .map(e => e.referenceId.replace(/^payment_/, ''));
+
+        const invoiceRefs = entries
+            .filter(e => e.referenceId && typeof e.referenceId === 'string' && e.referenceId.startsWith('invoice_'))
+            .map(e => e.referenceId.replace(/^invoice_/, ''));
+
+        let matchedPayments = [];
+        if (paymentRefs.length > 0) {
+            const PaymentModel = mongoose.models.Payment || (await import("../models/Payment.js")).default;
+            matchedPayments = await PaymentModel.find({
+                _id: { $in: paymentRefs.filter(id => mongoose.Types.ObjectId.isValid(id)) }
+            }).lean();
+        }
+
+        const paymentMap = new Map();
+        const paymentInvoiceIds = [];
+        matchedPayments.forEach(p => {
+            paymentMap.set(String(p._id), p);
+            if (p.invoiceId) paymentInvoiceIds.push(p.invoiceId);
+        });
+
+        const allInvoiceIds = [...invoiceRefs, ...paymentInvoiceIds].filter(id => mongoose.Types.ObjectId.isValid(id));
+        const matchedInvoices = await Invoice.find({
+            _id: { $in: allInvoiceIds }
+        }).lean();
+
+        const invoiceMap = new Map();
+        matchedInvoices.forEach(inv => invoiceMap.set(String(inv._id), inv));
+
+        return entries.filter(entry => {
+            if (!entry.referenceId || typeof entry.referenceId !== 'string') return true;
+
+            // 1. Payment-level entries: each represents an individual collected payment (e.g. ₹499, ₹681)
+            if (entry.referenceId.startsWith('payment_')) {
+                const payId = entry.referenceId.replace(/^payment_/, '');
+                const payment = paymentMap.get(payId);
+                if (payment && payment.invoiceId) {
+                    const inv = invoiceMap.get(String(payment.invoiceId));
+                    if (inv && (inv.isDeleted || inv.status === 'cancelled')) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // 2. Legacy invoice-level entries
+            if (entry.referenceId.startsWith('invoice_')) {
+                const invId = entry.referenceId.replace(/^invoice_/, '');
+                const inv = invoiceMap.get(invId);
+                if (!inv) return true;
+
+                if (inv.isDeleted || inv.status === 'cancelled') return false;
+
+                const isCredit = String(inv.paymentMethod || inv.saleType || '').trim().toLowerCase() === 'credit';
+                const paid = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+
+                if (isCredit && paid <= 0) return false;
+                if (paid <= 0 && inv.status !== 'paid' && inv.paymentStatus !== 'paid') return false;
+
+                return true;
+            }
+
+            return true;
+        });
+    } catch (err) {
+        console.warn("Bookkeeping filter notice:", err.message);
+        return entries;
+    }
+};
 
 // Middleware to verify token (with fallback for optional auth / guest mode)
 const verifyToken = (req, res, next) => {
@@ -62,7 +142,8 @@ router.post("/add", verifyToken, async (req, res) => {
 // ✅ GET route to fetch all bookkeeping entries (for the logged-in user)
 router.get("/all", verifyToken, async (req, res) => {
     try {
-        const entries = await BookkeepingEntry.find({ userId: req.user.id }).sort({ date: -1 });
+        const rawEntries = await BookkeepingEntry.find({ userId: req.user.id }).sort({ date: -1 });
+        const entries = await filterValidBookkeepingEntries(rawEntries);
 
         // Calculate totals (case-insensitive to support legacy data safely)
         const totalIncome = entries
@@ -110,7 +191,8 @@ router.delete("/:id", verifyToken, async (req, res) => {
 // ✅ GET route for financial summary
 router.get("/summary", verifyToken, async (req, res) => {
     try {
-        const entries = await BookkeepingEntry.find({ userId: req.user.id });
+        const rawEntries = await BookkeepingEntry.find({ userId: req.user.id });
+        const entries = await filterValidBookkeepingEntries(rawEntries);
 
         const totalIncome = entries
             .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'income')

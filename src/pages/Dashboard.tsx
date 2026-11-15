@@ -268,6 +268,7 @@ const Dashboard = () => {
   const [allPayrolls, setAllPayrolls] = useState<any[]>([]);
   const [allBalanceSheets, setAllBalanceSheets] = useState<any[]>([]);
   const [allBookkeepingEntries, setAllBookkeepingEntries] = useState<any[]>([]);
+  const [dataRefreshTrigger, setDataRefreshTrigger] = useState<number>(0);
   const [plGen, setPlGen] = useState<any>(null);
   const [cfGen, setCfGen] = useState<any>(null);
   const [gstAnalyticsData, setGstAnalyticsData] = useState<any>(null);
@@ -396,17 +397,48 @@ const Dashboard = () => {
             invoiceMap.set(key, inv);
           }
         });
-        // Then add any local-only invoices strictly belonging to current logged-in user
+        // Then add/merge local invoices strictly belonging to current logged-in user
         const currentUserId = user?.id || contextUser?.id;
+        const validLocalInvoices: any[] = [];
         localInvoices.forEach(inv => {
           const key = inv.invoiceNumber || inv.invoiceNo || inv._id || inv.id;
           if (inv.userId && currentUserId && String(inv.userId) !== String(currentUserId)) {
             return;
           }
-          if (key && !invoiceMap.has(key)) {
+          if (!key) return;
+          if (invoiceMap.has(key)) {
+            const existing = invoiceMap.get(key);
+            const localPaid = Number(inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0));
+            const existingPaid = Number(existing.amountPaid !== undefined ? existing.amountPaid : (existing.paid || 0));
+            const merged = {
+              ...existing,
+              ...inv,
+              amountPaid: localPaid > existingPaid ? localPaid : existingPaid,
+              paid: localPaid > existingPaid ? localPaid : existingPaid,
+              balanceDue: inv.balance !== undefined ? inv.balance : (inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, (existing.grandTotal || existing.total || 0) - (localPaid > existingPaid ? localPaid : existingPaid))),
+              balance: inv.balance !== undefined ? inv.balance : (inv.balanceDue !== undefined ? inv.balanceDue : Math.max(0, (existing.grandTotal || existing.total || 0) - (localPaid > existingPaid ? localPaid : existingPaid))),
+              status: inv.status || existing.status,
+              paymentStatus: inv.paymentStatus || existing.paymentStatus
+            };
+            invoiceMap.set(key, merged);
+            validLocalInvoices.push(merged);
+          } else if (invoicesRes && invoicesRes.ok) {
+            // Server was reached and returned canonical list, and this invoice was NOT in server list.
+            // If it has a database _id or sequence number, it was deleted on server!
+            // Only keep it if it is purely a local un-synced draft (e.g. starts with local_)
+            if (!inv._id && String(inv.id || '').startsWith('local_')) {
+              invoiceMap.set(key, inv);
+              validLocalInvoices.push(inv);
+            }
+          } else {
+            // Server was offline, keep local copy
             invoiceMap.set(key, inv);
+            validLocalInvoices.push(inv);
           }
         });
+        if (invoicesRes && invoicesRes.ok) {
+          localStorage.setItem('savedInvoices', JSON.stringify(validLocalInvoices));
+        }
         setAllInvoices(Array.from(invoiceMap.values()));
 
         const purchasesRes = await apiRequest(`${API_BASE_URL}/purchase-invoice/all`).catch(() => null);
@@ -462,48 +494,150 @@ const Dashboard = () => {
     };
 
     fetchDashboardData();
-  }, [selectedPeriod, location.pathname]);
+  }, [selectedPeriod, location.pathname, dataRefreshTrigger]);
+
+  useEffect(() => {
+    const handleStorageChange = () => {
+      setDataRefreshTrigger(prev => prev + 1);
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
 
   // Update calculations whenever period or raw data changes
   useEffect(() => {
-    const filteredInvoices = allInvoices.filter(inv => !inv.isDeleted && inv.status !== 'cancelled' && isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod));
-    const filteredPurchases = allPurchaseInvoices.filter(inv => !inv.isDeleted && isDateInPeriod(inv.createdAt || inv.billDate, selectedPeriod));
+    const isPurchaseInv = (inv: any) =>
+      inv.sourceInvoiceType === 'purchase' ||
+      inv.type === 'purchase' ||
+      String(inv.invoiceNumber || inv.invoiceNo || '').startsWith('PUR') ||
+      String(inv.billNo || '').startsWith('PUR') ||
+      String(inv.billNo || '').startsWith('BILL');
 
-    // Calculate Receivables (total unpaid balance owed TO us by customers)
-    const invoiceReceivables = allInvoices.reduce((sum, inv) => {
-      if (inv.isDeleted || inv.status === 'cancelled' || inv.status === 'paid') return sum;
-      if (!isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod)) return sum;
-      
-      const total = inv.grandTotal || inv.total || 0;
-      const paid = inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0);
-      const balance = inv.balance !== undefined ? inv.balance : Math.max(0, total - paid);
-      return sum + Math.max(0, balance);
+    const salesInvoices = allInvoices.filter(inv => !inv.isDeleted && inv.status !== 'cancelled' && !isPurchaseInv(inv));
+    const invPurchases = allInvoices.filter(inv => !inv.isDeleted && inv.status !== 'cancelled' && isPurchaseInv(inv));
+
+    // Combine purchase invoices from both allPurchaseInvoices and any purchase in allInvoices (deduped)
+    const purchaseMap = new Map();
+    allPurchaseInvoices.forEach(p => {
+      if (!p.isDeleted && p.status !== 'cancelled') {
+        const key = p._id || p.id || p.billNo || p.invoiceNo;
+        if (key) purchaseMap.set(key, p);
+      }
+    });
+    invPurchases.forEach(p => {
+      const key = p._id || p.id || p.billNo || p.invoiceNo || p.invoiceNumber;
+      if (key && !purchaseMap.has(key)) purchaseMap.set(key, p);
+    });
+    const combinedPurchases = Array.from(purchaseMap.values());
+
+    const filteredInvoices = salesInvoices.filter(inv => isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod));
+    const filteredPurchases = combinedPurchases.filter(inv => isDateInPeriod(inv.createdAt || inv.billDate || inv.invoiceDate, selectedPeriod));
+
+    const isCreditMethod = (method: string) => {
+      const m = String(method || '').trim().toLowerCase();
+      return m === 'credit';
+    };
+
+    const getInvBalance = (inv: any) => {
+      const isCredit = isCreditMethod(inv.paymentMethod || inv.saleType);
+      const total = Number(inv.grandTotal || inv.total || 0);
+      const paid = Number(inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0));
+
+      // If credit sale with no payment recorded, full total is pending balance
+      if (isCredit && paid === 0 && total > 0) {
+        return total;
+      }
+
+      if (inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance))) {
+        const b = Number(inv.balance);
+        if (isCredit && paid === 0 && b === 0 && total > 0) return total;
+        if (paid > 0) return Math.max(0, total - paid);
+        return Math.max(0, b);
+      }
+      if (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue))) {
+        const b = Number(inv.balanceDue);
+        if (isCredit && paid === 0 && b === 0 && total > 0) return total;
+        if (paid > 0) return Math.max(0, total - paid);
+        return Math.max(0, b);
+      }
+      return Math.max(0, total - paid);
+    };
+
+    // Calculate Receivables (strictly open unpaid customer balance / "vara vendiya mithi amount")
+    // When product is sold on credit, that amount comes. When half paid, remaining balance ("mithi amount") comes.
+    // When fully paid or cash sale, balance is 0.
+    const getPendingReceivable = (inv: any) => {
+      const isCredit = isCreditMethod(inv.paymentMethod || inv.saleType);
+      const total = Number(inv.grandTotal || inv.total || 0);
+      const paid = Number(inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0));
+      const bal = getInvBalance(inv);
+
+      // If marked paid and not credit with remaining balance, or fully paid:
+      if (!isCredit && (inv.status === 'paid' || inv.paymentStatus === 'paid') && bal <= 0) return 0;
+      if (bal <= 0 && paid >= total && total > 0) return 0;
+
+      // If credit sale with no payment recorded, full total is pending
+      if (isCredit && paid === 0) return total;
+
+      // If partially paid (e.g. half paid), return remaining unpaid balance (mithi amount)
+      return Math.max(0, bal);
+    };
+
+    const periodInvoiceReceivables = filteredInvoices.reduce((sum, inv) => {
+      return sum + getPendingReceivable(inv);
     }, 0);
+
+    const allOpenInvoiceReceivables = salesInvoices.reduce((sum, inv) => {
+      return sum + getPendingReceivable(inv);
+    }, 0);
+
+    const invoiceReceivables = allOpenInvoiceReceivables > 0 
+      ? allOpenInvoiceReceivables 
+      : periodInvoiceReceivables;
 
     // Calculate Payables (total unpaid balance WE owe to suppliers)
-    const purchasePayables = allPurchaseInvoices.reduce((sum, inv) => {
-      if (inv.isDeleted || inv.status === 'cancelled') return sum;
-      if (!isDateInPeriod(inv.createdAt || inv.billDate, selectedPeriod)) return sum;
-
-      const total = inv.total || 0;
-      const paid = inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0);
-      const balance = inv.balance !== undefined ? inv.balance : Math.max(0, total - paid);
-      return sum + Math.max(0, balance);
+    // 1. In-period open purchase bills
+    const periodPurchasePayables = filteredPurchases.reduce((sum, inv) => {
+      if (inv.status === 'paid') return sum;
+      return sum + getInvBalance(inv);
     }, 0);
 
+    // 2. All open purchase bills across all time (balance sheet liability)
+    const allOpenPurchasePayables = combinedPurchases.reduce((sum, inv) => {
+      if (inv.status === 'paid') return sum;
+      return sum + getInvBalance(inv);
+    }, 0);
+
+    const purchasePayables = periodPurchasePayables > 0 ? periodPurchasePayables : allOpenPurchasePayables;
+
     const revenue = filteredInvoices.reduce((sum, inv) => sum + (inv.grandTotal || inv.total || 0), 0);
-    const purchaseExpenses = filteredPurchases.reduce((sum, inv) => sum + (inv.total || 0), 0);
+    const purchaseExpenses = filteredPurchases.reduce((sum, inv) => sum + (inv.total || inv.grandTotal || 0), 0);
+    const allPurchaseExpenses = combinedPurchases.reduce((sum, inv) => sum + (inv.total || inv.grandTotal || 0), 0);
 
     const selectedPeriodBookkeeping = allBookkeepingEntries.filter(entry => !entry.isDeleted && isDateInPeriod(entry.date, selectedPeriod));
     const bkIncome = selectedPeriodBookkeeping.reduce((sum, entry) => entry.type === "income" ? sum + toNumber(entry.amount) : sum, 0);
     const bkExpense = selectedPeriodBookkeeping.reduce((sum, entry) => entry.type === "expense" ? sum + toNumber(entry.amount) : sum, 0);
 
+    const allBkIncome = allBookkeepingEntries.filter(entry => !entry.isDeleted).reduce((sum, entry) => entry.type === "income" ? sum + toNumber(entry.amount) : sum, 0);
+    const allBkExpense = allBookkeepingEntries.filter(entry => !entry.isDeleted).reduce((sum, entry) => entry.type === "expense" ? sum + toNumber(entry.amount) : sum, 0);
+
+    // Total Receivables: STRICTLY pending / outstanding amount to be received ("vara vendiya amount")
+    // If all invoices are paid, it is ₹0.00. Never fall back to total sales revenue or bookkeeping income!
     const calcReceivables = invoiceReceivables > 0 
       ? invoiceReceivables 
-      : ((cfGen?.cashFlow?.receivables > 0) ? cfGen.cashFlow.receivables : bkIncome);
+      : (salesInvoices.length === 0 && cfGen?.cashFlow?.receivables > 0 ? cfGen.cashFlow.receivables : 0);
 
-    // Payables are open supplier-bill balances only.
-    const calcPayables = purchasePayables;
+    const calcPayables = purchasePayables > 0
+      ? purchasePayables
+      : ((cfGen?.cashFlow?.payables && cfGen.cashFlow.payables > 0)
+          ? cfGen.cashFlow.payables
+          : (purchaseExpenses > 0
+              ? purchaseExpenses
+              : (bkExpense > 0
+                  ? bkExpense
+                  : (allPurchaseExpenses > 0
+                      ? allPurchaseExpenses
+                      : allBkExpense))));
 
     const netProf = plGen?.netProfit !== undefined ? plGen.netProfit : (bkIncome - bkExpense);
 
@@ -522,19 +656,22 @@ const Dashboard = () => {
       netProfitMargin: revenue > 0 ? ((netProf / revenue) * 100) : 0
     });
 
-    const selectedPeriodInvoices = allInvoices.filter(inv => !inv.isDeleted && isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod));
+    const selectedPeriodInvoices = salesInvoices.filter(inv => isDateInPeriod(inv.invoiceDate || inv.createdAt, selectedPeriod));
     const mappedInvoices = selectedPeriodInvoices.slice(0, 5).map((inv: any) => {
       let statusColor = "bg-white/70 text-slate-600 border border-white";
-      const paidVal = inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0);
       const totalVal = inv.grandTotal || inv.total || 0;
-      const balVal = inv.balance !== undefined ? inv.balance : Math.max(0, totalVal - paidVal);
+      const balVal = getPendingReceivable(inv);
+      const isCredit = isCreditMethod(inv.paymentMethod || inv.saleType);
 
       let statusStr = inv.status || "draft";
-      if (balVal <= 0 && totalVal > 0) statusStr = "paid";
-      else if (inv.saleType === "credit" || balVal > 0) statusStr = "due";
+      if (balVal <= 0 && totalVal > 0 && (!isCredit || (inv.paid || inv.amountPaid) >= totalVal)) {
+        statusStr = "paid";
+      } else if (isCredit || balVal > 0) {
+        statusStr = "due";
+      }
 
       if (statusStr === "paid") statusColor = "bg-[#e6f8ef]/90 text-[#00b365] border border-[#00b365]/30";
-      else if (statusStr === "due" || statusStr === "sent" || statusStr === "viewed") statusColor = "bg-[#fde9e8]/90 text-[#f0483e] border border-[#f0483e]/30";
+      else if (statusStr === "due" || statusStr === "sent" || statusStr === "viewed" || statusStr === "partial") statusColor = "bg-[#fde9e8]/90 text-[#f0483e] border border-[#f0483e]/30";
       else if (statusStr === "overdue") statusColor = "bg-[#fde9e8]/90 text-[#f0483e] border border-[#f0483e]/30";
       else if (statusStr === "draft") statusColor = "bg-[#fff8e1]/90 text-[#f57c00] border border-[#f57c00]/30";
 

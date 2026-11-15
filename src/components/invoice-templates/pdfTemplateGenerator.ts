@@ -453,6 +453,10 @@ export const generateTemplateInvoicePDF = (
     drawTotalRow("Amount Paid:", `INR ${data.paidAmount.toFixed(2)}`);
   }
   drawTotalRow("Balance Due:", `INR ${data.balanceDue.toFixed(2)}`, true);
+  const formattedMethod = data.paymentMethod
+    ? (data.paymentMethod.toUpperCase() === 'UPI' ? 'UPI' : (data.paymentMethod.charAt(0).toUpperCase() + data.paymentMethod.slice(1).replace(/_/g, ' ')))
+    : 'Cash';
+  drawTotalRow("Payment Method:", formattedMethod);
   currentY += 4;
 
   // Banking & Payment Details
@@ -473,7 +477,7 @@ export const generateTemplateInvoicePDF = (
   doc.setFont(fontFamily, 'normal');
   doc.setFontSize(8);
   doc.setTextColor(15, 23, 42);
-  const bankDetails = `Bank: ${data.bankName || 'HDFC Bank'}   |   A/C: ${data.accountNumber || 'XXXXXXXX'} (${data.accountType || 'Current'})   |   IFSC: ${data.ifscCode || 'HDFC0001234'}   |   Mode: ${data.paymentMethod || 'Wire'}`;
+  const bankDetails = `Bank: ${data.bankName || 'HDFC Bank'}   |   A/C: ${data.accountNumber || 'XXXXXXXX'} (${data.accountType || 'Current'})   |   IFSC: ${data.ifscCode || 'HDFC0001234'}   |   Mode: ${formattedMethod}`;
   doc.text(bankDetails, leftMargin + 3, currentY + 10.5);
 
   currentY += 22;

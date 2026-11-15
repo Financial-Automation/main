@@ -6,6 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
+import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import Payment from "../models/Payment.js";
 import { validateAndRecalculateInvoice } from "../utils/invoiceCalculator.js";
 
@@ -147,7 +148,7 @@ const invoiceSchema = new mongoose.Schema({
   // System Fields
   status: {
     type: String,
-    enum: ['draft', 'sent', 'viewed', 'paid', 'overdue', 'cancelled'],
+    enum: ['draft', 'sent', 'viewed', 'partial', 'paid', 'overdue', 'cancelled'],
     default: 'draft'
   },
   createdBy: { type: String },
@@ -190,6 +191,19 @@ const getUserFilter = (req) => {
   };
 };
 
+const buildInvoiceQuery = (idParam, req, extraFilter = {}) => {
+  const idQuery = getInvoiceIdFilter(idParam);
+  const userFilter = getUserFilter(req);
+  const conditions = [idQuery];
+  if (userFilter && Object.keys(userFilter).length > 0) {
+    conditions.push(userFilter);
+  }
+  if (extraFilter && Object.keys(extraFilter).length > 0) {
+    conditions.push(extraFilter);
+  }
+  return conditions.length === 1 ? conditions[0] : { $and: conditions };
+};
+
 // ✅ 0. Public Invoice View (no auth required — for WhatsApp/email sharing links)
 router.get("/public/:id", async (req, res) => {
   try {
@@ -229,7 +243,9 @@ router.get("/public/:id", async (req, res) => {
 // ✅ 1. Create New Invoice
 router.post("/create", verifyTokenOptional, async (req, res) => {
   try {
-    console.log("📥 Received Invoice Data:", JSON.stringify(req.body, null, 2));
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`📥 Creating invoice for customer: ${req.body?.customerName || 'Cash Customer'}`);
+    }
     const invoiceData = req.body;
 
     if (req.user && req.user.id !== "000000000000000000000000") {
@@ -314,8 +330,9 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
 
     // If initial payment was recorded at creation, persist Payment audit record
     const validatedPaid = validatedData.amountPaid || 0;
+    let initialPayment = null;
     if (validatedPaid > 0) {
-      const initialPayment = new Payment({
+      initialPayment = new Payment({
         userId: newInvoice.userId || req.user?.id,
         invoiceId: newInvoice._id,
         paymentNumber: `PMT-${newInvoice.invoiceNumber}-01`,
@@ -330,18 +347,40 @@ router.post("/create", verifyTokenOptional, async (req, res) => {
       await initialPayment.save();
     }
 
-    // Automatically generate Bookkeeping Entry for sales invoice
+    // Automatically generate Bookkeeping Entry for sales invoice payment
+    // Credit pota or pay panatha amount bookkeeping-la kata kudathu.
+    // Only actual paid/collected amount is recorded as income in bookkeeping.
     const invUserId = newInvoice.userId || req.user?.id;
     if (invUserId && invUserId !== "000000000000000000000000") {
-      await upsertAutomatedBookkeepingEntry({
-        userId: invUserId,
-        date: newInvoice.invoiceDate || new Date(),
-        description: `Sales Invoice ${newInvoice.invoiceNumber} to ${newInvoice.customerName}`,
-        category: "Sales",
-        amount: newInvoice.grandTotal,
-        type: "income",
-        referenceId: `invoice_${newInvoice._id}`
-      });
+      const isCredit = String(newInvoice.paymentMethod || newInvoice.saleType || "").trim().toLowerCase() === "credit";
+      const paidIncome = Number(newInvoice.amountPaid !== undefined ? newInvoice.amountPaid : (newInvoice.paid || 0));
+
+      if (paidIncome > 0 && initialPayment) {
+        await upsertAutomatedBookkeepingEntry({
+          userId: invUserId,
+          date: newInvoice.invoiceDate || new Date(),
+          description: `Sales Invoice ${newInvoice.invoiceNumber}${isCredit ? " (Partial Payment)" : ""} to ${newInvoice.customerName}`,
+          category: "Sales",
+          amount: paidIncome,
+          type: "income",
+          referenceId: `payment_${initialPayment._id}`
+        });
+      } else if (paidIncome > 0) {
+        await upsertAutomatedBookkeepingEntry({
+          userId: invUserId,
+          date: newInvoice.invoiceDate || new Date(),
+          description: `Sales Invoice ${newInvoice.invoiceNumber}${isCredit ? " (Partial Payment)" : ""} to ${newInvoice.customerName}`,
+          category: "Sales",
+          amount: paidIncome,
+          type: "income",
+          referenceId: `invoice_${newInvoice._id}`
+        });
+      } else {
+        await removeAutomatedBookkeepingEntry({
+          userId: invUserId,
+          referenceId: `invoice_${newInvoice._id}`
+        });
+      }
     }
 
     res.status(201).json({
@@ -556,13 +595,10 @@ router.get("/search", verifyTokenOptional, async (req, res) => {
 // ✅ 3. Get Single Invoice by ID
 router.get("/:id", verifyTokenOptional, async (req, res) => {
   try {
-    const userFilter = getUserFilter(req);
-
-    const invoice = await Invoice.findOne({
-      ...getInvoiceIdFilter(req.params.id),
-      isDeleted: false,
-      ...userFilter
-    });
+    let invoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false }));
+    if (!invoice) {
+      invoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false });
+    }
 
     if (!invoice) {
       return res.status(404).json({
@@ -613,7 +649,11 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
     const updateData = req.body;
     const userFilter = getUserFilter(req);
 
-    const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
+    // Find existing invoice first
+    let currentInvoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false }));
+    if (!currentInvoice) {
+      currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false });
+    }
     if (!currentInvoice) {
       return res.status(404).json({ message: "Invoice not found" });
     }
@@ -686,7 +726,7 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
     }
 
     const updatedInvoice = await Invoice.findOneAndUpdate(
-      { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
+      { _id: currentInvoice._id },
       updateData,
       { new: true, runValidators: true }
     );
@@ -698,9 +738,14 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
     }
 
     // Sync automated Bookkeeping Entry
+    // Credit pota or pay panatha amount bookkeeping-la kata kudathu.
+    // Only actual paid/collected amount is recorded as income in bookkeeping.
     const invUserId = updatedInvoice.userId || req.user?.id;
     if (invUserId && invUserId !== "000000000000000000000000") {
-      if (updatedInvoice.status === 'cancelled' || updatedInvoice.isDeleted) {
+      const isCredit = String(updatedInvoice.paymentMethod || updatedInvoice.saleType || "").trim().toLowerCase() === "credit";
+      const paidIncome = Number(updatedInvoice.amountPaid !== undefined ? updatedInvoice.amountPaid : (updatedInvoice.paid || 0));
+
+      if (updatedInvoice.status === 'cancelled' || updatedInvoice.isDeleted || paidIncome <= 0) {
         await removeAutomatedBookkeepingEntry({
           userId: invUserId,
           referenceId: `invoice_${updatedInvoice._id}`
@@ -709,9 +754,9 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
         await upsertAutomatedBookkeepingEntry({
           userId: invUserId,
           date: updatedInvoice.invoiceDate || new Date(),
-          description: `Sales Invoice ${updatedInvoice.invoiceNumber} to ${updatedInvoice.customerName}`,
+          description: `Sales Invoice ${updatedInvoice.invoiceNumber}${isCredit ? " (Partial Payment)" : ""} to ${updatedInvoice.customerName}`,
           category: "Sales",
-          amount: updatedInvoice.grandTotal,
+          amount: paidIncome,
           type: "income",
           referenceId: `invoice_${updatedInvoice._id}`
         });
@@ -731,38 +776,106 @@ router.put("/:id", verifyTokenOptional, async (req, res) => {
   }
 });
 
-// ✅ 6. Delete Invoice (Soft Delete)
+// ✅ 6. Delete Invoice (Hard Delete & Cascade to Bookkeeping/Payments)
 router.delete("/:id", verifyTokenOptional, async (req, res) => {
   try {
-    const userFilter = getUserFilter(req);
+    let invoiceToDelete = await Invoice.findOne(buildInvoiceQuery(req.params.id, req));
 
-    const deletedInvoice = await Invoice.findOneAndUpdate(
-      { ...getInvoiceIdFilter(req.params.id), ...userFilter },
-      {
-        isDeleted: true,
-        status: 'cancelled',
-        updatedAt: new Date()
-      },
-      { new: true }
-    );
+    if (!invoiceToDelete) {
+      invoiceToDelete = await Invoice.findOne(getInvoiceIdFilter(req.params.id));
+    }
 
-    if (!deletedInvoice) {
+    if (!invoiceToDelete) {
       return res.status(404).json({
         message: "Invoice not found"
       });
     }
 
-    // Remove automated Bookkeeping Entry
-    const invUserId = deletedInvoice.userId || req.user?.id;
-    if (invUserId) {
-      await removeAutomatedBookkeepingEntry({
-        userId: invUserId,
-        referenceId: `invoice_${deletedInvoice._id}`
-      });
+    // Delete the invoice permanently
+    await Invoice.deleteOne({ _id: invoiceToDelete._id });
+
+    // 1. Remove automated Bookkeeping Entry associated with this invoice and its payments
+    const invUserId = invoiceToDelete.userId || req.user?.id;
+    const invoicePayments = await Payment.find({
+      $or: [
+        { invoiceId: invoiceToDelete._id },
+        { invoiceNumber: invoiceToDelete.invoiceNumber }
+      ]
+    });
+    const paymentRefIds = invoicePayments.map(p => `payment_${p._id}`);
+
+    const refIds = [
+      `invoice_${invoiceToDelete._id}`,
+      `invoice_${invoiceToDelete.invoiceNumber}`,
+      invoiceToDelete.id ? `invoice_${invoiceToDelete.id}` : null,
+      ...paymentRefIds
+    ].filter(Boolean);
+
+    await BookkeepingEntry.deleteMany({
+      $or: [
+        { referenceId: { $in: refIds } },
+        { description: new RegExp(`Sales Invoice ${invoiceToDelete.invoiceNumber}\\b`, 'i') }
+      ]
+    });
+
+    // 2. Remove Payments recorded against this invoice
+    await Payment.deleteMany({
+      $or: [
+        { invoiceId: invoiceToDelete._id },
+        { invoiceNumber: invoiceToDelete.invoiceNumber }
+      ]
+    });
+
+    // 3. Cascade restore Inventory stock for all items in this invoice
+    try {
+      const InventoryItem = mongoose.models.InventoryItem;
+      if (InventoryItem && Array.isArray(invoiceToDelete.items)) {
+        for (const item of invoiceToDelete.items) {
+          const qty = Number(item.quantity) || 0;
+          if (qty <= 0) continue;
+
+          const orConditions = [];
+          if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
+            orConditions.push({ _id: new mongoose.Types.ObjectId(item.productId) });
+          }
+          if (item.inventoryItemId && mongoose.Types.ObjectId.isValid(item.inventoryItemId)) {
+            orConditions.push({ _id: new mongoose.Types.ObjectId(item.inventoryItemId) });
+          }
+          if (item.sku || item.itemCode) {
+            orConditions.push({ sku: item.sku || item.itemCode });
+          }
+          const prodName = item.productName || item.itemName;
+          if (prodName) {
+            orConditions.push({ itemName: new RegExp(`^${prodName.trim()}$`, 'i') });
+          }
+
+          if (orConditions.length > 0) {
+            const invQuery = { $or: orConditions };
+            if (invUserId && invUserId !== "000000000000000000000000") {
+              invQuery.userId = mongoose.Types.ObjectId.isValid(invUserId)
+                ? { $in: [new mongoose.Types.ObjectId(invUserId), invUserId] }
+                : invUserId;
+            }
+
+            const invDoc = await InventoryItem.findOne(invQuery);
+            if (invDoc) {
+              invDoc.quantity = (invDoc.quantity || 0) + qty;
+              invDoc.lastUpdated = new Date();
+              await invDoc.save();
+            }
+          }
+        }
+      }
+    } catch (invErr) {
+      console.warn("Failed to restore inventory stock on delete:", invErr.message);
     }
 
     res.json({
-      message: "Invoice deleted successfully!"
+      message: "Invoice deleted successfully!",
+      deletedInvoice: {
+        _id: invoiceToDelete._id,
+        invoiceNumber: invoiceToDelete.invoiceNumber
+      }
     });
   } catch (error) {
     console.error("Error deleting invoice:", error);
@@ -786,20 +899,20 @@ router.patch("/:id/status", verifyTokenOptional, async (req, res) => {
       });
     }
 
-    const updatedInvoice = await Invoice.findOneAndUpdate(
-      { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
-      {
-        status,
-        updatedAt: new Date()
-      },
-      { new: true }
-    );
+    let targetInvoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false }));
+    if (!targetInvoice) {
+      targetInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false });
+    }
 
-    if (!updatedInvoice) {
+    if (!targetInvoice) {
       return res.status(404).json({
         message: "Invoice not found"
       });
     }
+
+    targetInvoice.status = status;
+    targetInvoice.updatedAt = new Date();
+    const updatedInvoice = await targetInvoice.save();
 
     res.json({
       message: "Invoice status updated successfully!",
@@ -834,17 +947,10 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
 
     const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || referenceNumber || transactionReference || "").trim();
 
-    const userIdStr = req.user?._id ? req.user._id.toString() : req.user?.id;
-    const userIdObj = userIdStr && mongoose.Types.ObjectId.isValid(userIdStr) ? new mongoose.Types.ObjectId(userIdStr) : null;
-    const userFilter = userIdObj ? {
-      $or: [
-        { userId: userIdObj },
-        { userId: userIdStr },
-        { createdBy: userIdStr }
-      ]
-    } : {};
-
-    const invoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
+    let invoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false }));
+    if (!invoice) {
+      invoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false });
+    }
     if (!invoice) {
       return res.status(404).json({ message: "Invoice not found" });
     }
@@ -865,52 +971,80 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
       }
     }
 
-    // 2. Parse and validate payment increment amount
+    // 2. Handle Credit (Unpaid) or parse payment amount
+    const isCredit = Boolean(req.body.isCredit || String(paymentMethod || '').toLowerCase() === 'credit');
+    const grandTotal = Math.round((Number(invoice.grandTotal) || 0) * 100) / 100;
+    const currentPaid = Math.round((Number(invoice.amountPaid) || 0) * 100) / 100;
+
     let payAmt = 0;
     if (amount !== undefined && amount !== null && !isNaN(parseFloat(amount))) {
       payAmt = parseFloat(amount);
     } else if (amountPaid !== undefined && amountPaid !== null && !isNaN(parseFloat(amountPaid))) {
-      const parsedAmountPaid = parseFloat(amountPaid);
-      // If amountPaid was provided as the cumulative paid amount:
-      if (parsedAmountPaid > (invoice.amountPaid || 0)) {
-        payAmt = parsedAmountPaid - (invoice.amountPaid || 0);
-      } else {
-        payAmt = parsedAmountPaid;
-      }
+      payAmt = parseFloat(amountPaid);
     }
-
     payAmt = Math.round(payAmt * 100) / 100;
+
+    // Only do a zero-payment credit reset if amount is explicitly 0 or not provided
+    if (isCredit && payAmt <= 0) {
+      invoice.amountPaid = 0;
+      invoice.balanceDue = grandTotal;
+      invoice.paymentStatus = 'pending';
+      invoice.status = 'sent';
+      invoice.paymentMethod = 'credit';
+      if (paymentDate) invoice.invoiceDate = new Date(paymentDate);
+      invoice.updatedAt = new Date();
+      await invoice.save();
+
+      if (invoice.userId && invoice.userId !== "000000000000000000000000") {
+        await removeAutomatedBookkeepingEntry({
+          userId: invoice.userId,
+          referenceId: `invoice_${invoice._id}`
+        });
+      }
+
+      return res.json({
+        message: "Invoice marked as Credit (Unpaid)",
+        invoice
+      });
+    }
 
     if (isNaN(payAmt) || payAmt <= 0) {
       return res.status(400).json({ message: "Invalid payment amount. Amount must be greater than 0." });
     }
 
-    const grandTotal = Math.round((Number(invoice.grandTotal) || 0) * 100) / 100;
-    const currentPaid = Math.round((Number(invoice.amountPaid) || 0) * 100) / 100;
     const currentBalance = Math.max(0, Math.round((grandTotal - currentPaid) * 100) / 100);
 
-    if (currentBalance <= 0) {
-      return res.status(400).json({
-        message: "Invoice is already fully paid. Cannot accept further payment.",
-        grandTotal,
-        amountPaid: currentPaid,
-        balanceDue: 0
-      });
+    if (req.body.isCumulative) {
+      if (payAmt > grandTotal + 0.01) {
+        return res.status(400).json({
+          message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed invoice total (₹${grandTotal.toFixed(2)}).`,
+          grandTotal,
+          amountPaid: currentPaid,
+          balanceDue: currentBalance
+        });
+      }
+    } else {
+      if (payAmt > currentBalance + 0.01) {
+        return res.status(400).json({
+          message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`,
+          grandTotal,
+          amountPaid: currentPaid,
+          balanceDue: currentBalance
+        });
+      }
     }
 
-    // Payment cannot exceed remaining balance
-    if (payAmt > currentBalance + 0.01) {
-      return res.status(400).json({
-        message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`,
-        grandTotal,
-        amountPaid: currentPaid,
-        balanceDue: currentBalance
-      });
+    // Incremental payment towards remaining balance
+    let newAmountPaid;
+    if (req.body.isCumulative) {
+      newAmountPaid = Math.min(grandTotal, payAmt);
+    } else {
+      newAmountPaid = Math.min(grandTotal, Math.round((currentPaid + payAmt) * 100) / 100);
     }
 
-    const newAmountPaid = Math.min(grandTotal, Math.round((currentPaid + payAmt) * 100) / 100);
     const newBalanceDue = Math.max(0, Math.round((grandTotal - newAmountPaid) * 100) / 100);
-    const newStatus = newBalanceDue <= 0 ? 'paid' : 'partial';
+    const newStatus = newBalanceDue <= 0 ? 'paid' : 'sent';
+    const newPaymentStatus = newBalanceDue <= 0 ? 'paid' : (newAmountPaid > 0 ? 'partial' : 'pending');
 
     // 3. Persist Payment audit record
     const pCount = await Payment.countDocuments({ invoiceId: invoice._id });
@@ -932,7 +1066,7 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
     // 4. Update Invoice
     invoice.amountPaid = newAmountPaid;
     invoice.balanceDue = newBalanceDue;
-    invoice.paymentStatus = paymentStatus || newStatus;
+    invoice.paymentStatus = paymentStatus || newPaymentStatus;
     invoice.status = newStatus;
     if (paymentMethod) invoice.paymentMethod = paymentMethod;
     if (paymentDate) invoice.paymentDate = new Date(paymentDate);
@@ -959,6 +1093,31 @@ router.all("/:id/payment", verifyTokenOptional, async (req, res) => {
       }
     } catch (ledgerErr) {
       console.warn("Ledger sync notice:", ledgerErr.message);
+    }
+
+    // 6. Sync automated Bookkeeping Entry with actual collected cash for THIS payment installment
+    try {
+      const invUserId = invoice.userId || req.user?.id;
+      if (invUserId && invUserId !== "000000000000000000000000") {
+        // Remove legacy cumulative invoice-level entry if it existed
+        await BookkeepingEntry.deleteMany({
+          userId: invUserId,
+          referenceId: `invoice_${invoice._id}`
+        });
+
+        // Upsert a dedicated bookkeeping entry for THIS payment installment
+        await upsertAutomatedBookkeepingEntry({
+          userId: invUserId,
+          date: paymentDate ? new Date(paymentDate) : new Date(),
+          description: `Sales Invoice ${invoice.invoiceNumber} to ${invoice.customerName}`,
+          category: "Sales",
+          amount: payAmt,
+          type: "income",
+          referenceId: `payment_${paymentRecord._id}`
+        });
+      }
+    } catch (bkErr) {
+      console.warn("Bookkeeping payment sync notice:", bkErr.message);
     }
 
     res.json({

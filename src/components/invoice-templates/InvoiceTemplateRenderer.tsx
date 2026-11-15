@@ -560,10 +560,14 @@ export const InvoiceTemplateRenderer: React.FC<InvoiceTemplateRendererProps> = (
                     <span className="font-black text-rose-600 font-mono">₹{data.balanceDue.toFixed(2)}</span>
                   </div>
                 )}
-                {config.payment?.showPaymentMethod && (
+                {config.payment?.showPaymentMethod !== false && (
                   <div>
                     <span className="text-slate-500 block">Payment Method</span>
-                    <span className="text-slate-700 capitalize font-medium">{data.paymentMethod || 'Cash'}</span>
+                    <span className="text-slate-700 font-medium">
+                      {data.paymentMethod 
+                        ? (data.paymentMethod.toUpperCase() === 'UPI' ? 'UPI' : (data.paymentMethod.charAt(0).toUpperCase() + data.paymentMethod.slice(1).replace(/_/g, ' ')))
+                        : 'Cash'}
+                    </span>
                   </div>
                 )}
               </div>

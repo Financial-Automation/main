@@ -828,6 +828,19 @@ const Inventory = () => {
         };
     };
 
+    const getPurchaseInvoiceBalance = (inv: any) => {
+        if (!inv) return 0;
+        const total = Number(inv.total || inv.grandTotal || 0);
+        const paid = Number(inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0));
+        if (inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance))) {
+            return Math.max(0, Number(inv.balance));
+        }
+        if (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue))) {
+            return Math.max(0, Number(inv.balanceDue));
+        }
+        return Math.max(0, total - paid);
+    };
+
     const calculatePurchaseTotals = (items: PurchaseItem[]) => {
         const subtotal = items.reduce((sum, i) => sum + (i.quantity * i.pricePerUnit) - i.discountAmount, 0);
         const totalSgst = items.reduce((sum, i) => sum + i.sgstAmount, 0);
@@ -3009,7 +3022,7 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                         <div className="bg-white/5 border border-amber-400/10 rounded-2xl p-4">
                                             <p className="text-xs text-amber-300/70 uppercase font-medium">Total Balance Due</p>
                                             <p className="text-2xl font-bold text-rose-400">
-                                                ₹{purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0).toFixed(2)}
+                                                ₹{purchaseInvoices.reduce((sum, inv) => sum + getPurchaseInvoiceBalance(inv), 0).toFixed(2)}
                                             </p>
                                         </div>
                                     </div>
@@ -3089,8 +3102,8 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                                             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between lg:justify-end gap-4 border-t lg:border-t-0 border-white/10 pt-3 lg:pt-0">
                                                                 <div className="text-left sm:text-right">
                                                                     <p className="text-xl font-bold text-emerald-400">₹{(inv.total || 0).toFixed(2)}</p>
-                                                                    {(inv.balance || 0) > 0 ? (
-                                                                        <p className="text-xs text-rose-400 font-semibold">Due: ₹{(inv.balance || 0).toFixed(2)}</p>
+                                                                    {getPurchaseInvoiceBalance(inv) > 0 ? (
+                                                                        <p className="text-xs text-rose-400 font-semibold">Due: ₹{getPurchaseInvoiceBalance(inv).toFixed(2)}</p>
                                                                     ) : (
                                                                         <p className="text-xs text-emerald-400 font-medium">Fully Paid</p>
                                                                     )}
@@ -3108,20 +3121,20 @@ Balance: ${purchaseInvoice.balance.toFixed(2)}`;
                                                                             Continue Draft
                                                                         </Button>
                                                                     ) : (
-                                                                        (inv.balance || 0) > 0 && (
+                                                                        getPurchaseInvoiceBalance(inv) > 0 && (
                                                                             <Button
-                                                                                size="sm"
-                                                                                variant="outline"
-                                                                                onClick={() => {
-                                                                                    setSelectedPaymentInvoiceId(inv._id);
-                                                                                    setPaymentForm(prev => ({ ...prev, amount: inv.balance || 0 }));
-                                                                                    setIsRecordPaymentOpen(true);
-                                                                                }}
-                                                                                className="bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-100 text-xs rounded-xl flex items-center px-3 py-1.5 font-medium transition-colors"
-                                                                            >
-                                                                                <CreditCard className="h-3.5 w-3.5 mr-1.5" />
-                                                                                Pay
-                                                                            </Button>
+                                                                            size="sm"
+                                                                            variant="outline"
+                                                                            onClick={() => {
+                                                                                setSelectedPaymentInvoiceId(inv._id);
+                                                                                setPaymentForm(prev => ({ ...prev, amount: getPurchaseInvoiceBalance(inv) }));
+                                                                                setIsRecordPaymentOpen(true);
+                                                                            }}
+                                                                            className="bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-100 text-xs rounded-xl flex items-center px-3 py-1.5 font-medium transition-colors"
+                                                                        >
+                                                                            <CreditCard className="h-3.5 w-3.5 mr-1.5" />
+                                                                            Pay
+                                                                        </Button>
                                                                         )
                                                                     )}
 

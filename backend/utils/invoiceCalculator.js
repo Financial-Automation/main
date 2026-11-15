@@ -134,7 +134,8 @@ export const calculateInvoiceTotals = ({
   packagingCharges = 0,
   freightCharges = 0,
   adjustment = 0,
-  amountPaid = 0
+  amountPaid = undefined,
+  isCredit = false
 }) => {
   const isInterState = determineIsInterState(placeOfSupply, sellerState);
 
@@ -181,7 +182,12 @@ export const calculateInvoiceTotals = ({
   // Grand Total = Total Taxable Amount (subtotal) + Total GST (taxAmount) + Other Charges
   const grandTotal = roundDec(subtotal + taxAmount + otherCharges);
 
-  const validatedPaid = roundDec(Math.min(grandTotal, Math.max(0, Number(amountPaid) || 0)));
+  let validatedPaid = 0;
+  if (amountPaid !== undefined && amountPaid !== null && !isNaN(Number(amountPaid))) {
+    validatedPaid = roundDec(Math.min(grandTotal, Math.max(0, Number(amountPaid))));
+  } else if (!isCredit && grandTotal > 0) {
+    validatedPaid = grandTotal;
+  }
   const balanceDue = roundDec(Math.max(0, grandTotal - validatedPaid));
 
   let paymentStatus = "pending";
@@ -227,6 +233,13 @@ export const calculateInvoiceTotals = ({
 export const validateAndRecalculateInvoice = (invoiceData, sellerState = "Tamil Nadu") => {
   const placeOfSupply = invoiceData.stateOfSupply || invoiceData.placeOfSupply || invoiceData.customerState || sellerState;
   const effectiveSellerState = invoiceData.businessState || invoiceData.sellerState || sellerState;
+  const method = String(invoiceData.paymentMethod || invoiceData.saleType || "cash").trim().toLowerCase();
+  const isCredit = method === "credit";
+
+  let rawPaid = invoiceData.amountPaid !== undefined ? invoiceData.amountPaid : invoiceData.paid;
+  if (!isCredit && (rawPaid === undefined || rawPaid === null || (Number(rawPaid) === 0 && (Number(invoiceData.balanceDue) === 0 || invoiceData.status === 'paid')))) {
+    rawPaid = undefined;
+  }
 
   const totals = calculateInvoiceTotals({
     items: invoiceData.items || [],
@@ -236,7 +249,8 @@ export const validateAndRecalculateInvoice = (invoiceData, sellerState = "Tamil 
     packagingCharges: invoiceData.packagingCharges,
     freightCharges: invoiceData.freightCharges,
     adjustment: invoiceData.adjustment,
-    amountPaid: invoiceData.amountPaid ?? invoiceData.paid
+    amountPaid: rawPaid,
+    isCredit
   });
 
   return {

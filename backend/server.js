@@ -373,33 +373,8 @@ app.post("/api/signin", async (req, res) => {
       user = await User.findOne({ email: { $regex: new RegExp(`^${escapeRegex(cleanEmail)}$`, 'i') } });
     }
 
-    const isDevOrInMemory = !process.env.PRO_MONGO_URI || process.env.DEV_MODE === "true";
-
     if (!user) {
-      if (isDevOrInMemory) {
-        console.log(`👤 Auto-registering new user on login: ${cleanEmail}`);
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const subscriptionStartDate = new Date();
-        const trialEndDate = new Date(subscriptionStartDate);
-        trialEndDate.setDate(trialEndDate.getDate() + 30);
-
-        user = new User({
-          email: cleanEmail,
-          name: cleanEmail.split("@")[0] || "User",
-          password: hashedPassword,
-          storePassword: hashedPassword,
-          role: role || "admin",
-          subscriptionStatus: "active",
-          subscriptionPlan: "trial",
-          subscriptionAmount: 0,
-          subscriptionStartDate,
-          subscriptionEndDate: trialEndDate,
-          trialEndDate
-        });
-        await user.save();
-      } else {
-        return res.status(400).json({ success: false, message: "Invalid email or password" });
-      }
+      return res.status(400).json({ success: false, message: "Invalid email or password" });
     }
 
     let validPass = false;
@@ -425,26 +400,8 @@ app.post("/api/signin", async (req, res) => {
       }
     }
 
-    // SAFE DEBUG LOGGING (Never log actual password or hash)
-    console.log("🔐 [SIGNIN DEBUG]", {
-      email: cleanEmail,
-      requestedRole: role || null,
-      hasPassword: !!user.password,
-      hasStorePassword: !!user.storePassword,
-      isAdminPass,
-      isStorePass,
-      authenticatedRole
-    });
-
     if (!validPass) {
-      if (isDevOrInMemory) {
-        console.log(`🔑 Updating password for user: ${cleanEmail}`);
-        user.password = await bcrypt.hash(password, 10);
-        await user.save();
-        validPass = true;
-      } else {
-        return res.status(400).json({ success: false, message: "Invalid email or password" });
-      }
+      return res.status(400).json({ success: false, message: "Invalid email or password" });
     }
 
     const secret = process.env.JWT_SECRET || JWT_SECRET;

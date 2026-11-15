@@ -110,8 +110,30 @@ export async function getFinanceMetrics(userId, start, end) {
             invoiceDate: { $lte: endDate }
         });
         salesInvoiceOutstanding = salesInvoices
-            .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
-            .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
+            .filter(inv => {
+                const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+                const isCredit = method === "credit";
+                if (isCredit) return true;
+                return inv.paymentStatus !== "paid" && inv.status !== "paid";
+            })
+            .reduce((sum, inv) => {
+                const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+                const isCredit = method === "credit";
+                const tot = Number(inv.grandTotal || inv.total || 0);
+                const pd = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+                let bal = (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue)))
+                    ? Number(inv.balanceDue)
+                    : ((inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+                        ? Number(inv.balance)
+                        : Math.max(0, tot - pd));
+                if (isCredit && pd === 0 && bal === 0 && tot > 0) {
+                    bal = tot;
+                }
+                if (pd > 0) {
+                    bal = Math.max(0, tot - pd);
+                }
+                return sum + Math.max(0, bal);
+            }, 0);
     }
 
     const PurchaseInvoice = getPurchaseInvoiceModel();
@@ -123,7 +145,15 @@ export async function getFinanceMetrics(userId, start, end) {
             isDeleted: { $ne: true },
             createdAt: { $lte: endDate }
         });
-        purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
+        purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => {
+            if (inv.status === "cancelled" || inv.status === "paid") return sum;
+            const tot = Number(inv.total || 0);
+            const pd = Number(inv.paid || 0);
+            const bal = (inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+                ? Number(inv.balance)
+                : Math.max(0, tot - pd);
+            return sum + Math.max(0, bal);
+        }, 0);
     }
 
     const totalCashInflow = Math.max(0, totalRevenue - salesInvoiceOutstanding);
@@ -206,8 +236,30 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
             invoiceDate: { $lte: endDate }
         });
         accountsReceivable = salesInvoices
-            .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
-            .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
+            .filter(inv => {
+                const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+                const isCredit = method === "credit";
+                if (isCredit) return true;
+                return inv.paymentStatus !== "paid" && inv.status !== "paid";
+            })
+            .reduce((sum, inv) => {
+                const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+                const isCredit = method === "credit";
+                const tot = Number(inv.grandTotal || inv.total || 0);
+                const pd = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+                let bal = (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue)))
+                    ? Number(inv.balanceDue)
+                    : ((inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+                        ? Number(inv.balance)
+                        : Math.max(0, tot - pd));
+                if (isCredit && pd === 0 && bal === 0 && tot > 0) {
+                    bal = tot;
+                }
+                if (pd > 0) {
+                    bal = Math.max(0, tot - pd);
+                }
+                return sum + Math.max(0, bal);
+            }, 0);
     }
 
     const PurchaseInvoice = getPurchaseInvoiceModel();
@@ -218,7 +270,15 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
             isDeleted: { $ne: true },
             createdAt: { $lte: endDate }
         });
-        accountsPayable = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
+        accountsPayable = purchaseInvoices.reduce((sum, inv) => {
+            if (inv.status === "cancelled" || inv.status === "paid") return sum;
+            const tot = Number(inv.total || 0);
+            const pd = Number(inv.paid || 0);
+            const bal = (inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+                ? Number(inv.balance)
+                : Math.max(0, tot - pd);
+            return sum + Math.max(0, bal);
+        }, 0);
     }
 
     // Current Inventory Stock Valuation

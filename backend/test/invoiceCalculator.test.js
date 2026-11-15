@@ -232,3 +232,132 @@ test("Invoice Calculator — validateAndRecalculateInvoice updates all fields ac
   assert.equal(validated.balanceDue, 40000, "Balance due must be 60,000 - 20,000 = 40,000");
   assert.equal(validated.paymentStatus, "partial");
 });
+
+test("Invoice Receivables Logic — Credit sales, partial payments ('mithi amount'), and credit card distinction", () => {
+  const isCreditMethod = (method) => {
+    return String(method || '').trim().toLowerCase() === 'credit';
+  };
+
+  const getPendingReceivable = (inv) => {
+    const isCredit = isCreditMethod(inv.paymentMethod || inv.saleType);
+    const total = Number(inv.grandTotal || inv.total || 0);
+    const paid = Number(inv.paid !== undefined ? inv.paid : (inv.amountPaid || 0));
+    let bal = (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue)))
+      ? Number(inv.balanceDue)
+      : ((inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+        ? Number(inv.balance)
+        : Math.max(0, total - paid));
+
+    if (!isCredit && (inv.status === 'paid' || inv.paymentStatus === 'paid') && bal <= 0) return 0;
+    if (bal <= 0 && paid >= total && total > 0) return 0;
+    if (isCredit && paid === 0) return total;
+    if (paid > 0) return Math.max(0, total - paid);
+    return Math.max(0, bal);
+  };
+
+  // Case 1: Credit sale for ₹10,000 with ₹0 paid -> full ₹10,000 is pending receivable
+  const creditInvUnpaid = {
+    paymentMethod: 'credit',
+    grandTotal: 10000,
+    amountPaid: 0,
+    balanceDue: 10000,
+    status: 'sent'
+  };
+  assert.equal(getPendingReceivable(creditInvUnpaid), 10000, "Unpaid credit invoice must yield full grandTotal as receivable");
+
+  // Case 2: Credit sale for ₹10,000 with half amount paid (₹5,000 paid) -> remaining ₹5,000 ('mithi amount') is pending
+  const creditInvHalfPaid = {
+    paymentMethod: 'credit',
+    grandTotal: 10000,
+    amountPaid: 5000,
+    balanceDue: 5000,
+    status: 'partial'
+  };
+  assert.equal(getPendingReceivable(creditInvHalfPaid), 5000, "Half-paid credit invoice must yield remaining ₹5,000 ('mithi amount') as receivable");
+
+  // Case 3: Fully paid credit sale (₹10,000 paid of ₹10,000) -> ₹0 receivable
+  const creditInvFullyPaid = {
+    paymentMethod: 'credit',
+    grandTotal: 10000,
+    amountPaid: 10000,
+    balanceDue: 0,
+    status: 'paid'
+  };
+  assert.equal(getPendingReceivable(creditInvFullyPaid), 0, "Fully paid invoice must yield ₹0 receivable");
+
+  // Case 4: Credit card payment is NOT customer credit (settled transaction)
+  assert.equal(isCreditMethod('credit_card'), false, "credit_card must NOT be classified as customer credit");
+  assert.equal(isCreditMethod('card'), false, "card must NOT be classified as customer credit");
+  assert.equal(isCreditMethod('credit'), true, "credit must be classified as customer credit");
+
+  const cardInvPaid = {
+    paymentMethod: 'credit_card',
+    grandTotal: 5000,
+    amountPaid: 5000,
+    balanceDue: 0,
+    status: 'paid'
+  };
+  assert.equal(getPendingReceivable(cardInvPaid), 0, "Credit card settled invoice must yield ₹0 receivable");
+});
+
+test("Bookkeeping Income Invariant — Credit pota or pay panatha amount bookkeeping la kata kudathu", () => {
+  // Simulates Bookkeeping income calculation rule:
+  const getBookkeepingIncomeForInvoice = (inv) => {
+    const isCredit = String(inv.paymentMethod || inv.saleType || '').trim().toLowerCase() === 'credit';
+    const paid = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+
+    // If credit with 0 paid, or unpaid invoice (0 paid): NO bookkeeping income entry
+    if (isCredit && paid <= 0) return 0;
+    if (paid <= 0 && inv.status !== 'paid' && inv.paymentStatus !== 'paid') return 0;
+
+    // Only actual paid/received amount is income in bookkeeping
+    return Math.max(0, paid);
+  };
+
+  // 1. Credit invoice with ₹0 paid -> Bookkeeping income MUST be 0
+  const creditUnpaid = {
+    invoiceNumber: "INV-CREDIT-01",
+    grandTotal: 50000,
+    paymentMethod: "credit",
+    amountPaid: 0,
+    balanceDue: 50000,
+    status: "sent"
+  };
+  assert.equal(getBookkeepingIncomeForInvoice(creditUnpaid), 0, "Unpaid credit sale must NOT show in bookkeeping income");
+
+  // 2. Unpaid standard invoice with ₹0 paid -> Bookkeeping income MUST be 0
+  const cashUnpaid = {
+    invoiceNumber: "INV-UNPAID-01",
+    grandTotal: 25000,
+    paymentMethod: "cash",
+    amountPaid: 0,
+    balanceDue: 25000,
+    status: "sent",
+    paymentStatus: "pending"
+  };
+  assert.equal(getBookkeepingIncomeForInvoice(cashUnpaid), 0, "Unpaid invoice must NOT show in bookkeeping income");
+
+  // 3. Partial payment (half paid: ₹20,000 paid out of ₹40,000) -> Bookkeeping income MUST be ₹20,000 (NOT ₹40,000)
+  const partialInvoice = {
+    invoiceNumber: "INV-PARTIAL-01",
+    grandTotal: 40000,
+    paymentMethod: "credit",
+    amountPaid: 20000,
+    balanceDue: 20000,
+    status: "partial",
+    paymentStatus: "partial"
+  };
+  assert.equal(getBookkeepingIncomeForInvoice(partialInvoice), 20000, "Partial payment must only record actual paid amount in bookkeeping income");
+
+  // 4. Fully paid invoice (₹40,000 of ₹40,000) -> Bookkeeping income MUST be ₹40,000
+  const fullyPaidInvoice = {
+    invoiceNumber: "INV-PAID-01",
+    grandTotal: 40000,
+    paymentMethod: "upi",
+    amountPaid: 40000,
+    balanceDue: 0,
+    status: "paid",
+    paymentStatus: "paid"
+  };
+  assert.equal(getBookkeepingIncomeForInvoice(fullyPaidInvoice), 40000, "Fully paid invoice records full collected income in bookkeeping");
+});
