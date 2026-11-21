@@ -699,9 +699,10 @@ const AutomationInvoice = () => {
       return;
     }
 
-    // If pure credit (credit method with 0 amount), actual paid is 0.
-    // If credit with an amount > 0 (down payment on credit sale), actual paid is that amount!
-    const actualAmount = Math.max(0, enteredAmount);
+    // If pure credit (credit method with 0 amount or full default prefill), actual paid is 0.
+    // If credit with a partial amount > 0 (down payment on credit sale), actual paid is that amount!
+    const isFullPrefill = enteredAmount === grandTotal || (isPayingFromHistory && enteredAmount === currentBalance);
+    const actualAmount = (isCredit && (enteredAmount === 0 || isFullPrefill)) ? 0 : Math.max(0, enteredAmount);
 
     let updatedInvoiceData: any = null;
 
@@ -748,7 +749,7 @@ const AutomationInvoice = () => {
     let newPaid: number;
     let newBalance: number;
 
-    if (isCredit && actualAmount === 0 && !isPayingFromHistory) {
+    if (isCredit && actualAmount === 0) {
       newPaid = 0;
       newBalance = grandTotal;
     } else if (isPayingFromHistory) {
@@ -764,7 +765,7 @@ const AutomationInvoice = () => {
       newBalance = Math.max(0, Math.round((grandTotal - newPaid) * 100) / 100);
     }
 
-    const newPaymentStatus = newBalance <= 0 && grandTotal > 0 ? 'paid' : (newPaid > 0 ? 'partial' : 'pending');
+    const newPaymentStatus = isCredit && newPaid === 0 ? 'pending' : (newBalance <= 0 && grandTotal > 0 ? 'paid' : (newPaid > 0 ? 'partial' : 'pending'));
     const newStatus = isCredit && newPaid === 0 ? 'sent' : (newBalance <= 0 && grandTotal > 0 ? 'paid' : 'sent');
 
     // 1. Update localStorage ('savedInvoices') if paying from history
@@ -1400,13 +1401,14 @@ const AutomationInvoice = () => {
       return {
         ...prev,
         saleType: mode,
+        paymentMethod: mode,
         paid: defaultPaid,
         balance: defaultBalance,
         paymentStatus: isCredit ? 'pending' : (defaultBalance <= 0 ? 'paid' : 'pending'),
         dueDate: newDueDate
       };
     });
-    setIsPaymentRecorded(false);
+    setIsPaymentRecorded(isCredit);
   };
 
   // Handle file upload for purchase bill
@@ -1448,7 +1450,9 @@ const AutomationInvoice = () => {
     }
 
 
-    if (statusOverride !== 'draft' && !isPaymentRecorded && !lastSavedId) {
+    const isCreditSale = String(currentInvoice.saleType || currentInvoice.paymentMethod || '').toLowerCase() === 'credit';
+
+    if (statusOverride !== 'draft' && !isPaymentRecorded && !lastSavedId && !isCreditSale) {
       toast.error("Please record payment before saving invoice.");
       setSelectedPaymentInvoiceId(null);
       setPaymentForm(prev => ({
@@ -1463,12 +1467,16 @@ const AutomationInvoice = () => {
     setIsSaving(true);
 
     try {
-      const effectivePaid = Math.min(currentInvoice.total || 0, Math.max(0, Number(currentInvoice.paid) || 0));
-      const effectiveBalance = Math.max(0, Math.round(((currentInvoice.total || 0) - effectivePaid) * 100) / 100);
-      const effectivePaymentStatus = effectiveBalance <= 0 && (currentInvoice.total || 0) > 0
-        ? 'paid'
-        : (effectivePaid > 0 ? 'partial' : 'pending');
-      const statusValue = statusOverride || (effectiveBalance <= 0 && (currentInvoice.total || 0) > 0 ? 'paid' : (effectivePaid > 0 ? 'partial' : 'sent'));
+      const effectivePaid = isCreditSale && (Number(currentInvoice.paid) === Number(currentInvoice.total))
+        ? 0
+        : Math.min(currentInvoice.total || 0, Math.max(0, Number(currentInvoice.paid) || 0));
+      const effectiveBalance = isCreditSale && effectivePaid === 0
+        ? (currentInvoice.total || 0)
+        : Math.max(0, Math.round(((currentInvoice.total || 0) - effectivePaid) * 100) / 100);
+      const effectivePaymentStatus = isCreditSale && effectivePaid === 0
+        ? 'pending'
+        : (effectiveBalance <= 0 && (currentInvoice.total || 0) > 0 ? 'paid' : (effectivePaid > 0 ? 'partial' : 'pending'));
+      const statusValue = statusOverride || (isCreditSale && effectivePaid === 0 ? 'sent' : (effectiveBalance <= 0 && (currentInvoice.total || 0) > 0 ? 'paid' : (effectivePaid > 0 ? 'partial' : 'sent')));
       const dueReminderDate = getDueReminderDate(currentInvoice.invoiceDate, currentInvoice.dueReminderDays);
 
       const backendData = {
@@ -1532,6 +1540,7 @@ const AutomationInvoice = () => {
         balanceDue: effectiveBalance,
         paymentMethod: currentInvoice.saleType || currentInvoice.paymentMethod || 'cash',
         paymentStatus: effectivePaymentStatus,
+        isCredit: isCreditSale && effectivePaid === 0,
         gstPortalJson: buildGstPortalJson({ ...currentInvoice, dueReminderDate }),
         notes: currentInvoice.notes || '',
         termsAndConditions: currentInvoice.termsAndConditions || '',
@@ -2485,6 +2494,24 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                         <SelectItem value="7">1 week</SelectItem>
                         <SelectItem value="14">2 weeks</SelectItem>
                         <SelectItem value="30">1 month</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-slate-800 text-sm font-semibold">Payment Method</Label>
+                    <Select
+                      value={currentInvoice.saleType || 'cash'}
+                      onValueChange={(val) => handlePaymentMethodChange(val)}
+                    >
+                      <SelectTrigger className="h-10 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-350">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-white border border-slate-200 text-slate-900">
+                        <SelectItem value="cash">Cash</SelectItem>
+                        <SelectItem value="credit">Credit (Unpaid)</SelectItem>
+                        <SelectItem value="upi">UPI</SelectItem>
+                        <SelectItem value="card">Card</SelectItem>
+                        <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -3641,7 +3668,8 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </Button>
                     <Button
                       onClick={() => {
-                        if (!isPaymentRecorded && !lastSavedId) {
+                        const isCreditSale = String(currentInvoice.saleType || currentInvoice.paymentMethod || '').toLowerCase() === 'credit';
+                        if (!isPaymentRecorded && !lastSavedId && !isCreditSale) {
                           toast.error("Please record payment before saving invoice.");
                           setSelectedPaymentInvoiceId(null);
                           setPaymentForm(prev => ({
@@ -3654,9 +3682,9 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                         }
                         saveInvoice('sent');
                       }}
-                      disabled={isSaving || currentInvoice.items.length === 0 || (!isPaymentRecorded && !lastSavedId)}
+                      disabled={isSaving || currentInvoice.items.length === 0 || (!isPaymentRecorded && !lastSavedId && String(currentInvoice.saleType || currentInvoice.paymentMethod || '').toLowerCase() !== 'credit')}
                       className={`h-12 rounded-xl font-semibold transition-all duration-300 ${
-                        !isPaymentRecorded && !lastSavedId
+                        !isPaymentRecorded && !lastSavedId && String(currentInvoice.saleType || currentInvoice.paymentMethod || '').toLowerCase() !== 'credit'
                           ? "bg-slate-200 text-slate-400 cursor-not-allowed hover:bg-slate-200"
                           : "bg-slate-950 text-white hover:bg-slate-800"
                       }`}
@@ -3666,10 +3694,10 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                     </Button>
                   </div>
 
-                  {!isPaymentRecorded && !lastSavedId && currentInvoice.items.length > 0 && (
+                  {!isPaymentRecorded && !lastSavedId && currentInvoice.items.length > 0 && String(currentInvoice.saleType || currentInvoice.paymentMethod || '').toLowerCase() !== 'credit' && (
                     <div className="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold">
                       <CreditCard className="h-3.5 w-3.5 text-amber-600" />
-                      <span>Record payment above to enable Save Invoice</span>
+                      <span>Record payment or select Credit above to enable Save Invoice</span>
                     </div>
                   )}
 
@@ -4246,7 +4274,14 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
             </div>
             <div className="mt-4 space-y-4">
               <div className="space-y-1.5">
-                <Label className="text-slate-800 text-sm font-semibold">Payment Amount *</Label>
+                <div className="flex justify-between items-center">
+                  <Label className="text-slate-800 text-sm font-semibold">Payment Amount *</Label>
+                  {paymentForm.paymentMethod === 'credit' && (
+                    <span className="text-[11px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">
+                      Credit Sale (Unpaid: ₹0 Paid)
+                    </span>
+                  )}
+                </div>
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">₹</span>
                   <Input
@@ -4271,7 +4306,14 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                   <Label className="text-slate-800 text-sm font-semibold">Method</Label>
                   <Select
                     value={paymentForm.paymentMethod}
-                    onValueChange={(val) => setPaymentForm(prev => ({ ...prev, paymentMethod: val }))}
+                    onValueChange={(val) => {
+                      const isCred = val === 'credit';
+                      setPaymentForm(prev => ({
+                        ...prev,
+                        paymentMethod: val,
+                        amount: isCred ? 0 : (prev.amount === 0 ? (selectedPaymentInvoiceId ? (invoiceHistory.find(i => String(i.id || i._id) === String(selectedPaymentInvoiceId))?.balance || 0) : currentInvoice.total) : prev.amount)
+                      }));
+                    }}
                   >
                     <SelectTrigger className="rounded-xl border-slate-200 text-slate-900">
                       <SelectValue />
@@ -4280,7 +4322,7 @@ Balance: ₹${currentInvoice.balance.toFixed(2)}`;
                       <SelectItem value="cash">Cash</SelectItem>
                       <SelectItem value="upi">UPI</SelectItem>
                       <SelectItem value="card">Card</SelectItem>
-                      <SelectItem value="credit">Credit</SelectItem>
+                      <SelectItem value="credit">Credit (Unpaid)</SelectItem>
                       <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
                       <SelectItem value="credit_card">Credit Card</SelectItem>
                       <SelectItem value="cheque">Cheque</SelectItem>

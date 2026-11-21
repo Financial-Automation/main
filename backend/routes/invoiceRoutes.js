@@ -990,8 +990,8 @@ router.all("/:id/payment", verifyToken, async (req, res) => {
     }
     payAmt = Math.round(payAmt * 100) / 100;
 
-    // Only do a zero-payment credit reset if amount is explicitly 0 or not provided
-    if (isCredit && payAmt <= 0) {
+    // Handle credit sale: if amount is 0, isCredit is true, or amount equals grandTotal (accidental prefill), reset to Unpaid
+    if (isCredit && (payAmt <= 0 || req.body.isCredit || payAmt === grandTotal)) {
       invoice.amountPaid = 0;
       invoice.balanceDue = grandTotal;
       invoice.paymentStatus = 'pending';

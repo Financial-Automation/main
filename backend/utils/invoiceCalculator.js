@@ -237,7 +237,9 @@ export const validateAndRecalculateInvoice = (invoiceData, sellerState = "Tamil 
   const isCredit = method === "credit";
 
   let rawPaid = invoiceData.amountPaid !== undefined ? invoiceData.amountPaid : invoiceData.paid;
-  if (!isCredit && (rawPaid === undefined || rawPaid === null || (Number(rawPaid) === 0 && (Number(invoiceData.balanceDue) === 0 || invoiceData.status === 'paid')))) {
+  if (isCredit && (rawPaid === undefined || rawPaid === null || Number(rawPaid) === Number(invoiceData.grandTotal) || Number(rawPaid) === Number(invoiceData.total))) {
+    rawPaid = 0;
+  } else if (!isCredit && (rawPaid === undefined || rawPaid === null || (Number(rawPaid) === 0 && (Number(invoiceData.balanceDue) === 0 || invoiceData.status === 'paid')))) {
     rawPaid = undefined;
   }
 
