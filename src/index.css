@@ -128,12 +128,111 @@ All colors MUST be HSL.
     font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
     text-rendering: geometricPrecision;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Prevent horizontal overflow globally */
+  html, body, #root {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  /* Prevent flex children from causing overflow */
+  * {
+    min-width: 0;
+  }
+
+  /* iOS Safari: prevent zoom on input focus for inputs with font-size < 16px */
+  @supports (-webkit-touch-callout: none) {
+    input, select, textarea {
+      font-size: max(16px, 1em);
+    }
   }
 }
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  /* Safe area utilities for notched iPhones */
+  .safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .safe-left {
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+  .safe-right {
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  .safe-x {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  .safe-y {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Dynamic viewport height (with fallback for older browsers) */
+  .h-dvh {
+    height: 100vh;
+    height: 100dvh;
+  }
+  .min-h-dvh {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+  .max-h-dvh {
+    max-height: 100vh;
+    max-height: 100dvh;
+  }
+
+  /* Responsive table container — prevents page-level horizontal scroll */
+  .table-responsive {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .table-responsive::-webkit-scrollbar {
+    height: 4px;
+  }
+  .table-responsive::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .table-responsive::-webkit-scrollbar-thumb {
+    background: rgba(15, 23, 42, 0.12);
+    border-radius: 4px;
+  }
+
+  /* Touch target minimum (44x44 CSS px per Apple HIG) */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Truncate with ellipsis (for long financial values / names) */
+  .truncate-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  /* Responsive clamp typography */
+  .text-responsive-h1 {
+    font-size: clamp(1.25rem, 3vw, 1.625rem);
+  }
+  .text-responsive-h2 {
+    font-size: clamp(1.125rem, 2.5vw, 1.375rem);
+  }
+  .text-responsive-body {
+    font-size: clamp(0.8125rem, 1.5vw, 0.875rem);
   }
 }
 
@@ -932,5 +1031,49 @@ All colors MUST be HSL.
 
   .dashboard-light .dashboard-light-input {
     color: #0f172a;
+  }
+}
+
+/* ========== PRINT STYLES ========== */
+@media print {
+  /* Hide non-printable elements */
+  header, nav, aside,
+  .fixed, [class*="fixed"],
+  .sticky, [class*="sticky"],
+  [role="dialog"],
+  button:not(.print-visible),
+  .pointer-events-none {
+    display: none !important;
+  }
+
+  /* Reset backgrounds and shadows for ink-friendly output */
+  body, main, #root {
+    background: white !important;
+    color: black !important;
+    overflow: visible !important;
+    max-width: none !important;
+  }
+
+  * {
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  /* Allow main content to flow naturally */
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Prevent page breaks inside key elements */
+  table, tr, .invoice-section {
+    page-break-inside: avoid;
+  }
+
+  /* A4 page dimensions */
+  @page {
+    size: A4;
+    margin: 15mm 12mm;
   }
 }

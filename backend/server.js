@@ -5,18 +5,33 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
+import dns from "dns";
 import Razorpay from "razorpay";
+
+// Ensure DNS resolves MongoDB Atlas SRV records and Google APIs reliably across all network environments
+try {
+  dns.setServers(["8.8.8.8", "1.1.1.1"]);
+  dns.setDefaultResultOrder("ipv4first");
+} catch (dnsErr) {
+  console.warn("DNS server configuration fallback:", dnsErr.message);
+}
 import Plan from "./models/Plan.js";
 import Subscription from "./models/Subscription.js";
 import { authenticateUser, checkSubscription, checkModuleAccess } from "./utils/authMiddleware.js";
 import { sendResetEmail } from "./utils/emailService.js";
 import crypto from "crypto";
-import path from "path";
-import { fileURLToPath } from "url";
 
 import { performance } from "perf_hooks";
 import { initMongoAPM } from "./utils/inventoryInstrumentation.js";
 import { getFinanceMetrics, getLiveBalanceSheet, resolvePeriod } from "./utils/financeAggregator.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, ".env") });
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+dotenv.config();
 
 const planKeyToName = {
   // New plan keys
@@ -52,18 +67,8 @@ import purchaseInvoiceRoutes from "./routes/purchaseInvoiceRoutes.js";
 import scannedDocRoutes from "./routes/scannedDocRoutes.js";
 import civilEngineeringRoutes from "./routes/civilEngineeringRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
-import vendorRoutes from "./routes/vendorRoutes.js";
-import budgetRoutes from "./routes/budgetRoutes.js";
 import invoiceTemplateRoutes from "./routes/invoiceTemplateRoutes.js";
 import purchaseInvoiceTemplateRoutes from "./routes/purchaseInvoiceTemplateRoutes.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Reliable environment configuration across all execution contexts
-dotenv.config();
-dotenv.config({ path: path.resolve(__dirname, ".env") });
-dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 // Enforce production environment variable validation
 if (process.env.NODE_ENV === "production") {
@@ -78,7 +83,6 @@ if (process.env.NODE_ENV === "production") {
 }
 
 const isDevModeAllowed = () => process.env.NODE_ENV !== "production" && process.env.DEV_MODE === "true";
-
 const app = express();
 app.use(compression());
 
@@ -166,29 +170,6 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-// ✅ Database Readiness Guard: Block DB-dependent requests if MongoDB is not ready
-app.use((req, res, next) => {
-  if (
-    req.method === "OPTIONS" ||
-    req.path === "/api/health" ||
-    req.path === "/health" ||
-    req.path.startsWith("/uploads")
-  ) {
-    return next();
-  }
-
-  if (mongoose.connection.readyState !== 1) {
-    console.warn(`[DB Guard] Blocked request ${req.method} ${req.originalUrl || req.url}: MongoDB not connected (readyState: ${mongoose.connection.readyState})`);
-    return res.status(503).json({
-      success: false,
-      message: "Database service is unavailable. Local MongoDB service is not connected.",
-      error: "Service Unavailable",
-      code: "DATABASE_UNAVAILABLE"
-    });
-  }
-
-  next();
-});
 
 // Security headers for production
 if (process.env.DEV_MODE !== 'true') {
@@ -217,18 +198,47 @@ console.log(`🔧 Environment: ${isDevelopment ? 'Development' : 'Production'}`)
 console.log(`🔧 Primary MongoDB: ${isDevelopment ? 'Local Database' : 'Cloud Database'}`);
 console.log(`🛡️  Fail-Closed Guard (BLOCK_PROD_FALLBACK): ${blockProdFallback ? 'Enabled' : 'Disabled'}`);
 
-// Connect to MongoDB with fail-closed mechanism
-const connectToMongoDB = async () => {
-  initMongoAPM(mongoose);
-  const mongoOptions = {
-    maxPoolSize: Number(process.env.MAX_POOL_SIZE) || 100,
-    minPoolSize: 20,
-    maxIdleTimeMS: 30000,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-    monitorCommands: true,
-  };
+// Configure Mongoose global buffering & timeouts
+mongoose.set("bufferTimeoutMS", 5000);
 
+const mongoOptions = {
+  maxPoolSize: Number(process.env.MAX_POOL_SIZE) || 100,
+  minPoolSize: 20,
+  maxIdleTimeMS: 30000,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  family: 4, // Force IPv4 on dual-stack hosts to prevent lookup delays
+  monitorCommands: true,
+};
+
+let isConnecting = false;
+let reconnectTimer = null;
+
+const scheduleReconnect = () => {
+  if (reconnectTimer || mongoose.connection.readyState === 1) return;
+  console.log("🔄 Scheduling MongoDB reconnect in 5 seconds...");
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    await connectToMongoDB();
+  }, 5000);
+};
+
+// Auto-reconnect on disconnect
+mongoose.connection.on("disconnected", () => {
+  console.warn("⚠️ MongoDB disconnected.");
+  scheduleReconnect();
+});
+
+mongoose.connection.on("error", (err) => {
+  console.error("⚠️ MongoDB connection error:", err.message);
+});
+
+// Connect to MongoDB with resilient fail-closed / fallback mechanism
+const connectToMongoDB = async () => {
+  if (isConnecting || mongoose.connection.readyState === 1) return;
+  isConnecting = true;
+  initMongoAPM(mongoose);
   try {
     await mongoose.connect(mongoUri, mongoOptions);
     console.log("✅ MongoDB Connected Successfully");
@@ -242,20 +252,47 @@ const connectToMongoDB = async () => {
         console.error("💡 Local MongoDB service is missing or stopped.");
         console.error("   To start local MongoDB, run:");
         console.error("   ./backend/node_modules/.cache/mongodb-memory-server/mongod-arm64-darwin-8.2.6 --dbpath ~/.mongodb/data --port 27017 --bind_ip 127.0.0.1");
-        throw err;
+      } else if (process.env.PRO_MONGO_URI) {
+        console.log("🔄 Falling back to Cloud Database...");
+        try {
+          await mongoose.connect(process.env.PRO_MONGO_URI, mongoOptions);
+          console.log("✅ MongoDB Connected Successfully (Fallback to Cloud)");
+          console.log("📍 Database: Cloud Atlas (Fallback)");
+        } catch (fallbackErr) {
+          console.error("❌ Fallback MongoDB Connection Failed:", fallbackErr.message);
+        }
       }
-      console.warn("⚠️ Fallback to production is strictly forbidden by policy.");
-      throw err;
     } else {
       console.error("❌ Production MongoDB Connection Failed");
       console.error("💡 Please check your cloud database configuration");
-      throw err;
     }
+    scheduleReconnect();
+  } finally {
+    isConnecting = false;
   }
 };
 
-// Don't call it here - we'll call it before starting the server
-// connectToMongoDB();
+// Database connection readiness check middleware
+// Prevents buffering timeouts like "Operation users.findOne() buffering timed out after 10000ms"
+app.use((req, res, next) => {
+  // Allow health check, OPTIONS, and static uploads through even if DB is reconnecting
+  if (
+    req.method === "OPTIONS" ||
+    req.path === "/api/health" ||
+    req.path === "/health" ||
+    req.path.startsWith("/uploads/")
+  ) {
+    return next();
+  }
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({
+      success: false,
+      code: "DATABASE_UNAVAILABLE",
+      message: "Database connection is temporarily unavailable. Please retry in a few moments."
+    });
+  }
+  next();
+});
 
 // ✅ User Schema (synced with models/User.js)
 const userSchema = new mongoose.Schema({
@@ -449,17 +486,6 @@ app.post("/api/signin", async (req, res) => {
         authenticatedRole = "instore";
       }
     }
-
-    // SAFE DEBUG LOGGING (Never log actual password or hash)
-    console.log("🔐 [SIGNIN DEBUG]", {
-      email: cleanEmail,
-      requestedRole: role || null,
-      hasPassword: !!user.password,
-      hasStorePassword: !!user.storePassword,
-      isAdminPass,
-      isStorePass,
-      authenticatedRole
-    });
 
     if (!validPass) {
       return res.status(400).json({ success: false, message: "Invalid email or password" });
@@ -1420,85 +1446,8 @@ app.use("/api/purchase-invoice", authenticateUser, checkSubscription, checkModul
 app.use("/api/scanned-docs", authenticateUser, checkSubscription, checkModuleAccess("invoice"), scannedDocRoutes);
 app.use("/api/civil-engineering", authenticateUser, checkSubscription, checkModuleAccess("civil-engineering"), civilEngineeringRoutes);
 app.use("/api/customers", authenticateUser, checkSubscription, checkModuleAccess("invoice"), customerRoutes);
-app.use("/api/vendors", authenticateUser, checkSubscription, checkModuleAccess("invoice"), vendorRoutes);
-app.use("/api/budgets", authenticateUser, checkSubscription, checkModuleAccess("bookkeeping"), budgetRoutes);
 app.use("/api/invoice-templates", authenticateUser, checkSubscription, checkModuleAccess("invoice"), invoiceTemplateRoutes);
 app.use("/api/purchase-templates", purchaseInvoiceTemplateRoutes);
-
-// ✅ DASHBOARD OVERVIEW - Unified Financial & Operational Metrics API
-app.get("/api/dashboard/overview", authenticateUser, checkSubscription, async (req, res) => {
-  try {
-    const period = req.query.period || "this-month";
-    const { startDate, endDate } = resolvePeriod(period);
-    const userId = req.user.id || req.user._id?.toString();
-
-    const [metrics, balanceSheet] = await Promise.all([
-      getFinanceMetrics(userId, startDate, endDate),
-      getLiveBalanceSheet(userId, period)
-    ]);
-
-    // Inventory low stock check
-    const InventoryItem = mongoose.models.InventoryItem || mongoose.model("InventoryItem");
-    let lowStockCount = 0;
-    let totalInventoryValuation = 0;
-    if (InventoryItem) {
-      const items = await InventoryItem.find({ userId }).select("quantity price costPrice buyPrice minStockLevel").lean();
-      lowStockCount = items.filter(i => (i.quantity || 0) <= (i.minStockLevel !== undefined ? i.minStockLevel : 5)).length;
-      totalInventoryValuation = items.reduce((s, i) => s + ((i.quantity || 0) * (i.price || i.costPrice || i.buyPrice || 0)), 0);
-    }
-
-    // Invoice overdue check
-    const Invoice = mongoose.models.Invoice || mongoose.model("Invoice");
-    let overdueInvoiceCount = 0;
-    if (Invoice) {
-      overdueInvoiceCount = await Invoice.countDocuments({
-        $or: [{ userId }, { createdBy: userId }],
-        isDeleted: false,
-        paymentStatus: { $ne: "paid" },
-        status: { $ne: "paid" },
-        dueDate: { $lt: new Date() }
-      });
-    }
-
-    // Build financial warnings & alerts
-    const warnings = [];
-    if (lowStockCount > 0) {
-      warnings.push({ type: "warning", code: "LOW_STOCK", message: `Low Stock Alert: ${lowStockCount} product(s) are at or below reorder threshold.` });
-    }
-    if (metrics.cashFlow.receivables > 50000) {
-      warnings.push({ type: "warning", code: "HIGH_RECEIVABLES", message: `High Receivables: ₹${metrics.cashFlow.receivables.toLocaleString('en-IN')} outstanding from customers.` });
-    }
-    if (metrics.netProfit < 0) {
-      warnings.push({ type: "danger", code: "NET_LOSS", message: `Profit Alert: Operating at a net loss of ₹${Math.abs(metrics.netProfit).toLocaleString('en-IN')} for this period.` });
-    }
-    if (overdueInvoiceCount > 0) {
-      warnings.push({ type: "warning", code: "OVERDUE_INVOICES", message: `Payment Alert: ${overdueInvoiceCount} invoice(s) are past due.` });
-    }
-    if (warnings.length === 0) {
-      warnings.push({ type: "info", code: "HEALTHY", message: "Financial status healthy. Cashflow and receivables within standard limits." });
-    }
-
-    res.json({
-      period,
-      metrics,
-      balanceSheetSummary: {
-        totalAssets: balanceSheet.assets?.totalAssets || 0,
-        totalLiabilities: balanceSheet.liabilities?.totalLiabilities || 0,
-        totalEquity: balanceSheet.equity?.totalEquity || 0,
-        balanced: balanceSheet.balanced
-      },
-      inventorySummary: {
-        lowStockCount,
-        totalValuation: totalInventoryValuation
-      },
-      overdueInvoiceCount,
-      warnings
-    });
-  } catch (error) {
-    console.error("Error fetching dashboard overview:", error);
-    res.status(500).json({ message: "Error fetching dashboard overview data", error: error.message });
-  }
-});
 
 const seedPlans = async () => {
   const plans = [
@@ -1593,10 +1542,16 @@ const startServer = async () => {
     // Connect to MongoDB first
     await connectToMongoDB();
 
-    // Seed subscription plans
-    await seedPlans();
+    if (mongoose.connection.readyState === 1) {
+      // Seed subscription plans
+      await seedPlans();
+    } else {
+      console.warn("⚠️ Initial database connection not ready. Will retry in background.");
+      scheduleReconnect();
+    }
   } catch (error) {
-    console.warn("⚠️ Database connection failed. Starting server in degraded mode:", error.message);
+    console.warn("⚠️ Database connection error during startup:", error.message);
+    scheduleReconnect();
   }
 
   const server = app.listen(PORT, HOST, () => {

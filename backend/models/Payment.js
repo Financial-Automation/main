@@ -44,12 +44,18 @@ const paymentSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now,
+  },
+  idempotencyKey: {
+    type: String,
+    default: "",
+    index: true,
   }
 });
 
 paymentSchema.index({ userId: 1, invoiceId: 1 });
 paymentSchema.index({ userId: 1, paymentDate: -1 });
+paymentSchema.index({ invoiceId: 1, idempotencyKey: 1 }, { sparse: true });
 
-const Payment = mongoose.model("Payment", paymentSchema);
+const Payment = mongoose.models.Payment || mongoose.model("Payment", paymentSchema);
 
 export default Payment;

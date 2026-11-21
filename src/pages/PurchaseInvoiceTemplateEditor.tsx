@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { API_BASE_URL } from "@/lib/api";
+import { STANDARD_PURCHASE_TEMPLATES } from "./PurchaseInvoiceTemplates";
 
 const GOOGLE_FONTS = ["Inter", "Roboto", "Poppins", "Open Sans", "Outfit", "Courier New"];
 
@@ -206,12 +207,47 @@ export default function PurchaseInvoiceTemplateEditor() {
               sectionsOrder: template.config?.sectionsOrder || INITIAL_PURCHASE_CONFIG.sectionsOrder
             });
           } else {
-            toast.error("Purchase template not found.");
-            navigate("/inventory/purchase-templates");
+            // Fall back to standard templates preset
+            const cleanKey = String(templateId || "").replace(/^tpl-/, "").toLowerCase();
+            const fallback = STANDARD_PURCHASE_TEMPLATES.find(
+              t => t._id === templateId || 
+                   t.name.toLowerCase().includes(cleanKey.replace(/-/g, " ")) ||
+                   cleanKey.split("-").some(w => w.length > 3 && t.name.toLowerCase().includes(w))
+            );
+            if (fallback) {
+              setName(fallback.name);
+              setDescription(fallback.description || "");
+              setStatus(fallback.status || "active");
+              setConfig({
+                ...INITIAL_PURCHASE_CONFIG,
+                ...fallback.config,
+                design: { ...INITIAL_PURCHASE_CONFIG.design, ...fallback.config?.design }
+              });
+            } else {
+              toast.error("Purchase template not found.");
+              navigate("/inventory/purchase-templates");
+            }
           }
         } catch (err) {
           console.error(err);
-          toast.error("Connection error loading template.");
+          const cleanKey = String(templateId || "").replace(/^tpl-/, "").toLowerCase();
+          const fallback = STANDARD_PURCHASE_TEMPLATES.find(
+            t => t._id === templateId || 
+                 t.name.toLowerCase().includes(cleanKey.replace(/-/g, " ")) ||
+                 cleanKey.split("-").some(w => w.length > 3 && t.name.toLowerCase().includes(w))
+          );
+          if (fallback) {
+            setName(fallback.name);
+            setDescription(fallback.description || "");
+            setStatus(fallback.status || "active");
+            setConfig({
+              ...INITIAL_PURCHASE_CONFIG,
+              ...fallback.config,
+              design: { ...INITIAL_PURCHASE_CONFIG.design, ...fallback.config?.design }
+            });
+          } else {
+            toast.error("Connection error loading template.");
+          }
         } finally {
           setIsLoading(false);
           isFirstLoad.current = false;

@@ -54,8 +54,8 @@ const Bookkeeping = () => {
     const [companyName, setCompanyName] = useState(DEFAULT_REPORT_COMPANY_NAME);
     const [selectedDate, setSelectedDate] = useState<Date>(new Date());
     const [dateRange, setDateRange] = useState<{ from: Date | undefined; to: Date | undefined }>({
-        from: new Date(new Date().getFullYear(), new Date().getMonth(), 1), // Start of month
-        to: new Date()
+        from: undefined,
+        to: undefined
     });
 
     // Form State
@@ -154,7 +154,7 @@ const Bookkeeping = () => {
                     id: entry._id, // Map MongoDB _id to id
                     date: new Date(entry.date),
                     createdAt: new Date(entry.createdAt),
-                    type: (entry.type === 'income' || entry.type === 'Income') ? 'Income' : 'Expenses'
+                    type: String(entry.type || '').trim().toLowerCase() === 'income' ? 'Income' : 'Expenses'
                 })));
             } else {
                 console.error("Failed to fetch bookkeeping entries");
@@ -223,7 +223,11 @@ const Bookkeeping = () => {
     }, [filteredEntries]);
 
     // Handle Date Presets
-    const handlePreset = (preset: 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth') => {
+    const handlePreset = (preset: 'all' | 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth') => {
+        if (preset === 'all') {
+            setDateRange({ from: undefined, to: undefined });
+            return;
+        }
         const today = new Date();
         let from = today;
         let to = today;
@@ -681,6 +685,46 @@ const Bookkeeping = () => {
                                             </SelectContent>
                                         </Select>
 
+                                        <Popover>
+                                            <PopoverTrigger asChild>
+                                                <Button
+                                                    variant="outline"
+                                                    className="h-11 rounded-[14px] border-slate-200 bg-white/80 text-slate-900 focus:border-slate-300 text-xs sm:text-sm font-normal"
+                                                >
+                                                    <CalendarIcon className="mr-2 h-4 w-4 text-slate-600" />
+                                                    {dateRange?.from ? (
+                                                        dateRange.to ? (
+                                                            <span>
+                                                                {format(dateRange.from, "MMM dd")} - {format(dateRange.to, "MMM dd, yyyy")}
+                                                            </span>
+                                                        ) : (
+                                                            <span>{format(dateRange.from, "MMM dd, yyyy")}</span>
+                                                        )
+                                                    ) : (
+                                                        <span>All Dates</span>
+                                                    )}
+                                                </Button>
+                                            </PopoverTrigger>
+                                            <PopoverContent className="w-auto p-3 bg-white border border-slate-200" align="end">
+                                                <div className="flex flex-wrap gap-1.5 mb-2 pb-2 border-b border-slate-100">
+                                                    <Button size="sm" variant={!dateRange.from ? "default" : "ghost"} className="h-7 text-xs rounded-lg" onClick={() => handlePreset('all')}>All Time</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('today')}>Today</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('week')}>7 Days</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('month')}>This Month</Button>
+                                                    <Button size="sm" variant="ghost" className="h-7 text-xs rounded-lg" onClick={() => handlePreset('lastMonth')}>Last Month</Button>
+                                                </div>
+                                                <Calendar
+                                                    initialFocus
+                                                    mode="range"
+                                                    defaultMonth={dateRange?.from || new Date()}
+                                                    selected={{ from: dateRange.from, to: dateRange.to }}
+                                                    onSelect={(range: any) => setDateRange(range || { from: undefined, to: undefined })}
+                                                    numberOfMonths={1}
+                                                    className="bg-white text-slate-900"
+                                                />
+                                            </PopoverContent>
+                                        </Popover>
+
                                         <Button
                                             onClick={exportToPDF}
                                             className="rounded-full bg-slate-950 font-semibold text-white transition-all duration-300 hover:bg-slate-800"
@@ -737,14 +781,6 @@ const Bookkeeping = () => {
                                                                         >
                                                                             {entry.category}
                                                                         </Badge>
-                                                                        {((entry as any).isAutomated || (entry as any).referenceId) && (
-                                                                            <Badge
-                                                                                variant="outline"
-                                                                                className="border-indigo-200 bg-indigo-50 text-indigo-700 flex items-center gap-1 font-semibold"
-                                                                            >
-                                                                                <Lock className="h-3 w-3" /> System Entry
-                                                                            </Badge>
-                                                                        )}
                                                                         <span className="text-slate-500 text-xs hidden sm:inline-block">
                                                                             {format(new Date(entry.createdAt), 'h:mm a')}
                                                                         </span>
@@ -760,20 +796,14 @@ const Bookkeeping = () => {
                                                                         {entry.type === 'Income' ? '+' : '-'}₹{entry.amount.toLocaleString()}
                                                                     </div>
 
-                                                                    {((entry as any).isAutomated || (entry as any).referenceId) ? (
-                                                                        <span className="text-indigo-600 text-xs font-semibold flex items-center gap-1 bg-indigo-50 px-2 py-1 rounded" title="Automated entry synced from Invoice/Inventory module">
-                                                                            <Lock className="h-3 w-3" /> Protected
-                                                                        </span>
-                                                                    ) : (
-                                                                        <Button
-                                                                            variant="ghost"
-                                                                            size="sm"
-                                                                            onClick={() => handleDeleteClick(entry.id)}
-                                                                            className="text-slate-400 hover:text-red-600 hover:bg-red-50/50 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                                        >
-                                                                            <Trash2 className="h-4 w-4" />
-                                                                        </Button>
-                                                                    )}
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        onClick={() => handleDeleteClick(entry.id)}
+                                                                        className="text-slate-400 hover:text-red-600 hover:bg-red-50/50 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                                    >
+                                                                        <Trash2 className="h-4 w-4" />
+                                                                    </Button>
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -787,14 +817,8 @@ const Bookkeeping = () => {
                                         <div className="p-6 rounded-full bg-white/60 border border-white/80 inline-block mb-4">
                                             <FileText className="h-12 w-12 text-slate-700" />
                                         </div>
-                                        <p className="text-slate-800 text-lg font-medium">No bookkeeping entries found</p>
-                                        <p className="text-slate-600 text-sm max-w-sm mx-auto mb-4">Record your income and expenses or issue sales invoices to populate your automated ledger.</p>
-                                        <Button
-                                            onClick={() => setActiveTab("add")}
-                                            className="rounded-full bg-slate-950 font-semibold text-white hover:bg-slate-800 transition-colors shadow-md"
-                                        >
-                                            <Plus className="mr-2 h-4 w-4" /> Add Your First Transaction
-                                        </Button>
+                                        <p className="text-slate-800 text-lg font-medium">No entries found</p>
+                                        <p className="text-slate-600 text-sm">Try adjusting your filters or add a new entry</p>
                                     </div>
                                 )}
                             </CardContent>

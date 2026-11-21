@@ -27,10 +27,91 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { API_BASE_URL } from "@/lib/api";
+import { 
+  InvoiceTemplateRenderer, 
+  TEMPLATE_REGISTRY, 
+  TemplateLayoutKey 
+} from "@/components/invoice-templates";
 
-const GOOGLE_FONTS = ["Inter", "Roboto", "Poppins", "Open Sans", "Arial", "Helvetica"];
+const GOOGLE_FONTS = ["Inter", "Roboto", "Poppins", "Open Sans", "Arial", "Helvetica", "Georgia", "Times New Roman"];
+
+const SAMPLE_INVOICE = {
+  invoiceNumber: "INV-2026-00001",
+  invoiceDate: "13 Aug 2026",
+  dueDate: "28 Aug 2026",
+  paymentTerms: "Net 15 Days",
+  orderNumber: "PO-98210",
+  salespersonName: "Rahul Sharma",
+  eWayBillNo: "EWB-829103819",
+  transactionType: "B2B",
+  sellerName: "SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED",
+  sellerAddress: "3/124 Main Road, Andal Nagar, Trichy, Tamil Nadu - 620001",
+  sellerPhone: "+91 94432 10101",
+  sellerEmail: "billing@finsmart.com",
+  sellerGSTIN: "33ANDAL8271A1Z5",
+  customerName: "Acme Corporates Private Limited",
+  customerAddress: "456 Corporate Towers, Outer Ring Road, Bangalore, Karnataka - 560001",
+  customerPhone: "+91 99988 87776",
+  customerEmail: "accounts@acme.com",
+  customerGSTIN: "29ACMEP9812C1Z2",
+  stateOfSupply: "Karnataka (29)",
+  items: [
+    {
+      id: "1",
+      name: "Dell XPS 15 Laptop",
+      description: "Intel i7 | 16GB RAM | 512GB SSD",
+      code: "DELL-XPS15-01",
+      hsn: "84713010",
+      quantity: 2,
+      unit: "Pcs",
+      unitPrice: 50000,
+      discountPercent: 5,
+      discountAmount: 5000,
+      taxPercent: 18,
+      taxAmount: 17100,
+      total: 112100
+    },
+    {
+      id: "2",
+      name: "Logitech MX Master 3S Mouse",
+      description: "Wireless Performance Mouse",
+      code: "LOGI-MX3S-02",
+      hsn: "84716060",
+      quantity: 2,
+      unit: "Pcs",
+      unitPrice: 8500,
+      discountPercent: 0,
+      discountAmount: 0,
+      taxPercent: 18,
+      taxAmount: 3060,
+      total: 20060
+    }
+  ],
+  subtotal: 117000,
+  totalDiscount: 5000,
+  cgst: 10080,
+  sgst: 10080,
+  igst: 0,
+  totalTax: 20160,
+  shippingCharges: 0,
+  packagingCharges: 0,
+  freightCharges: 0,
+  adjustment: 0,
+  grandTotal: 132160,
+  paidAmount: 82160,
+  balanceDue: 50000,
+  paymentMethod: "UPI Transfer",
+  bankName: "HDFC Bank",
+  accountType: "Current",
+  accountNumber: "50200088991122",
+  ifscCode: "HDFC0001234",
+  authorisedSignature: "Authorized Finance Signatory",
+  notes: "Thank you for partnering with Finsmart Solutions! All software licenses are valid for 12 months.",
+  termsAndConditions: "Payment is due within 15 days of invoice date. Interest @ 18% p.a. will be levied on overdue payments."
+};
 
 const INITIAL_CONFIG = {
+  layout: "modern-indigo" as TemplateLayoutKey,
   header: {
     showLogo: true,
     logoPosition: "left" as const,
@@ -152,6 +233,7 @@ export default function InvoiceTemplateEditor() {
   const [searchParams] = useSearchParams();
   const templateId = searchParams.get("id");
 
+  const [actualDbId, setActualDbId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState<"active" | "inactive">("active");
@@ -169,6 +251,46 @@ export default function InvoiceTemplateEditor() {
   // Fetch initial config if editing
   useEffect(() => {
     if (templateId) {
+      // Find matching preset from registry if it exists
+      const matchingPreset = TEMPLATE_REGISTRY.find(t => 
+        t.id === templateId || 
+        t.layoutKey === templateId || 
+        t.id === `tpl-${templateId}` ||
+        templateId?.replace(/^tpl-/, "") === t.layoutKey
+      );
+
+      // Pre-seed matching preset immediately so UI is loaded with correct style
+      if (matchingPreset) {
+        setName(matchingPreset.name);
+        setDescription(matchingPreset.description || "");
+        setConfig(prev => ({
+          ...INITIAL_CONFIG,
+          ...prev,
+          ...matchingPreset.config,
+          layout: matchingPreset.layoutKey,
+          header: { ...INITIAL_CONFIG.header, ...matchingPreset.config?.header },
+          seller: { ...INITIAL_CONFIG.seller, ...matchingPreset.config?.seller },
+          customer: { ...INITIAL_CONFIG.customer, ...matchingPreset.config?.customer },
+          invoiceInfo: { 
+            ...INITIAL_CONFIG.invoiceInfo, 
+            ...matchingPreset.config?.invoiceInfo,
+            labels: { ...INITIAL_CONFIG.invoiceInfo.labels, ...matchingPreset.config?.invoiceInfo?.labels }
+          },
+          items: { 
+            ...INITIAL_CONFIG.items, 
+            ...matchingPreset.config?.items,
+            labels: { ...INITIAL_CONFIG.items.labels, ...matchingPreset.config?.items?.labels }
+          },
+          tax: { ...INITIAL_CONFIG.tax, ...matchingPreset.config?.tax },
+          payment: { ...INITIAL_CONFIG.payment, ...matchingPreset.config?.payment },
+          notes: { ...INITIAL_CONFIG.notes, ...matchingPreset.config?.notes },
+          terms: { ...INITIAL_CONFIG.terms, ...matchingPreset.config?.terms },
+          signature: { ...INITIAL_CONFIG.signature, ...matchingPreset.config?.signature },
+          footer: { ...INITIAL_CONFIG.footer, ...matchingPreset.config?.footer },
+          design: { ...INITIAL_CONFIG.design, ...matchingPreset.config?.design }
+        }));
+      }
+
       const fetchTemplate = async () => {
         setIsLoading(true);
         try {
@@ -179,41 +301,53 @@ export default function InvoiceTemplateEditor() {
           if (res.ok) {
             const result = await res.json();
             const template = result.data;
-            setName(template.name);
-            setDescription(template.description || "");
-            setStatus(template.status || "active");
-            setConfig({
-              ...INITIAL_CONFIG,
-              ...template.config,
-              // Deep merge logic fallback
-              header: { ...INITIAL_CONFIG.header, ...template.config?.header },
-              seller: { ...INITIAL_CONFIG.seller, ...template.config?.seller },
-              customer: { ...INITIAL_CONFIG.customer, ...template.config?.customer },
-              invoiceInfo: { 
-                ...INITIAL_CONFIG.invoiceInfo, 
-                ...template.config?.invoiceInfo,
-                labels: { ...INITIAL_CONFIG.invoiceInfo.labels, ...template.config?.invoiceInfo?.labels }
-              },
-              items: { 
-                ...INITIAL_CONFIG.items, 
-                ...template.config?.items,
-                labels: { ...INITIAL_CONFIG.items.labels, ...template.config?.items?.labels }
-              },
-              tax: { ...INITIAL_CONFIG.tax, ...template.config?.tax },
-              payment: { ...INITIAL_CONFIG.payment, ...template.config?.payment },
-              notes: { ...INITIAL_CONFIG.notes, ...template.config?.notes },
-              terms: { ...INITIAL_CONFIG.terms, ...template.config?.terms },
-              signature: { ...INITIAL_CONFIG.signature, ...template.config?.signature },
-              footer: { ...INITIAL_CONFIG.footer, ...template.config?.footer },
-              design: { ...INITIAL_CONFIG.design, ...template.config?.design }
-            });
+            if (template) {
+              if (template._id) {
+                setActualDbId(template._id);
+              }
+              setName(template.name || matchingPreset?.name || "Invoice Template");
+              setDescription(template.description || matchingPreset?.description || "");
+              setStatus(template.status || "active");
+              if (template.config) {
+                setConfig(prev => ({
+                  ...INITIAL_CONFIG,
+                  ...prev,
+                  ...template.config,
+                  header: { ...INITIAL_CONFIG.header, ...template.config?.header },
+                  seller: { ...INITIAL_CONFIG.seller, ...template.config?.seller },
+                  customer: { ...INITIAL_CONFIG.customer, ...template.config?.customer },
+                  invoiceInfo: { 
+                    ...INITIAL_CONFIG.invoiceInfo, 
+                    ...template.config?.invoiceInfo,
+                    labels: { ...INITIAL_CONFIG.invoiceInfo.labels, ...template.config?.invoiceInfo?.labels }
+                  },
+                  items: { 
+                    ...INITIAL_CONFIG.items, 
+                    ...template.config?.items,
+                    labels: { ...INITIAL_CONFIG.items.labels, ...template.config?.items?.labels }
+                  },
+                  tax: { ...INITIAL_CONFIG.tax, ...template.config?.tax },
+                  payment: { ...INITIAL_CONFIG.payment, ...template.config?.payment },
+                  notes: { ...INITIAL_CONFIG.notes, ...template.config?.notes },
+                  terms: { ...INITIAL_CONFIG.terms, ...template.config?.terms },
+                  signature: { ...INITIAL_CONFIG.signature, ...template.config?.signature },
+                  footer: { ...INITIAL_CONFIG.footer, ...template.config?.footer },
+                  design: { ...INITIAL_CONFIG.design, ...template.config?.design }
+                }));
+              }
+            }
+          } else if (matchingPreset) {
+            // Built-in template preset already loaded, smoothly keep editing
+            console.info(`Editing built-in template preset: ${matchingPreset.name}`);
           } else {
             toast.error("Template not found.");
             navigate("/invoice/templates");
           }
         } catch (err) {
           console.error(err);
-          toast.error("Connection error loading template.");
+          if (!matchingPreset) {
+            toast.error("Connection error loading template.");
+          }
         } finally {
           setIsLoading(false);
           isFirstLoad.current = false;
@@ -228,7 +362,8 @@ export default function InvoiceTemplateEditor() {
 
   // Trigger Autosave debounced
   useEffect(() => {
-    if (isFirstLoad.current || !templateId) return;
+    const saveId = actualDbId || (templateId && !templateId.startsWith("tpl-") ? templateId : null);
+    if (isFirstLoad.current || !saveId) return;
 
     if (autosaveTimerRef.current) {
       clearTimeout(autosaveTimerRef.current);
@@ -238,7 +373,7 @@ export default function InvoiceTemplateEditor() {
     autosaveTimerRef.current = setTimeout(async () => {
       try {
         const token = localStorage.getItem("token");
-        const res = await fetch(`${API_BASE_URL}/invoice-templates/${templateId}`, {
+        const res = await fetch(`${API_BASE_URL}/invoice-templates/${saveId}`, {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
@@ -260,7 +395,7 @@ export default function InvoiceTemplateEditor() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [config, name, description, status]);
+  }, [config, name, description, status, actualDbId, templateId]);
 
   const handleSave = async () => {
     if (!name.trim()) {
@@ -277,33 +412,72 @@ export default function InvoiceTemplateEditor() {
 
     setIsSaving(true);
     try {
-      const url = templateId 
-        ? `${API_BASE_URL}/invoice-templates/${templateId}` 
-        : `${API_BASE_URL}/invoice-templates`;
-      const method = templateId ? "PUT" : "POST";
+      const targetId = actualDbId || (templateId && !templateId.startsWith("tpl-") ? templateId : null);
+      let res;
 
-      const res = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify({ name, description, status, config })
-      });
+      if (targetId) {
+        // Direct update on existing database record
+        res = await fetch(`${API_BASE_URL}/invoice-templates/${targetId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({ name, description, status, config })
+        });
+      } else if (templateId && templateId.startsWith("tpl-")) {
+        // Try PUT with preset ID (backend auto-creates if missing)
+        res = await fetch(`${API_BASE_URL}/invoice-templates/${templateId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({ name, description, status, config })
+        });
+        // Fallback to POST if server is running older route version
+        if (!res.ok && res.status === 404) {
+          res = await fetch(`${API_BASE_URL}/invoice-templates`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify({ name, description, status, config })
+          });
+        }
+      } else {
+        // Create new template
+        res = await fetch(`${API_BASE_URL}/invoice-templates`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify({ name, description, status, config })
+        });
+      }
 
       if (res.status === 401 || res.status === 400) {
-        localStorage.removeItem("token");
-        toast.error("Session expired. Please log in again.");
-        navigate("/auth");
-        return;
+        const errData = await res.json().catch(() => null);
+        if (errData?.error?.code === "UNAUTHORIZED" || errData?.error?.code === "INVALID_TOKEN") {
+          localStorage.removeItem("token");
+          toast.error("Session expired. Please log in again.");
+          navigate("/auth");
+          return;
+        }
+        if (errData?.error?.message) {
+          toast.error(errData.error.message);
+          return;
+        }
       }
 
       if (res.ok) {
         toast.success(templateId ? "Template updated successfully!" : "Template created successfully!");
         navigate("/invoice/templates");
       } else {
-        const errData = await res.json();
-        toast.error(errData.error?.message || "Failed to save template.");
+        const errData = await res.json().catch(() => ({}));
+        toast.error(errData?.error?.message || "Failed to save template.");
       }
     } catch (err) {
       console.error(err);
@@ -379,6 +553,53 @@ export default function InvoiceTemplateEditor() {
         </div>
 
         <div className="flex items-center gap-3">
+          <Select
+            value={config.layout || "modern-indigo"}
+            onValueChange={(val: string) => {
+              const preset = TEMPLATE_REGISTRY.find(t => t.layoutKey === val);
+              if (preset) {
+                if (!name || TEMPLATE_REGISTRY.some(t => t.name === name)) {
+                  setName(preset.name);
+                }
+                setDescription(preset.description);
+                setConfig(prev => ({
+                  ...prev,
+                  layout: preset.layoutKey,
+                  design: {
+                    ...prev.design,
+                    ...preset.config.design
+                  },
+                  invoiceInfo: {
+                    ...prev.invoiceInfo,
+                    labels: {
+                      ...prev.invoiceInfo.labels,
+                      ...preset.config.invoiceInfo.labels
+                    }
+                  },
+                  items: {
+                    ...prev.items,
+                    labels: {
+                      ...prev.items.labels,
+                      ...preset.config.items.labels
+                    }
+                  }
+                }));
+                toast.success(`Applied ${preset.name} template preset`);
+              }
+            }}
+          >
+            <SelectTrigger className="h-10 w-44 rounded-xl border-slate-200 bg-white text-xs font-semibold text-slate-800">
+              <SelectValue placeholder="Select Style Preset" />
+            </SelectTrigger>
+            <SelectContent className="bg-white border border-slate-200">
+              {TEMPLATE_REGISTRY.map(t => (
+                <SelectItem key={t.layoutKey} value={t.layoutKey} className="text-xs">
+                  {t.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Input 
             value={name} 
             onChange={(e) => setName(e.target.value)}
@@ -817,283 +1038,12 @@ export default function InvoiceTemplateEditor() {
 
           {/* Center Column - Real-time A4 Layout Preview */}
           <div className="lg:col-span-9 bg-slate-100 p-8 overflow-y-auto flex justify-center h-full no-print">
-            <div 
-              id="a4-preview"
-              className="w-[210mm] min-h-[297mm] bg-white p-12 shadow-2xl relative border border-slate-300 rounded-sm"
-              style={{ 
-                fontFamily: config.design.fontFamily,
-                fontSize: `${config.design.fontSize}px`,
-                color: config.design.textColor,
-                lineHeight: "1.5"
-              }}
-            >
-              
-              {/* Dynamic Styled Layout from sectionsOrder */}
-              {config.sectionsOrder.map((sectionName) => {
-                if (sectionName === "header") {
-                  return (
-                    <div 
-                      key="header" 
-                      className={`mb-6 flex ${config.header.logoPosition === 'center' ? 'flex-col items-center text-center' : config.header.logoPosition === 'right' ? 'flex-row-reverse justify-between items-start' : 'justify-between items-start'}`}
-                    >
-                      {config.header.showLogo && (
-                        <div className="mb-2">
-                          {config.header.logoUrl ? (
-                            <img 
-                              src={config.header.logoUrl} 
-                              alt="Logo" 
-                              className={`object-contain ${config.header.logoSize === 'small' ? 'h-10 w-24' : config.header.logoSize === 'large' ? 'h-20 w-44' : 'h-14 w-32'}`} 
-                            />
-                          ) : (
-                            <div 
-                              className={`bg-slate-100 border border-dashed border-slate-300 flex items-center justify-center text-slate-400 text-xs font-bold rounded-lg ${config.header.logoSize === 'small' ? 'h-10 w-24' : config.header.logoSize === 'large' ? 'h-20 w-44' : 'h-14 w-32'}`}
-                              style={{ borderRadius: `${config.design.cornerRadius}px` }}
-                            >
-                              [ Company Logo ]
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      <div className="text-right max-w-md">
-                        {config.header.showCompanyName && <h2 className="text-xl font-black" style={{ color: config.design.primaryColor }}>FINSMART DEMO CO.</h2>}
-                        {config.header.showAddress && <p className="text-slate-500 text-xs mt-1">123 Financial Avenue, Tech District, Chennai, Tamil Nadu - 600001</p>}
-                        {config.header.showPhone && <p className="text-slate-500 text-xs">Phone: +91 98765 43210</p>}
-                        {config.header.showEmail && <p className="text-slate-500 text-xs">Email: billing@finsmart.com</p>}
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "seller" && config.seller.showName) {
-                  return (
-                    <div key="seller" className="mb-6 p-4 bg-slate-50 rounded-xl border border-slate-200/50" style={{ backgroundColor: config.design.secondaryColor, borderRadius: `${config.design.cornerRadius}px` }}>
-                      <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Seller Details</h4>
-                      {config.seller.showName && <p className="font-extrabold">SHREE ANDAL AI SOFTWARE SOLUTIONS (OPC) PRIVATE LIMITED</p>}
-                      {config.seller.showAddress && <p className="text-slate-600 text-xs mt-0.5">3/124 Main Road, Andal Nagar, Trichy, Tamil Nadu - 620001</p>}
-                      {config.seller.showPhone && <p className="text-slate-600 text-xs">Phone: +91 94432 10101</p>}
-                      {config.seller.showEmail && <p className="text-slate-600 text-xs">Email: billing@andalai.com</p>}
-                      {config.seller.showGSTIN && <p className="text-xs font-bold text-indigo-700 mt-1">GSTIN: 33ANDAL8271A1Z5</p>}
-                    </div>
-                  );
-                }
-
-                if (sectionName === "customer" && config.customer.showName) {
-                  return (
-                    <div key="customer" className="mb-6 grid grid-cols-2 gap-4">
-                      <div>
-                        <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Bill To</h4>
-                        {config.customer.showName && <p className="font-bold text-sm">Acme Corporates Private Limited</p>}
-                        {config.customer.showBillingAddress && <p className="text-slate-600 text-xs mt-0.5">456 Corporate Towers, Outer Ring Road, Bangalore, Karnataka - 560001</p>}
-                        {config.customer.showPhone && <p className="text-slate-650 text-xs">Phone: +91 99988 87776</p>}
-                        {config.customer.showEmail && <p className="text-slate-650 text-xs">Email: accounts@acme.com</p>}
-                      </div>
-                      <div className="text-right">
-                        {config.customer.showGSTIN && <p className="text-xs font-bold text-slate-900 mt-6">Customer GSTIN: <span className="text-indigo-700">29ACMEP9812C1Z2</span></p>}
-                        {config.customer.showPlaceOfSupply && <p className="text-xs text-slate-600">Place of Supply: <span className="font-medium text-slate-900">Karnataka (29)</span></p>}
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "invoiceInfo") {
-                  return (
-                    <div key="invoiceInfo" className="mb-6 grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 border border-slate-200 rounded-xl bg-white" style={{ borderRadius: `${config.design.cornerRadius}px` }}>
-                      {config.invoiceInfo.showInvoiceNumber && (
-                        <div>
-                          <p className="text-[10px] text-slate-500 uppercase font-bold">{config.invoiceInfo.labels.invoiceNumber}</p>
-                          <p className="font-extrabold text-sm" style={{ color: config.design.primaryColor }}>#INV-2026-00001</p>
-                        </div>
-                      )}
-                      {config.invoiceInfo.showInvoiceDate && (
-                        <div>
-                          <p className="text-[10px] text-slate-500 uppercase font-bold">{config.invoiceInfo.labels.invoiceDate}</p>
-                          <p className="font-bold text-slate-900">13 Aug 2026</p>
-                        </div>
-                      )}
-                      {config.invoiceInfo.showDueDate && (
-                        <div>
-                          <p className="text-[10px] text-slate-500 uppercase font-bold">{config.invoiceInfo.labels.dueDate}</p>
-                          <p className="font-bold text-slate-900">28 Aug 2026</p>
-                        </div>
-                      )}
-                      {config.invoiceInfo.showPaymentTerms && (
-                        <div>
-                          <p className="text-[10px] text-slate-500 uppercase font-bold">{config.invoiceInfo.labels.paymentTerms}</p>
-                          <p className="text-slate-700">Net 15 Days</p>
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-
-                if (sectionName === "items") {
-                  return (
-                    <div key="items" className="mb-6">
-                      <table 
-                        className={`w-full text-left border-collapse ${
-                          config.design.borderStyle === 'light' 
-                            ? 'border border-slate-200' 
-                            : config.design.borderStyle === 'medium' 
-                              ? 'border-2 border-slate-400' 
-                              : 'border-none'
-                        }`}
-                      >
-                        <thead>
-                          <tr 
-                            className="text-white text-xs font-bold"
-                            style={{ backgroundColor: config.design.primaryColor }}
-                          >
-                            <th className="py-2.5 px-3">#</th>
-                            {config.items.columns.map((col) => (
-                              <th key={col} className="py-2.5 px-3 text-left">
-                                {(config.items.labels as any)[col] || col}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr className="border-b border-slate-100 hover:bg-slate-50 text-xs">
-                            <td className="py-3 px-3">1</td>
-                            {config.items.columns.map((col) => {
-                              if (col === "item") return <td key={col} className="py-3 px-3 font-bold">Dell XPS 15 Laptop</td>;
-                              if (col === "description") return <td key={col} className="py-3 px-3 text-slate-500 text-[11px]">Intel i7 | 16GB RAM | 512GB SSD</td>;
-                              if (col === "sku") return <td key={col} className="py-3 px-3 text-slate-600">DELL-XPS15-01</td>;
-                              if (col === "hsn") return <td key={col} className="py-3 px-3">84713010</td>;
-                              if (col === "quantity") return <td key={col} className="py-3 px-3">2 Pcs</td>;
-                              if (col === "rate") return <td key={col} className="py-3 px-3">₹50,000.00</td>;
-                              if (col === "tax") return <td key={col} className="py-3 px-3">18% GST</td>;
-                              if (col === "amount") return <td key={col} className="py-3 px-3 font-bold text-slate-950">₹1,00,000.00</td>;
-                              return <td key={col}>-</td>;
-                            })}
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "tax" && config.tax.showSummary) {
-                  return (
-                    <div key="tax" className="mb-6 flex justify-end">
-                      <div className="w-80 space-y-2 border-t border-slate-200 pt-3">
-                        <div className="flex justify-between items-center text-xs">
-                          <span className="text-slate-500">Subtotal</span>
-                          <span className="font-semibold">₹1,00,000.00</span>
-                        </div>
-                        {config.tax.showTaxableAmount && (
-                          <div className="flex justify-between items-center text-xs">
-                            <span className="text-slate-500">Taxable Amount</span>
-                            <span>₹1,00,000.00</span>
-                          </div>
-                        )}
-                        {config.tax.showCGST && (
-                          <div className="flex justify-between items-center text-xs text-slate-650">
-                            <span>CGST (9%)</span>
-                            <span>₹9,000.00</span>
-                          </div>
-                        )}
-                        {config.tax.showSGST && (
-                          <div className="flex justify-between items-center text-xs text-slate-650">
-                            <span>SGST (9%)</span>
-                            <span>₹9,000.00</span>
-                          </div>
-                        )}
-                        {config.tax.showTotalTax && (
-                          <div className="flex justify-between items-center text-xs border-t border-slate-100 pt-1.5 font-bold">
-                            <span className="text-slate-650">Total GST Tax</span>
-                            <span>₹18,000.00</span>
-                          </div>
-                        )}
-                        <div className="flex justify-between items-center py-2 border-t border-slate-200">
-                          <span className="font-extrabold text-slate-900">Grand Total</span>
-                          <span className="text-base font-black" style={{ color: config.design.primaryColor }}>₹1,18,000.00</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "payment" && config.payment.showPaidAmount) {
-                  return (
-                    <div key="payment" className="mb-6 p-4 rounded-xl border border-slate-250 bg-slate-50/50" style={{ borderRadius: `${config.design.cornerRadius}px` }}>
-                      <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Payment Details</h4>
-                      <div className="grid grid-cols-3 gap-2 text-xs">
-                        {config.payment.showPaidAmount && (
-                          <div>
-                            <span className="text-slate-500 block">Paid Amount</span>
-                            <span className="font-bold text-slate-900">₹68,000.00</span>
-                          </div>
-                        )}
-                        {config.payment.showBalance && (
-                          <div>
-                            <span className="text-slate-500 block">Balance Due</span>
-                            <span className="font-black text-rose-600">₹50,000.00</span>
-                          </div>
-                        )}
-                        {config.payment.showPaymentMethod && (
-                          <div>
-                            <span className="text-slate-500 block">Method</span>
-                            <span className="text-slate-700 capitalize">UPI Transfer</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "notes" && config.notes.show) {
-                  return (
-                    <div key="notes" className="mb-6">
-                      <h5 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">{config.notes.label}</h5>
-                      <p className="text-xs text-slate-600 whitespace-pre-line">{config.notes.defaultText}</p>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "terms" && config.terms.show) {
-                  return (
-                    <div key="terms" className="mb-6">
-                      <h5 className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">{config.terms.label}</h5>
-                      <p className="text-xs text-slate-500 whitespace-pre-line leading-relaxed">{config.terms.defaultText}</p>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "signature" && config.signature.show) {
-                  return (
-                    <div key="signature" className="mb-6 flex flex-col items-end">
-                      <div className="text-center w-48 mt-4">
-                        {config.signature.imageUrl ? (
-                          <img 
-                            src={config.signature.imageUrl} 
-                            alt="Signature" 
-                            className="h-10 object-contain mx-auto mb-1.5" 
-                          />
-                        ) : (
-                          <div className="h-10 w-full border border-dashed border-slate-200 rounded flex items-center justify-center text-[10px] text-slate-400 font-bold mb-1.5">
-                            [ Signature Seal ]
-                          </div>
-                        )}
-                        <div className="border-t border-slate-200 pt-1">
-                          <p className="font-bold text-xs text-slate-900">{config.signature.name}</p>
-                          <p className="text-[10px] text-slate-500">{config.signature.designation}</p>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (sectionName === "footer" && config.footer.show) {
-                  return (
-                    <div key="footer" className="mt-12 pt-4 border-t border-slate-200 text-center text-[10px] text-slate-450">
-                      <p className="leading-relaxed">{config.footer.text}</p>
-                    </div>
-                  );
-                }
-
-                return null;
-              })}
+            <div id="a4-preview" className="w-full flex justify-center">
+              <InvoiceTemplateRenderer
+                invoice={SAMPLE_INVOICE}
+                templateConfig={config}
+                layoutKey={config.layout as TemplateLayoutKey}
+              />
             </div>
           </div>
         </div>

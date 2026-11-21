@@ -197,8 +197,8 @@ router.get("/generate", verifyToken, async (req, res) => {
     res.json({
       companyName: companyName || "Your Company",
       period: period || `${start.toLocaleDateString('en-US', {month: 'long'})} ${start.getFullYear()}`,
-      // Inflow breakdown
-      sales: metrics.revenue.sales,
+      // Inflow breakdown (cash receipts from sales net of uncollected receivables)
+      sales: Math.max(0, metrics.revenue.sales - (metrics.cashFlow?.receivables || 0)),
       serviceIncome: 0,
       interestIncome: 0,
       otherIncome: Math.max(0, metrics.revenue.total - metrics.revenue.sales),

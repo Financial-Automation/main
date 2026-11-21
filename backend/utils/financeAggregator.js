@@ -107,12 +107,12 @@ export async function getFinanceMetrics(userId, start, end) {
             isDeleted: { $ne: true },
             sourceInvoiceType: { $ne: "purchase" },
             invoiceDate: { $lte: endDate }
-        }).select("paymentStatus status balanceDue taxAmount totalTax").lean() : Promise.resolve([]),
+        }).select("paymentStatus status balanceDue balance grandTotal total amountPaid paid paymentMethod saleType taxAmount totalTax").lean() : Promise.resolve([]),
         PurchaseInvoice ? PurchaseInvoice.find({
             ...userFilter,
             isDeleted: { $ne: true },
             createdAt: { $lte: endDate }
-        }).select("balance totalTax").lean() : Promise.resolve([])
+        }).select("status balance total paid totalTax").lean() : Promise.resolve([])
     ]);
 
     const bkIncomeEntries = bookkeepingEntries.filter(e => e.type === "income" || e.type === "Income");
@@ -142,13 +142,43 @@ export async function getFinanceMetrics(userId, start, end) {
 
     // Accounts Receivable and Accounts Payable
     const salesInvoiceOutstanding = salesInvoices
-        .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
-        .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
+        .filter(inv => {
+            const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+            const isCredit = method === "credit";
+            if (isCredit) return true;
+            return inv.paymentStatus !== "paid" && inv.status !== "paid";
+        })
+        .reduce((sum, inv) => {
+            const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+            const isCredit = method === "credit";
+            const tot = Number(inv.grandTotal || inv.total || 0);
+            const pd = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+            let bal = (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue)))
+                ? Number(inv.balanceDue)
+                : ((inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+                    ? Number(inv.balance)
+                    : Math.max(0, tot - pd));
+            if (isCredit && pd === 0 && bal === 0 && tot > 0) {
+                bal = tot;
+            }
+            if (pd > 0) {
+                bal = Math.max(0, tot - pd);
+            }
+            return sum + Math.max(0, bal);
+        }, 0);
 
-    const purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
+    const purchaseInvoiceOutstanding = purchaseInvoices.reduce((sum, inv) => {
+        if (inv.status === "cancelled" || inv.status === "paid") return sum;
+        const tot = Number(inv.total || 0);
+        const pd = Number(inv.paid || 0);
+        const bal = (inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+            ? Number(inv.balance)
+            : Math.max(0, tot - pd);
+        return sum + Math.max(0, bal);
+    }, 0);
 
-    const totalCashInflow = totalRevenue;
-    const totalCashOutflow = totalExpenses;
+    const totalCashInflow = Math.max(0, totalRevenue - salesInvoiceOutstanding);
+    const totalCashOutflow = Math.max(0, totalExpenses - purchaseInvoiceOutstanding);
     const netCashFlow = totalCashInflow - totalCashOutflow;
 
     const salesRevenue = bkIncomeEntries.filter(e => e.category === "Sales").reduce((sum, e) => sum + (e.amount || 0), 0);
@@ -220,12 +250,12 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
             isDeleted: { $ne: true },
             sourceInvoiceType: { $ne: "purchase" },
             invoiceDate: { $lte: endDate }
-        }).select("paymentStatus status balanceDue").lean() : Promise.resolve([]),
+        }).select("paymentStatus status balanceDue balance grandTotal total amountPaid paid paymentMethod saleType").lean() : Promise.resolve([]),
         PurchaseInvoice ? PurchaseInvoice.find({
             ...userFilter,
             isDeleted: { $ne: true },
             createdAt: { $lte: endDate }
-        }).select("balance").lean() : Promise.resolve([]),
+        }).select("status balance total paid").lean() : Promise.resolve([]),
         InventoryItem ? InventoryItem.find({
             ...userFilter,
             isDeleted: { $ne: true }
@@ -240,16 +270,52 @@ export async function getLiveBalanceSheet(userId, period = "this-month") {
         .filter(e => e.type === "expense" || e.type === "Expense")
         .reduce((sum, e) => sum + (e.amount || 0), 0);
 
+    // Accounts Receivable & Accounts Payable
     const accountsReceivable = salesInvoices
-        .filter(inv => inv.paymentStatus !== "paid" && inv.status !== "paid")
-        .reduce((sum, inv) => sum + (inv.balanceDue || 0), 0);
+        .filter(inv => {
+            const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+            const isCredit = method === "credit";
+            if (isCredit) return true;
+            return inv.paymentStatus !== "paid" && inv.status !== "paid";
+        })
+        .reduce((sum, inv) => {
+            const method = String(inv.paymentMethod || inv.saleType || "").trim().toLowerCase();
+            const isCredit = method === "credit";
+            const tot = Number(inv.grandTotal || inv.total || 0);
+            const pd = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+            let bal = (inv.balanceDue !== undefined && inv.balanceDue !== null && !isNaN(Number(inv.balanceDue)))
+                ? Number(inv.balanceDue)
+                : ((inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+                    ? Number(inv.balance)
+                    : Math.max(0, tot - pd));
+            if (isCredit && pd === 0 && bal === 0 && tot > 0) {
+                bal = tot;
+            }
+            if (pd > 0) {
+                bal = Math.max(0, tot - pd);
+            }
+            return sum + Math.max(0, bal);
+        }, 0);
 
-    const accountsPayable = purchaseInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
+    const accountsPayable = purchaseInvoices.reduce((sum, inv) => {
+        if (inv.status === "cancelled" || inv.status === "paid") return sum;
+        const tot = Number(inv.total || 0);
+        const pd = Number(inv.paid || 0);
+        const bal = (inv.balance !== undefined && inv.balance !== null && !isNaN(Number(inv.balance)))
+            ? Number(inv.balance)
+            : Math.max(0, tot - pd);
+        return sum + Math.max(0, bal);
+    }, 0);
 
     const currentInventoryValuation = inventoryItems.reduce((sum, item) => sum + ((item.quantity || 0) * (item.price || item.costPrice || 0)), 0);
 
-    // Cash and Bank Balance: Total Inflows - Total Outflows
-    const cashAndBank = cumulativeIncome - cumulativeExpense;
+    // Cash and Bank Balance: Actual Cash Collected - Actual Cash Disbursed
+    // In accrual bookkeeping, cumulativeIncome includes sales revenue (which includes uncollected accountsReceivable),
+    // and cumulativeExpense includes purchase expenses (which includes unpaid accountsPayable).
+    // Cash balance must reflect actual cash collections and payments, avoiding double-counting open receivables.
+    const actualCashCollected = Math.max(0, cumulativeIncome - accountsReceivable);
+    const actualCashDisbursed = Math.max(0, cumulativeExpense - accountsPayable);
+    const cashAndBank = actualCashCollected - actualCashDisbursed;
 
     const fixedAssets = 0;
     const currentAssets = cashAndBank + accountsReceivable + currentInventoryValuation;

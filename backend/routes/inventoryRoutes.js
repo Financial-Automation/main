@@ -69,6 +69,10 @@ router.post("/add", verifyToken, async (req, res) => {
     try {
         const { itemName, sku, quantity, price, category, gstRate, sgst, cgst, igst, stateOfSupply, minStockLevel } = req.body;
 
+        if (!itemName || price === undefined || price === null || !sku) {
+            return res.status(400).json({ message: "Missing required fields: itemName, sku, and price are required." });
+        }
+
         // Use new gstRate field, fallback to old sgst+cgst+igst for backward compatibility
         const effectiveGstRate = Number(gstRate) || (Number(sgst) || 0) + (Number(cgst) || 0) + (Number(igst) || 0);
 
@@ -314,13 +318,13 @@ router.post("/sell/:id", verifyToken, async (req, res) => {
         let sgstAmount, cgstAmount, igstAmount;
 
         if (isInterState) {
-            // Inter-state sale: Apply IGST at 18%
+            // Inter-state sale: Apply IGST at item's configured GST rate
             sgstRate = 0;
             cgstRate = 0;
-            igstRate = 18;
+            igstRate = itemGstRate;
             sgstAmount = 0;
             cgstAmount = 0;
-            igstAmount = (subtotal * 18) / 100;
+            igstAmount = (subtotal * itemGstRate) / 100;
         } else {
             // Intra-state sale: Split GST 50-50 into SGST + CGST
             sgstRate = itemGstRate / 2;

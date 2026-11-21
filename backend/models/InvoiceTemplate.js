@@ -105,6 +105,10 @@ const configSchema = new mongoose.Schema({
     borderStyle: { type: String, enum: ['none', 'light', 'medium'], default: 'light' },
     cornerRadius: { type: Number, default: 8 }
   },
+  layout: {
+    type: String,
+    default: 'modern-indigo'
+  },
   sectionsOrder: {
     type: [String],
     default: [

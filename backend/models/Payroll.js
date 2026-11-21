@@ -29,14 +29,18 @@ const payrollSchema = new mongoose.Schema({
     type: String,
     default: "General",
   },
+  employeeExperience: {
+    type: Number,
+    default: 0,
+  },
   payrollMonth: {
     type: String,
-    required: true,
+    default: () => new Date().toISOString().slice(0, 7),
     index: true, // e.g. "2026-10"
   },
   payrollPeriod: {
     type: String,
-    default: "October 2026",
+    default: () => new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }),
   },
   basicSalary: {
     type: Number,
@@ -117,7 +121,7 @@ const payrollSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: ["draft", "calculated", "reviewed", "approved", "paid"],
-    default: "draft",
+    default: "calculated",
     index: true,
   },
   bookkeepingEntryId: {
@@ -139,7 +143,7 @@ const payrollSchema = new mongoose.Schema({
   },
 });
 
-payrollSchema.index({ userId: 1, employeeId: 1, payrollMonth: 1 }, { unique: true });
+payrollSchema.index({ userId: 1, employeeId: 1, createdAt: -1 });
 payrollSchema.index({ userId: 1, payrollMonth: 1, status: 1 });
 
 const Payroll = mongoose.models.Payroll || mongoose.model("Payroll", payrollSchema);

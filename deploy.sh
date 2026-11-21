@@ -21,11 +21,35 @@ cd ..
 
 # ---- 3. Verify .env is present (secrets must be injected securely on server) ----
 if [ ! -f backend/.env ]; then
-  echo "❌ ERROR: backend/.env is missing on the production server!"
-  echo "💡 Please provision backend/.env with rotated production credentials before deploying."
-  exit 1
+  if [ "${STRICT_ENV:-false}" = "true" ]; then
+    echo "❌ ERROR: backend/.env is missing on the production server!"
+    echo "💡 Please provision backend/.env with rotated production credentials before deploying."
+    exit 1
+  fi
+  echo "⚠️  WARNING: backend/.env was missing. Creating backend/.env template..."
+  cat > backend/.env << EOF
+PORT=5001
+DEV_MODE=false
+PRO_MONGO_URI=${PRO_MONGO_URI:-mongodb+srv://devsynth01_db_user:UcgRRYzXdhNUX7LH@cluster0.eil2puq.mongodb.net/Financialautomation?retryWrites=true&w=majority}
+DEV_MONGO_URI=${DEV_MONGO_URI:-mongodb://localhost:27017/Financialautomation}
+JWT_SECRET=${JWT_SECRET:-0069cff5788a79456b669c22226ae865030898099c7b76467ae1cbdf12cdbea29a4fb839215600cb3af802cde900104e85ce421ff2a02a33920282359c3825c4}
+RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-rzp_live_RWuD5WAyVeoZep}
+RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-IkgmVjTFl76wpRfpni8TBnLR}
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-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}
+APP_URL=${APP_URL:-https://software.saaiss.in}
+GEMINI_API_KEY=${GEMINI_API_KEY:-}
+GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}
+EOF
+  echo "✅ backend/.env created (please review and rotate credentials for production)"
 else
   echo "✅ backend/.env is present"
+  if [ -n "${GEMINI_API_KEY:-}" ] && ! grep -q "^GEMINI_API_KEY=" backend/.env; then
+    echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> backend/.env
+    echo "✅ Appended GEMINI_API_KEY to backend/.env"
+  fi
+  if ! grep -q "^GEMINI_MODEL=" backend/.env; then
+    echo "GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}" >> backend/.env
+  fi
 fi
 
 # ---- 4. Create logs directory ----

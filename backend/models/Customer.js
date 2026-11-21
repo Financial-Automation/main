@@ -10,10 +10,6 @@ const customerSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  companyName: {
-    type: String,
-    default: "",
-  },
   email: {
     type: String,
     default: "",
@@ -42,15 +38,6 @@ const customerSchema = new mongoose.Schema({
     type: String,
     default: "Due on Receipt",
   },
-  notes: {
-    type: String,
-    default: "",
-  },
-  status: {
-    type: String,
-    enum: ["active", "inactive"],
-    default: "active",
-  },
   outstandingBalance: {
     type: Number,
     default: 0,
@@ -66,9 +53,7 @@ const customerSchema = new mongoose.Schema({
 });
 
 customerSchema.index({ userId: 1, name: 1 });
-customerSchema.index({ userId: 1, status: 1 });
 
 const Customer = mongoose.model("Customer", customerSchema);
 
 export default Customer;
-

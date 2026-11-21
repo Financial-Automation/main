@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 import { checkPlanLimit } from "../utils/authMiddleware.js";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
 import User from "../models/User.js";
-import Vendor from "../models/Vendor.js";
+import { getTotalPayables } from "../utils/financialTools.js";
 
 const router = express.Router();
 
@@ -19,15 +19,15 @@ const purchaseInvoiceSchema = new mongoose.Schema({
     customerName: { type: String, default: "" },
     customerPhone: { type: String, default: "" },
     customerGstin: { type: String, default: "" },
-    supplierName: { type: String, required: true },
+    supplierName: { type: String, default: "Supplier" },
     phone: { type: String, default: "" },
     gstin: { type: String, default: "" },
-    billNo: { type: String, required: true },
-    billDate: { type: String, required: true },
+    billNo: { type: String, default: "" },
+    billDate: { type: String, default: "" },
     paymentMethod: { type: String, enum: ["Cash", "Credit", "G Pay", "Net Banking"], default: "Cash" },
     invoiceSize: { type: String, enum: ["A4", "A5"], default: "A4" },
     invoiceFormat: { type: String, enum: ["Supermarket", "Hotel", "Stationery Shop"], default: "Supermarket" },
-    stateOfSupply: { type: String, required: true },
+    stateOfSupply: { type: String, default: "Tamil Nadu" },
     businessState: { type: String, default: "Tamil Nadu" },
     items: [{
         itemName: { type: String, required: true },
@@ -107,7 +107,6 @@ const enrichInvoiceWithBankDetails = async (invoice) => {
 
 // Middleware to verify token
 const verifyToken = (req, res, next) => {
-    if (process.env.SKIP_DUPLICATE_JWT !== "false" && req.user) return next();
     const token = req.headers.authorization?.split(" ")[1];
     if (!token) {
         return res.status(401).json({ message: "Access denied. No token provided." });
@@ -122,10 +121,87 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-// GET - Public (no auth) purchase invoice by ID
+// GET - Public (no auth) purchase invoice by ID or Bill No
 router.get("/public/:id", async (req, res) => {
     try {
-        const invoice = await PurchaseInvoice.findById(req.params.id);
+        const idParam = req.params.id;
+        let invoice = null;
+
+        if (idParam && mongoose.Types.ObjectId.isValid(idParam)) {
+            invoice = await PurchaseInvoice.findById(idParam);
+        }
+
+        if (!invoice && idParam) {
+            invoice = await PurchaseInvoice.findOne({ billNo: idParam });
+        }
+
+        if (!invoice && idParam) {
+            invoice = await PurchaseInvoice.findOne({
+                billNo: { $regex: new RegExp(`^${idParam}$`, "i") }
+            });
+        }
+
+        // Secondary fallback to standard Invoice collection (if created from AutomationInvoice)
+        if (!invoice && idParam) {
+            try {
+                const Invoice = mongoose.models.Invoice;
+                if (Invoice) {
+                    let inv = null;
+                    if (mongoose.Types.ObjectId.isValid(idParam)) {
+                        inv = await Invoice.findOne({ _id: idParam, isDeleted: false });
+                    }
+                    if (!inv) {
+                        inv = await Invoice.findOne({ invoiceNumber: idParam, isDeleted: false });
+                    }
+                    if (!inv) {
+                        inv = await Invoice.findOne({
+                            invoiceNumber: { $regex: new RegExp(`^${idParam}$`, "i") },
+                            isDeleted: false
+                        });
+                    }
+                    if (inv) {
+                        invoice = {
+                            _id: inv._id,
+                            billNo: inv.invoiceNumber,
+                            billDate: inv.invoiceDate ? new Date(inv.invoiceDate).toISOString().split("T")[0] : "",
+                            supplierName: inv.businessName || inv.sellerName || "Supplier",
+                            customerName: inv.customerName || "Customer",
+                            customerType: inv.transactionType || "B2C",
+                            phone: inv.businessPhone || inv.sellerPhone || "",
+                            gstin: inv.businessGSTIN || inv.sellerGSTIN || "",
+                            customerPhone: inv.customerPhone || "",
+                            customerGstin: inv.customerGSTIN || "",
+                            stateOfSupply: inv.stateOfSupply || "Tamil Nadu",
+                            items: (inv.items || []).map((it) => ({
+                                itemName: it.productName || it.name || "Item",
+                                itemCode: it.itemCode || it.sku || "",
+                                quantity: it.quantity,
+                                unit: it.unit || "Pcs",
+                                pricePerUnit: it.unitPrice,
+                                taxPercent: it.taxRate || 0,
+                                discountAmount: it.discount || 0,
+                                amount: it.total
+                            })),
+                            subtotal: inv.subtotal,
+                            totalTax: inv.taxAmount,
+                            total: inv.grandTotal,
+                            paid: inv.amountPaid || 0,
+                            paymentMethod: inv.paymentMethod,
+                            bankName: inv.bankName,
+                            accountType: inv.accountType,
+                            accountNumber: inv.accountNumber,
+                            ifscCode: inv.ifscCode,
+                            authorisedSignature: inv.authorisedSignature,
+                            templateId: inv.templateId,
+                            templateSnapshot: inv.templateSnapshot
+                        };
+                    }
+                }
+            } catch (invErr) {
+                console.warn("Secondary Invoice lookup notice:", invErr);
+            }
+        }
+
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
@@ -156,13 +232,36 @@ router.post("/create", verifyToken, async (req, res) => {
             if (!invoiceData.authorisedSignature) invoiceData.authorisedSignature = user.authorisedSignature || "Store Manager";
         }
 
+        if (!invoiceData.supplierName || invoiceData.supplierName.trim() === "") {
+            invoiceData.supplierName = invoiceData.partyName || "Supplier";
+        }
+        if (!invoiceData.billNo || invoiceData.billNo.trim() === "") {
+            const count = await PurchaseInvoice.countDocuments();
+            invoiceData.billNo = `BILL-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, "0")}`;
+        }
+        if (!invoiceData.billDate || invoiceData.billDate.trim() === "") {
+            invoiceData.billDate = new Date().toISOString().split("T")[0];
+        }
+        if (!invoiceData.stateOfSupply || invoiceData.stateOfSupply.trim() === "") {
+            invoiceData.stateOfSupply = "Tamil Nadu";
+        }
+        if (!invoiceData.items || !Array.isArray(invoiceData.items)) {
+            invoiceData.items = [];
+        }
+
+        const tot = Number(invoiceData.total || invoiceData.grandTotal) || 0;
+        const pd = Number(invoiceData.paid || invoiceData.amountPaid) || 0;
+        if (invoiceData.balance === undefined || invoiceData.balance === null || isNaN(Number(invoiceData.balance))) {
+            invoiceData.balance = Math.max(0, Math.round((tot - pd) * 100) / 100);
+        }
+
         const newInvoice = new PurchaseInvoice({
             userId: req.user.id,
             ...invoiceData,
         });
         await newInvoice.save();
 
-        // Automatically generate Bookkeeping Entry and sync Vendor for non-draft purchase invoices
+        // Automatically generate Bookkeeping Entry for purchase invoice if not draft
         if (newInvoice.status !== 'draft') {
             await upsertAutomatedBookkeepingEntry({
                 userId: req.user.id,
@@ -173,33 +272,6 @@ router.post("/create", verifyToken, async (req, res) => {
                 type: "expense",
                 referenceId: `purchase_inv_${newInvoice._id}`
             });
-
-            // Link supplier or auto-create Vendor document
-            const VendorModel = Vendor;
-            if (VendorModel && newInvoice.supplierName) {
-                try {
-                    let vendorDoc = await VendorModel.findOne({
-                        $or: [{ userId: req.user.id }, { userId: new mongoose.Types.ObjectId(req.user.id) }],
-                        name: { $regex: new RegExp(`^${newInvoice.supplierName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-                    });
-                    if (!vendorDoc) {
-                        vendorDoc = new VendorModel({
-                            userId: req.user.id,
-                            name: newInvoice.supplierName.trim(),
-                            phone: newInvoice.phone || "",
-                            gstin: newInvoice.gstin || "",
-                            placeOfSupply: newInvoice.stateOfSupply || ""
-                        });
-                        await vendorDoc.save();
-                    }
-                    const balance = (newInvoice.total || 0) - (newInvoice.paid || 0);
-                    vendorDoc.outstandingPayable = (vendorDoc.outstandingPayable || 0) + Math.max(0, balance);
-                    vendorDoc.updatedAt = new Date();
-                    await vendorDoc.save();
-                } catch (vErr) {
-                    console.warn("⚠️ Vendor sync warning during purchase creation:", vErr.message);
-                }
-            }
         }
 
         // Add purchased items to inventory stock if not draft
@@ -258,6 +330,7 @@ router.post("/create", verifyToken, async (req, res) => {
         res.status(201).json({
             message: newInvoice.status === 'draft' ? "Purchase invoice drafted!" : "Purchase invoice saved & items added to stock!",
             invoice: newInvoice,
+            invoiceId: newInvoice._id,
             stockUpdates: stockResults,
         });
     } catch (error) {
@@ -279,6 +352,12 @@ router.put("/:id", verifyToken, async (req, res) => {
         const wasDraft = existingInvoice.status === "draft" || existingInvoice.status === undefined;
         const isNowCompleted = invoiceData.status !== "draft";
         
+        const tot = Number(invoiceData.total !== undefined ? invoiceData.total : existingInvoice.total) || 0;
+        const pd = Number(invoiceData.paid !== undefined ? invoiceData.paid : existingInvoice.paid) || 0;
+        if (invoiceData.balance === undefined || invoiceData.balance === null || isNaN(Number(invoiceData.balance))) {
+            invoiceData.balance = Math.max(0, Math.round((tot - pd) * 100) / 100);
+        }
+
         Object.assign(existingInvoice, invoiceData);
         await existingInvoice.save();
 
@@ -358,7 +437,12 @@ router.get("/all", verifyToken, async (req, res) => {
         const invoices = await PurchaseInvoice.find({ userId: req.user.id }).sort({ createdAt: -1 });
         const user = await User.findById(req.user.id);
         const enrichedInvoices = invoices.map(inv => {
-            const obj = inv.toObject();
+            const obj = inv.toObject ? inv.toObject() : { ...inv };
+            const tot = Number(obj.total || obj.grandTotal || 0);
+            const pd = Number(obj.paid || obj.amountPaid || 0);
+            if (obj.balance === undefined || obj.balance === null || isNaN(Number(obj.balance))) {
+                obj.balance = Math.max(0, Math.round((tot - pd) * 100) / 100);
+            }
             if (user) {
                 if (!obj.bankName) obj.bankName = user.bankName || "ABC Bank";
                 if (!obj.accountType) obj.accountType = user.accountType || "Current";
@@ -379,6 +463,18 @@ router.get("/all", verifyToken, async (req, res) => {
     }
 });
 
+// GET - Shared Authoritative Payables Summary for Dashboard and AI CFO Parity
+router.get("/payables-summary", verifyToken, async (req, res) => {
+    try {
+        const period = req.query.period || "this-month";
+        const summary = await getTotalPayables({ userId: req.user.id, period });
+        res.json(summary);
+    } catch (error) {
+        console.error("Error fetching payables summary:", error);
+        res.status(500).json({ message: "Failed to fetch payables summary", error: error.message });
+    }
+});
+
 // GET - Single purchase invoice by ID
 router.get("/:id", verifyToken, async (req, res) => {
     try {
@@ -395,35 +491,66 @@ router.get("/:id", verifyToken, async (req, res) => {
 });
 
 
-// POST - Record payment for purchase invoice
+// POST - Record payment for purchase invoice (isolated supplier-payable workflow)
 router.post("/:id/payment", verifyToken, async (req, res) => {
     try {
-        const { amount } = req.body;
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ message: "Invalid payment amount" });
+        const { amount, paymentMethod, paymentDate, referenceNumber, notes } = req.body;
+        const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || referenceNumber || "").trim();
+        const payAmt = Math.round((Number(amount) || 0) * 100) / 100;
+
+        if (isNaN(payAmt) || payAmt <= 0) {
+            return res.status(400).json({ message: "Invalid payment amount. Amount must be greater than 0." });
         }
         
         const invoice = await PurchaseInvoice.findOne({ _id: req.params.id, userId: req.user.id });
         if (!invoice) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
+
+        const grandTotal = Math.round((Number(invoice.total || invoice.subtotal) || 0) * 100) / 100;
+        const currentPaid = Math.round((Number(invoice.paid) || 0) * 100) / 100;
+        const currentBalance = Math.max(0, Math.round((grandTotal - currentPaid) * 100) / 100);
+
+        if (currentBalance <= 0) {
+            return res.status(400).json({
+                message: "Purchase invoice is already fully paid. Cannot accept further payment.",
+                total: grandTotal,
+                paid: currentPaid,
+                balance: 0
+            });
+        }
+
+        // Prevent payment greater than remaining balance
+        if (payAmt > currentBalance + 0.01) {
+            return res.status(400).json({
+                message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`,
+                total: grandTotal,
+                paid: currentPaid,
+                balance: currentBalance
+            });
+        }
+
+        const newPaid = Math.min(grandTotal, Math.round((currentPaid + payAmt) * 100) / 100);
+        const newBalance = Math.max(0, Math.round((grandTotal - newPaid) * 100) / 100);
         
-        // Update paid and balance
-        invoice.paid = (invoice.paid || 0) + Number(amount);
-        invoice.balance = invoice.total - invoice.paid;
-        
-        // Don't allow negative balance
-        if (invoice.balance < 0) {
-            invoice.balance = 0;
-            invoice.paid = invoice.total;
+        invoice.paid = newPaid;
+        invoice.balance = newBalance;
+        if (newBalance === 0) {
+            invoice.status = 'paid';
+        }
+        if (paymentMethod) {
+            invoice.paymentMethod = paymentMethod;
         }
         
         await invoice.save();
         
-        res.json({ message: "Payment recorded successfully", invoice });
+        res.json({
+            message: "Payment recorded successfully",
+            invoice
+        });
     } catch (error) {
         console.error("Error recording payment:", error);
-        res.status(500).json({ message: "Error recording payment" });
+        res.status(500).json({ message: "Error recording payment", error: error.message });
     }
 });
 
@@ -431,15 +558,32 @@ router.post("/:id/payment", verifyToken, async (req, res) => {
 
 router.delete("/:id", verifyToken, async (req, res) => {
     try {
-        const deleted = await PurchaseInvoice.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+        const cleanId = String(req.params.id).trim();
+        const idFilter = mongoose.Types.ObjectId.isValid(cleanId)
+            ? { $or: [{ _id: cleanId }, { billNo: cleanId }] }
+            : { billNo: cleanId };
+
+        const userIdObj = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+        const deleted = await PurchaseInvoice.findOneAndDelete({
+            ...idFilter,
+            userId: { $in: [req.user.id, userIdObj] }
+        });
         if (!deleted) {
             return res.status(404).json({ message: "Purchase invoice not found" });
         }
 
         // Remove automated Bookkeeping Entry
-        await removeAutomatedBookkeepingEntry({
-            userId: req.user.id,
-            referenceId: `purchase_inv_${req.params.id}`
+        const refIds = [
+            `purchase_inv_${deleted._id}`,
+            `purchase_inv_${deleted.billNo}`,
+            `purchase_${deleted._id}`,
+            `purchase_${deleted.billNo}`
+        ];
+        await BookkeepingEntry.deleteMany({
+            $or: [
+                { referenceId: { $in: refIds } },
+                { description: new RegExp(`Purchase Invoice ${deleted.billNo}\\b`, 'i') }
+            ]
         });
 
         res.json({ message: "Purchase invoice deleted" });

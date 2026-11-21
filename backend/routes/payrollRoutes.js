@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import Payroll from "../models/Payroll.js";
 import Employee from "../models/Employee.js";
+import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
 
 const router = express.Router();
 
@@ -342,6 +343,9 @@ router.post("/add", verifyToken, async (req, res) => {
     const newPayroll = new Payroll({
       ...body,
       userId,
+      employeeRole: body.employeeRole || "Staff",
+      employeeDepartment: body.employeeDepartment || "General",
+      employeeExperience: parseFloat(body.employeeExperience) || 0,
       basicSalary: basic,
       da,
       hra,
@@ -349,7 +353,7 @@ router.post("/add", verifyToken, async (req, res) => {
       overtimeAllowance,
       otherAllowance,
       bonuses,
-      grossSalary: grossSalaryCalc,
+      grossSalary: body.grossSalary !== undefined ? Math.max(0, parseFloat(body.grossSalary) || grossSalaryCalc) : grossSalaryCalc,
       pfDeduction,
       epfDeduction: epfDeductionCalc,
       esiDeduction,
@@ -358,13 +362,30 @@ router.post("/add", verifyToken, async (req, res) => {
       advanceRecoveryDeduction,
       loanDeduction,
       otherDeduction,
-      totalDeductions: totalDeductionsCalc,
-      netSalary: netSalaryCalc,
+      totalDeductions: body.totalDeductions !== undefined ? Math.max(0, parseFloat(body.totalDeductions) || totalDeductionsCalc) : totalDeductionsCalc,
+      netSalary: body.netSalary !== undefined ? Math.max(0, parseFloat(body.netSalary) || netSalaryCalc) : netSalaryCalc,
       payrollMonth: monthStr,
       status: body.status || "calculated",
+      createdAt: body.createdAt ? new Date(body.createdAt) : new Date(),
     });
 
     await newPayroll.save();
+
+    if (newPayroll.status === "paid") {
+      newPayroll.paymentDate = newPayroll.paymentDate || new Date();
+      const salaryExpenseAmount = newPayroll.grossSalary || newPayroll.netSalary;
+      if (salaryExpenseAmount > 0) {
+        await upsertAutomatedBookkeepingEntry({
+          userId,
+          date: newPayroll.createdAt || new Date(),
+          description: `Payroll Salary: ${newPayroll.employeeName} (${newPayroll.employeeId})`,
+          category: "Salaries",
+          amount: salaryExpenseAmount,
+          type: "expense",
+          referenceId: `payroll_${newPayroll._id}`
+        });
+      }
+    }
     res.status(201).json({ message: "Payroll data saved successfully!", payroll: newPayroll });
   } catch (error) {
     console.error("Error saving payroll:", error);
@@ -540,6 +561,31 @@ router.get("/employee/:employeeId", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("Error fetching employee payroll:", error);
     res.status(500).json({ message: "Error fetching employee payroll data", error: error.message });
+  }
+});
+
+// ✅ DELETE route to void/delete a payroll run and clean up accounting ledger
+router.delete("/:id", verifyToken, async (req, res) => {
+  try {
+    const deletedPayroll = await Payroll.findOneAndDelete({
+      _id: req.params.id,
+      userId: req.user.id
+    });
+
+    if (!deletedPayroll) {
+      return res.status(404).json({ message: "Payroll record not found or access denied" });
+    }
+
+    // Clean up automated bookkeeping entry
+    await removeAutomatedBookkeepingEntry({
+      userId: req.user.id,
+      referenceId: `payroll_${deletedPayroll._id}`
+    });
+
+    res.json({ message: "Payroll record deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting payroll record:", error);
+    res.status(500).json({ message: "Error deleting payroll record", error: error.message });
   }
 });
 

@@ -2,6 +2,7 @@ import express from "express";
 import mongoose from "mongoose";
 import BookkeepingEntry from "../models/BookkeepingEntry.js";
 import Category from "../models/Category.js";
+import Invoice from "../models/Invoice.js";
 import jwt from "jsonwebtoken";
 
 const router = express.Router();
@@ -14,6 +15,84 @@ const getUserIdMatchFilter = (userIdStr) => {
     return objId
         ? { $or: [{ userId: objId }, { userId: userIdStr }] }
         : { userId: userIdStr };
+};
+
+/**
+ * Ensures credit sales without payment or unpaid invoice amounts are NOT shown in bookkeeping.
+ * Only actual collected/paid income amounts appear in bookkeeping.
+ */
+const filterValidBookkeepingEntries = async (entries) => {
+    try {
+        const paymentRefs = entries
+            .filter(e => e.referenceId && typeof e.referenceId === 'string' && e.referenceId.startsWith('payment_'))
+            .map(e => e.referenceId.replace(/^payment_/, ''));
+
+        const invoiceRefs = entries
+            .filter(e => e.referenceId && typeof e.referenceId === 'string' && e.referenceId.startsWith('invoice_'))
+            .map(e => e.referenceId.replace(/^invoice_/, ''));
+
+        let matchedPayments = [];
+        if (paymentRefs.length > 0) {
+            const PaymentModel = mongoose.models.Payment || (await import("../models/Payment.js")).default;
+            matchedPayments = await PaymentModel.find({
+                _id: { $in: paymentRefs.filter(id => mongoose.Types.ObjectId.isValid(id)) }
+            }).lean();
+        }
+
+        const paymentMap = new Map();
+        const paymentInvoiceIds = [];
+        matchedPayments.forEach(p => {
+            paymentMap.set(String(p._id), p);
+            if (p.invoiceId) paymentInvoiceIds.push(p.invoiceId);
+        });
+
+        const allInvoiceIds = [...invoiceRefs, ...paymentInvoiceIds].filter(id => mongoose.Types.ObjectId.isValid(id));
+        const matchedInvoices = await Invoice.find({
+            _id: { $in: allInvoiceIds }
+        }).lean();
+
+        const invoiceMap = new Map();
+        matchedInvoices.forEach(inv => invoiceMap.set(String(inv._id), inv));
+
+        return entries.filter(entry => {
+            if (!entry.referenceId || typeof entry.referenceId !== 'string') return true;
+
+            // 1. Payment-level entries: each represents an individual collected payment (e.g. ₹499, ₹681)
+            if (entry.referenceId.startsWith('payment_')) {
+                const payId = entry.referenceId.replace(/^payment_/, '');
+                const payment = paymentMap.get(payId);
+                if (payment && payment.invoiceId) {
+                    const inv = invoiceMap.get(String(payment.invoiceId));
+                    if (inv && (inv.isDeleted || inv.status === 'cancelled')) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // 2. Legacy invoice-level entries
+            if (entry.referenceId.startsWith('invoice_')) {
+                const invId = entry.referenceId.replace(/^invoice_/, '');
+                const inv = invoiceMap.get(invId);
+                if (!inv) return true;
+
+                if (inv.isDeleted || inv.status === 'cancelled') return false;
+
+                const isCredit = String(inv.paymentMethod || inv.saleType || '').trim().toLowerCase() === 'credit';
+                const paid = Number(inv.amountPaid !== undefined ? inv.amountPaid : (inv.paid || 0));
+
+                if (isCredit && paid <= 0) return false;
+                if (paid <= 0 && inv.status !== 'paid' && inv.paymentStatus !== 'paid') return false;
+
+                return true;
+            }
+
+            return true;
+        });
+    } catch (err) {
+        console.warn("Bookkeeping filter notice:", err.message);
+        return entries;
+    }
 };
 
 // Middleware to verify token (strict authentication, no dummy fallback - DEF-BK-01)
@@ -153,15 +232,6 @@ router.get("/all", verifyToken, async (req, res) => {
     try {
         const { search, category, type, isAutomated, startDate, endDate } = req.query;
 
-        let page = parseInt(req.query.page) || 1;
-        if (isNaN(page) || page < 1) page = 1;
-
-        let limit = parseInt(req.query.limit) || 100;
-        if (isNaN(limit) || limit < 1) limit = 100;
-        if (limit > 100) limit = 100; // Enforce maximum limit of 100 entries per page
-
-        const skip = (page - 1) * limit;
-
         // Build dynamic MongoDB query filter
         const queryFilter = { userId: req.user.id };
 
@@ -193,58 +263,54 @@ router.get("/all", verifyToken, async (req, res) => {
             }
         }
 
-        const userMatchFilter = getUserIdMatchFilter(req.user.id);
+        const rawEntries = await BookkeepingEntry.find(queryFilter).sort({ date: -1 }).lean();
+        const validEntries = await filterValidBookkeepingEntries(rawEntries);
 
-        // Fetch paginated entries and aggregated totals without unbounded in-memory loading
-        const [entries, totalMatchingEntries, summaryAgg] = await Promise.all([
-            BookkeepingEntry.find(queryFilter)
-                .sort({ date: -1 })
-                .skip(skip)
-                .limit(limit)
-                .lean(),
-            BookkeepingEntry.countDocuments(queryFilter),
-            BookkeepingEntry.aggregate([
-                { $match: userMatchFilter },
-                {
-                    $group: {
-                        _id: "$type",
-                        totalAmount: { $sum: "$amount" },
-                        count: { $sum: 1 }
-                    }
-                }
-            ])
-        ]);
+        // Calculate totals (case-insensitive to support legacy data safely)
+        const totalIncome = validEntries
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'income')
+            .reduce((sum, entry) => sum + (entry.amount || 0), 0);
 
-        let totalIncome = 0;
-        let totalExpenses = 0;
-        let entryCount = 0;
-
-        summaryAgg.forEach(item => {
-            entryCount += item.count || 0;
-            if (item._id === 'income') {
-                totalIncome = item.totalAmount || 0;
-            } else if (item._id === 'expense') {
-                totalExpenses = item.totalAmount || 0;
-            }
-        });
+        const totalExpenses = validEntries
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'expense')
+            .reduce((sum, entry) => sum + (entry.amount || 0), 0);
 
         const netBalance = totalIncome - totalExpenses;
+        const entryCount = validEntries.length;
 
-        res.json({
+        let entries = validEntries;
+        let page = parseInt(req.query.page);
+        let limit = parseInt(req.query.limit);
+        const hasPagination = !isNaN(page) || !isNaN(limit);
+
+        if (hasPagination) {
+            if (isNaN(page) || page < 1) page = 1;
+            if (isNaN(limit) || limit < 1) limit = 100;
+            if (limit > 100) limit = 100;
+            const skip = (page - 1) * limit;
+            entries = validEntries.slice(skip, skip + limit);
+        }
+
+        const responsePayload = {
             entries,
             summary: {
                 totalIncome,
                 totalExpenses,
                 netBalance,
                 entryCount
-            },
-            pagination: {
-                page,
-                limit,
-                totalEntries: totalMatchingEntries,
-                totalPages: Math.ceil(totalMatchingEntries / limit)
             }
-        });
+        };
+
+        if (hasPagination) {
+            responsePayload.pagination = {
+                page: page || 1,
+                limit: limit || 100,
+                totalEntries: entryCount,
+                totalPages: Math.ceil(entryCount / (limit || 100))
+            };
+        }
+
+        res.json(responsePayload);
     } catch (error) {
         console.error("Error fetching bookkeeping data:", error);
         res.status(500).json({ message: "Error fetching bookkeeping data" });
@@ -271,58 +337,33 @@ router.delete("/:id", verifyToken, async (req, res) => {
 // ✅ GET route for financial summary
 router.get("/summary", verifyToken, async (req, res) => {
     try {
-        const userMatchFilter = getUserIdMatchFilter(req.user.id);
+        const rawEntries = await BookkeepingEntry.find({ userId: req.user.id }).lean();
+        const entries = await filterValidBookkeepingEntries(rawEntries);
 
-        const [typeAgg, categoryAgg] = await Promise.all([
-            BookkeepingEntry.aggregate([
-                { $match: userMatchFilter },
-                {
-                    $group: {
-                        _id: "$type",
-                        totalAmount: { $sum: "$amount" },
-                        count: { $sum: 1 }
-                    }
-                }
-            ]),
-            BookkeepingEntry.aggregate([
-                { $match: userMatchFilter },
-                {
-                    $group: {
-                        _id: { category: { $ifNull: ["$category", "General"] }, type: "$type" },
-                        totalAmount: { $sum: "$amount" }
-                    }
-                }
-            ])
-        ]);
+        const totalIncome = entries
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'income')
+            .reduce((sum, entry) => sum + (entry.amount || 0), 0);
 
-        let totalIncome = 0;
-        let totalExpenses = 0;
-        let entryCount = 0;
-
-        typeAgg.forEach(item => {
-            entryCount += item.count || 0;
-            if (item._id === 'income') {
-                totalIncome = item.totalAmount || 0;
-            } else if (item._id === 'expense') {
-                totalExpenses = item.totalAmount || 0;
-            }
-        });
-
-        const categoryBreakdown = {};
-        categoryAgg.forEach(item => {
-            const cat = item._id.category || "General";
-            if (!categoryBreakdown[cat]) {
-                categoryBreakdown[cat] = { income: 0, expenses: 0 };
-            }
-            if (item._id.type === 'income') {
-                categoryBreakdown[cat].income += item.totalAmount || 0;
-            } else {
-                categoryBreakdown[cat].expenses += item.totalAmount || 0;
-            }
-        });
+        const totalExpenses = entries
+            .filter(entry => entry.type && entry.type.toString().toLowerCase() === 'expense')
+            .reduce((sum, entry) => sum + (entry.amount || 0), 0);
 
         const netBalance = totalIncome - totalExpenses;
+        const entryCount = entries.length;
 
+        // Category-wise breakdown
+        const categoryBreakdown = entries.reduce((acc, entry) => {
+            const cat = entry.category || "General";
+            if (!acc[cat]) {
+                acc[cat] = { income: 0, expenses: 0 };
+            }
+            if (entry.type && entry.type.toString().toLowerCase() === 'income') {
+                acc[cat].income += (entry.amount || 0);
+            } else {
+                acc[cat].expenses += (entry.amount || 0);
+            }
+            return acc;
+        }, {});
         res.json({
             summary: {
                 totalIncome,

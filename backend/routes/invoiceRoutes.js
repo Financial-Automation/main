@@ -7,7 +7,9 @@ import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import { upsertAutomatedBookkeepingEntry, removeAutomatedBookkeepingEntry } from "../utils/bookkeepingHelper.js";
 import Invoice from "../models/Invoice.js";
-import { calculateAndValidateInvoice } from "../utils/invoiceCalculator.js";
+import BookkeepingEntry from "../models/BookkeepingEntry.js";
+import Payment from "../models/Payment.js";
+import { calculateAndValidateInvoice, validateAndRecalculateInvoice } from "../utils/invoiceCalculator.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,10 +53,17 @@ const verifyTokenOptional = (req, res, next) => {
 };
 
 const getInvoiceIdFilter = (idParam) => {
-  if (mongoose.Types.ObjectId.isValid(idParam)) {
-    return { _id: idParam };
+  if (!idParam) return { _id: null };
+  const cleanId = String(idParam).trim();
+  if (mongoose.Types.ObjectId.isValid(cleanId)) {
+    return {
+      $or: [
+        { _id: new mongoose.Types.ObjectId(cleanId) },
+        { invoiceNumber: cleanId }
+      ]
+    };
   }
-  return { invoiceNumber: idParam };
+  return { invoiceNumber: cleanId };
 };
 
 const getUserFilter = (req) => {
@@ -71,13 +80,43 @@ const getUserFilter = (req) => {
   };
 };
 
+const buildInvoiceQuery = (idParam, req, extraFilter = {}) => {
+  const idQuery = getInvoiceIdFilter(idParam);
+  const userFilter = getUserFilter(req);
+  const conditions = [idQuery];
+  if (userFilter && Object.keys(userFilter).length > 0) {
+    conditions.push(userFilter);
+  }
+  if (extraFilter && Object.keys(extraFilter).length > 0) {
+    conditions.push(extraFilter);
+  }
+  return conditions.length === 1 ? conditions[0] : { $and: conditions };
+};
+
 // ✅ 0. Public Invoice View (no auth required — for WhatsApp/email sharing links)
 router.get("/public/:id", async (req, res) => {
   try {
-    const invoice = await Invoice.findOne({
-      ...getInvoiceIdFilter(req.params.id),
-      isDeleted: false
-    });
+    const idParam = req.params.id;
+    let invoice = null;
+
+    if (idParam && mongoose.Types.ObjectId.isValid(idParam)) {
+      invoice = await Invoice.findOne({ _id: idParam, isDeleted: false });
+    }
+
+    if (!invoice && idParam) {
+      invoice = await Invoice.findOne({
+        invoiceNumber: idParam,
+        isDeleted: false
+      });
+    }
+
+    if (!invoice && idParam) {
+      // Case-insensitive match on invoiceNumber
+      invoice = await Invoice.findOne({
+        invoiceNumber: { $regex: new RegExp(`^${idParam}$`, 'i') },
+        isDeleted: false
+      });
+    }
 
     if (!invoice) {
       return res.status(404).json({ message: "Invoice not found" });
@@ -93,6 +132,9 @@ router.get("/public/:id", async (req, res) => {
 // ✅ 1. Create New Invoice
 router.post("/create", verifyToken, async (req, res) => {
   try {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`📥 Creating invoice for customer: ${req.body?.customerName || 'Cash Customer'}`);
+    }
     const invoiceData = req.body;
 
     if (!req.user || req.user.id === "000000000000000000000000") {
@@ -108,6 +150,46 @@ router.post("/create", verifyToken, async (req, res) => {
       invoiceData.createdBy = req.user.id;
     }
 
+    // Default required text fields to avoid validation rejections
+    if (!invoiceData.customerName || invoiceData.customerName.trim() === '') {
+      invoiceData.customerName = invoiceData.partyName || "Cash Customer";
+    }
+    if (!invoiceData.businessName || invoiceData.businessName.trim() === '') {
+      invoiceData.businessName = invoiceData.sellerName || "My Business";
+    }
+
+    // Generate invoice number if not provided
+    if (!invoiceData.invoiceNumber || invoiceData.invoiceNumber.trim() === '') {
+      const count = await Invoice.countDocuments({ userId: req.user.id, isDeleted: false });
+      invoiceData.invoiceNumber = `INV-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, '0')}`;
+    }
+
+    if (!invoiceData.dueDate) {
+      const baseDate = invoiceData.invoiceDate ? new Date(invoiceData.invoiceDate) : new Date();
+      invoiceData.dueDate = new Date(baseDate.getTime() + 15 * 24 * 60 * 60 * 1000);
+    }
+
+    // Resolve templateId if preset key is provided
+    if (invoiceData.templateId && typeof invoiceData.templateId === 'string' && !mongoose.Types.ObjectId.isValid(invoiceData.templateId)) {
+      try {
+        const InvoiceTemplate = mongoose.models.InvoiceTemplate;
+        if (InvoiceTemplate) {
+          const cleanKey = invoiceData.templateId.replace(/^tpl-/, "");
+          const matched = await InvoiceTemplate.findOne({
+            $or: [
+              { "config.layout": cleanKey },
+              { name: new RegExp(`^${cleanKey.replace(/-/g, " ")}$`, "i") }
+            ]
+          });
+          if (matched) {
+            invoiceData.templateId = matched._id;
+          }
+        }
+      } catch (tErr) {
+        // Fallback to storing as string/mixed
+      }
+    }
+
     // Authoritative Server-Side Calculation & Validation (DEF-INV-03 & DEF-INV-05)
     const calcResult = calculateAndValidateInvoice(invoiceData);
     if (!calcResult.valid) {
@@ -117,30 +199,78 @@ router.post("/create", verifyToken, async (req, res) => {
       });
     }
 
-    // Merge authoritative server calculations
-    Object.assign(invoiceData, calcResult.data);
-
-    // Generate invoice number if not provided
-    if (!invoiceData.invoiceNumber) {
-      const count = await Invoice.countDocuments({ userId: req.user.id, isDeleted: false });
-      invoiceData.invoiceNumber = `INV-${new Date().getFullYear()}-${(count + 1).toString().padStart(5, '0')}`;
+    // Validate and recalculate invoice line items, tax breakdown, subtotal, and grand total using authoritative calculation rules
+    const validatedData = validateAndRecalculateInvoice(invoiceData, invoiceData.businessState || "Tamil Nadu");
+    invoiceData.stateOfSupply = validatedData.stateOfSupply;
+    invoiceData.businessState = validatedData.businessState;
+    if (Array.isArray(validatedData.items) && validatedData.items.length > 0) {
+      invoiceData.items = validatedData.items;
+    }
+    invoiceData.subtotal = validatedData.subtotal;
+    invoiceData.taxAmount = validatedData.taxAmount;
+    invoiceData.cgst = validatedData.cgst;
+    invoiceData.sgst = validatedData.sgst;
+    invoiceData.igst = validatedData.igst;
+    invoiceData.shippingCharges = validatedData.shippingCharges;
+    invoiceData.packagingCharges = validatedData.packagingCharges;
+    invoiceData.freightCharges = validatedData.freightCharges;
+    invoiceData.adjustment = validatedData.adjustment;
+    invoiceData.grandTotal = validatedData.grandTotal;
+    invoiceData.amountPaid = validatedData.amountPaid;
+    invoiceData.balanceDue = validatedData.balanceDue;
+    invoiceData.paymentStatus = validatedData.paymentStatus;
+    if (invoiceData.balanceDue === 0 && invoiceData.grandTotal > 0) {
+      invoiceData.status = 'paid';
+    } else if (invoiceData.amountPaid > 0 && invoiceData.status === 'draft') {
+      invoiceData.status = 'sent';
     }
 
     const newInvoice = new Invoice(invoiceData);
     await newInvoice.save();
 
-    // Automatically generate Bookkeeping Entry for sales invoice
-    const invUserId = newInvoice.userId || req.user.id;
-    if (invUserId && invUserId !== "000000000000000000000000") {
-      await upsertAutomatedBookkeepingEntry({
-        userId: invUserId,
-        date: newInvoice.invoiceDate || new Date(),
-        description: `Sales Invoice ${newInvoice.invoiceNumber} to ${newInvoice.customerName}`,
-        category: "Sales",
-        amount: newInvoice.grandTotal,
-        type: "income",
-        referenceId: `invoice_${newInvoice._id}`
+    // If initial payment was recorded at creation, persist Payment audit record
+    const validatedPaid = validatedData.amountPaid || 0;
+    let initialPayment = null;
+    if (validatedPaid > 0) {
+      initialPayment = new Payment({
+        userId: newInvoice.userId || req.user?.id,
+        invoiceId: newInvoice._id,
+        paymentNumber: `PMT-${newInvoice.invoiceNumber}-01`,
+        amount: validatedPaid,
+        paymentDate: newInvoice.invoiceDate || new Date(),
+        paymentMethod: newInvoice.paymentMethod || 'cash',
+        depositAccount: "Cash/Bank",
+        referenceNumber: `init_${newInvoice.invoiceNumber}`,
+        notes: "Initial payment recorded during invoice creation.",
+        idempotencyKey: `init_${newInvoice._id}`
       });
+      await initialPayment.save();
+    }
+
+    // Automatically generate Bookkeeping Entry for sales invoice payment
+    // Credit pota or pay panatha amount bookkeeping-la kata kudathu.
+    // Only actual paid/collected amount is recorded as income in bookkeeping.
+    const invUserId = newInvoice.userId || req.user?.id;
+    if (invUserId && invUserId !== "000000000000000000000000") {
+      const isCredit = String(newInvoice.paymentMethod || newInvoice.saleType || "").trim().toLowerCase() === "credit";
+      const paidIncome = Number(newInvoice.amountPaid !== undefined ? newInvoice.amountPaid : (newInvoice.paid || 0));
+
+      if (paidIncome > 0) {
+        await upsertAutomatedBookkeepingEntry({
+          userId: invUserId,
+          date: newInvoice.invoiceDate || new Date(),
+          description: `Sales Invoice ${newInvoice.invoiceNumber}${isCredit ? " (Partial Payment)" : ""} to ${newInvoice.customerName}`,
+          category: "Sales",
+          amount: paidIncome,
+          type: "income",
+          referenceId: `invoice_${newInvoice._id}`
+        });
+      } else {
+        await removeAutomatedBookkeepingEntry({
+          userId: invUserId,
+          referenceId: `invoice_${newInvoice._id}`
+        });
+      }
     }
 
     // Link customer or auto-create Customer document if needed
@@ -469,13 +599,7 @@ router.get("/search", verifyToken, async (req, res) => {
 // ✅ 3. Get Single Invoice by ID
 router.get("/:id", verifyToken, async (req, res) => {
   try {
-    const userFilter = getUserFilter(req);
-
-    const invoice = await Invoice.findOne({
-      ...getInvoiceIdFilter(req.params.id),
-      isDeleted: false,
-      ...userFilter
-    }).lean();
+    const invoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false })).lean();
 
     if (!invoice) {
       return res.status(404).json({
@@ -530,34 +654,60 @@ router.put("/:id", verifyToken, async (req, res) => {
       return res.status(401).json({ message: "Access denied. Valid user token required." });
     }
 
-    const currentInvoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter }).lean();
+    // Find existing invoice first
+    const currentInvoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false }));
     if (!currentInvoice) {
-      return res.status(404).json({
-        message: "Invoice not found"
-      });
+      return res.status(404).json({ message: "Invoice not found" });
     }
 
-    // Authoritative Server-Side Calculation & Validation on update if items or financial totals are present (DEF-INV-03 & DEF-INV-05)
-    if (updateData.items || updateData.grandTotal !== undefined || updateData.subtotal !== undefined) {
-      const mergedData = {
+    // Recalculate totals if items or place of supply are updated
+    if (Array.isArray(updateData.items) && updateData.items.length > 0) {
+      const mergedInvoice = {
         ...(currentInvoice.toObject ? currentInvoice.toObject() : currentInvoice),
-        ...updateData
+        ...updateData,
+        items: updateData.items
       };
-      const calcResult = calculateAndValidateInvoice(mergedData);
+      const calcResult = calculateAndValidateInvoice(mergedInvoice);
       if (!calcResult.valid) {
         return res.status(calcResult.statusCode || 400).json({
           message: calcResult.error,
           error: "Invoice calculation validation failed"
         });
       }
-      Object.assign(updateData, calcResult.data);
-    } else if (updateData.amountPaid !== undefined) {
-      updateData.balanceDue = Math.max(0, currentInvoice.grandTotal - updateData.amountPaid);
-      if (updateData.balanceDue === 0) {
+      const validatedData = validateAndRecalculateInvoice(mergedInvoice, mergedInvoice.businessState || "Tamil Nadu");
+      updateData.items = validatedData.items;
+      updateData.subtotal = validatedData.subtotal;
+      updateData.taxAmount = validatedData.taxAmount;
+      updateData.cgst = validatedData.cgst;
+      updateData.sgst = validatedData.sgst;
+      updateData.igst = validatedData.igst;
+      updateData.shippingCharges = validatedData.shippingCharges;
+      updateData.packagingCharges = validatedData.packagingCharges;
+      updateData.freightCharges = validatedData.freightCharges;
+      updateData.adjustment = validatedData.adjustment;
+      updateData.grandTotal = validatedData.grandTotal;
+      updateData.amountPaid = validatedData.amountPaid;
+      updateData.balanceDue = validatedData.balanceDue;
+      updateData.paymentStatus = validatedData.paymentStatus;
+      if (updateData.balanceDue === 0 && updateData.grandTotal > 0) {
+        updateData.status = 'paid';
+      }
+    } else if (updateData.amountPaid !== undefined || updateData.grandTotal !== undefined) {
+      const grandTotal = Math.round((Number(updateData.grandTotal !== undefined ? updateData.grandTotal : currentInvoice.grandTotal) || 0) * 100) / 100;
+      const requestedPaid = Math.round((Number(updateData.amountPaid !== undefined ? updateData.amountPaid : currentInvoice.amountPaid) || 0) * 100) / 100;
+      const validatedPaid = Math.min(grandTotal, Math.max(0, requestedPaid));
+      updateData.grandTotal = grandTotal;
+      updateData.amountPaid = validatedPaid;
+      updateData.balanceDue = Math.max(0, Math.round((grandTotal - validatedPaid) * 100) / 100);
+
+      // Update payment status based on balance
+      if (updateData.balanceDue === 0 && grandTotal > 0) {
         updateData.paymentStatus = 'paid';
         updateData.status = 'paid';
-      } else if (updateData.amountPaid > 0) {
+      } else if (validatedPaid > 0) {
         updateData.paymentStatus = 'partial';
+      } else {
+        updateData.paymentStatus = 'pending';
       }
     }
 
@@ -566,8 +716,28 @@ router.put("/:id", verifyToken, async (req, res) => {
     delete updateData.createdBy;
     updateData.updatedAt = new Date();
 
+    if (updateData.templateId && typeof updateData.templateId === 'string' && !mongoose.Types.ObjectId.isValid(updateData.templateId)) {
+      try {
+        const InvoiceTemplate = mongoose.models.InvoiceTemplate;
+        if (InvoiceTemplate) {
+          const cleanKey = updateData.templateId.replace(/^tpl-/, "");
+          const matched = await InvoiceTemplate.findOne({
+            $or: [
+              { "config.layout": cleanKey },
+              { name: new RegExp(`^${cleanKey.replace(/-/g, " ")}$`, "i") }
+            ]
+          });
+          if (matched) {
+            updateData.templateId = matched._id;
+          }
+        }
+      } catch (tErr) {
+        // Fallback to storing as string/mixed
+      }
+    }
+
     const updatedInvoice = await Invoice.findOneAndUpdate(
-      { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
+      { _id: currentInvoice._id },
       updateData,
       { new: true, runValidators: true }
     );
@@ -579,9 +749,14 @@ router.put("/:id", verifyToken, async (req, res) => {
     }
 
     // Sync automated Bookkeeping Entry
-    const invUserId = updatedInvoice.userId || req.user.id;
+    // Credit pota or pay panatha amount bookkeeping-la kata kudathu.
+    // Only actual paid/collected amount is recorded as income in bookkeeping.
+    const invUserId = updatedInvoice.userId || req.user?.id;
     if (invUserId && invUserId !== "000000000000000000000000") {
-      if (updatedInvoice.status === 'cancelled' || updatedInvoice.isDeleted) {
+      const isCredit = String(updatedInvoice.paymentMethod || updatedInvoice.saleType || "").trim().toLowerCase() === "credit";
+      const paidIncome = Number(updatedInvoice.amountPaid !== undefined ? updatedInvoice.amountPaid : (updatedInvoice.paid || 0));
+
+      if (updatedInvoice.status === 'cancelled' || updatedInvoice.isDeleted || paidIncome <= 0) {
         await removeAutomatedBookkeepingEntry({
           userId: invUserId,
           referenceId: `invoice_${updatedInvoice._id}`
@@ -590,7 +765,7 @@ router.put("/:id", verifyToken, async (req, res) => {
         await upsertAutomatedBookkeepingEntry({
           userId: invUserId,
           date: updatedInvoice.invoiceDate || new Date(),
-          description: `Sales Invoice ${updatedInvoice.invoiceNumber} to ${updatedInvoice.customerName}`,
+          description: `Sales Invoice ${updatedInvoice.invoiceNumber}${isCredit ? " (Partial Payment)" : ""} to ${updatedInvoice.customerName}`,
           category: "Sales",
           amount: updatedInvoice.grandTotal,
           type: "income",
@@ -612,38 +787,102 @@ router.put("/:id", verifyToken, async (req, res) => {
   }
 });
 
-// ✅ 6. Delete Invoice (Soft Delete)
+// ✅ 6. Delete Invoice (Hard Delete & Cascade to Bookkeeping/Payments)
 router.delete("/:id", verifyToken, async (req, res) => {
   try {
-    const userFilter = getUserFilter(req);
+    const invoiceToDelete = await Invoice.findOne(buildInvoiceQuery(req.params.id, req));
 
-    const deletedInvoice = await Invoice.findOneAndUpdate(
-      { ...getInvoiceIdFilter(req.params.id), ...userFilter },
-      {
-        isDeleted: true,
-        status: 'cancelled',
-        updatedAt: new Date()
-      },
-      { new: true }
-    );
-
-    if (!deletedInvoice) {
+    if (!invoiceToDelete) {
       return res.status(404).json({
         message: "Invoice not found"
       });
     }
 
-    // Remove automated Bookkeeping Entry
-    const invUserId = deletedInvoice.userId || req.user?.id;
-    if (invUserId) {
-      await removeAutomatedBookkeepingEntry({
-        userId: invUserId,
-        referenceId: `invoice_${deletedInvoice._id}`
-      });
+    // Delete the invoice permanently
+    await Invoice.deleteOne({ _id: invoiceToDelete._id });
+
+    // 1. Remove automated Bookkeeping Entry associated with this invoice and its payments
+    const invUserId = invoiceToDelete.userId || req.user?.id;
+    const invoicePayments = await Payment.find({
+      $or: [
+        { invoiceId: invoiceToDelete._id },
+        { invoiceNumber: invoiceToDelete.invoiceNumber }
+      ]
+    });
+    const paymentRefIds = invoicePayments.map(p => `payment_${p._id}`);
+
+    const refIds = [
+      `invoice_${invoiceToDelete._id}`,
+      `invoice_${invoiceToDelete.invoiceNumber}`,
+      invoiceToDelete.id ? `invoice_${invoiceToDelete.id}` : null,
+      ...paymentRefIds
+    ].filter(Boolean);
+
+    await BookkeepingEntry.deleteMany({
+      $or: [
+        { referenceId: { $in: refIds } },
+        { description: new RegExp(`Sales Invoice ${invoiceToDelete.invoiceNumber}\\b`, 'i') }
+      ]
+    });
+
+    // 2. Remove Payments recorded against this invoice
+    await Payment.deleteMany({
+      $or: [
+        { invoiceId: invoiceToDelete._id },
+        { invoiceNumber: invoiceToDelete.invoiceNumber }
+      ]
+    });
+
+    // 3. Cascade restore Inventory stock for all items in this invoice
+    try {
+      const InventoryItem = mongoose.models.InventoryItem;
+      if (InventoryItem && Array.isArray(invoiceToDelete.items)) {
+        for (const item of invoiceToDelete.items) {
+          const qty = Number(item.quantity) || 0;
+          if (qty <= 0) continue;
+
+          const orConditions = [];
+          if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
+            orConditions.push({ _id: new mongoose.Types.ObjectId(item.productId) });
+          }
+          if (item.inventoryItemId && mongoose.Types.ObjectId.isValid(item.inventoryItemId)) {
+            orConditions.push({ _id: new mongoose.Types.ObjectId(item.inventoryItemId) });
+          }
+          if (item.sku || item.itemCode) {
+            orConditions.push({ sku: item.sku || item.itemCode });
+          }
+          const prodName = item.productName || item.itemName;
+          if (prodName) {
+            orConditions.push({ itemName: new RegExp(`^${prodName.trim()}$`, 'i') });
+          }
+
+          if (orConditions.length > 0) {
+            const invQuery = { $or: orConditions };
+            if (invUserId && invUserId !== "000000000000000000000000") {
+              invQuery.userId = mongoose.Types.ObjectId.isValid(invUserId)
+                ? { $in: [new mongoose.Types.ObjectId(invUserId), invUserId] }
+                : invUserId;
+            }
+
+            const invDoc = await InventoryItem.findOne(invQuery);
+            if (invDoc) {
+              invDoc.quantity = (invDoc.quantity || 0) + qty;
+              invDoc.lastUpdated = new Date();
+              await invDoc.save();
+            }
+          }
+        }
+      }
+    } catch (invErr) {
+      console.warn("Failed to restore inventory stock on delete:", invErr.message);
     }
 
     res.json({
-      message: "Invoice deleted successfully!"
+      message: "Invoice deleted successfully!",
+      deletedInvoice: {
+        _id: invoiceToDelete._id,
+        invoiceNumber: invoiceToDelete.invoiceNumber
+      }
     });
   } catch (error) {
     console.error("Error deleting invoice:", error);
@@ -667,20 +906,17 @@ router.patch("/:id/status", verifyToken, async (req, res) => {
       });
     }
 
-    const updatedInvoice = await Invoice.findOneAndUpdate(
-      { ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter },
-      {
-        status,
-        updatedAt: new Date()
-      },
-      { new: true }
-    );
+    const targetInvoice = await Invoice.findOne(buildInvoiceQuery(req.params.id, req, { isDeleted: false }));
 
-    if (!updatedInvoice) {
+    if (!targetInvoice) {
       return res.status(404).json({
         message: "Invoice not found"
       });
     }
+
+    targetInvoice.status = status;
+    targetInvoice.updatedAt = new Date();
+    const updatedInvoice = await targetInvoice.save();
 
     res.json({
       message: "Invoice status updated successfully!",
@@ -695,32 +931,149 @@ router.patch("/:id/status", verifyToken, async (req, res) => {
   }
 });
 
-// ✅ 8. Update Payment Status
+// ✅ 8. Update Payment Status (with Idempotency, Capping, & Audit Trail)
 router.all("/:id/payment", verifyToken, async (req, res) => {
   if (req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'PUT') {
     return res.status(405).json({ message: "Method not allowed" });
   }
   try {
-    const { amount, amountPaid, paymentMethod, paymentDate, paymentStatus } = req.body;
-    const payAmt = parseFloat(amount || amountPaid || 0);
+    const {
+      amount,
+      amountPaid,
+      paymentMethod,
+      paymentDate,
+      paymentStatus,
+      referenceNumber,
+      transactionReference,
+      notes,
+      depositAccount
+    } = req.body;
 
     const userFilter = getUserFilter(req);
+    const idempotencyKey = String(req.body.idempotencyKey || req.headers['idempotency-key'] || referenceNumber || transactionReference || "").trim();
 
-    const invoice = await Invoice.findOne({ ...getInvoiceIdFilter(req.params.id), isDeleted: false, ...userFilter });
+    let invoice = await Invoice.findOne({
+      ...getInvoiceIdFilter(req.params.id),
+      isDeleted: false,
+      ...userFilter
+    });
     if (!invoice) {
       return res.status(404).json({ message: "Invoice not found" });
     }
 
-    const newAmountPaid = (invoice.amountPaid || 0) + payAmt;
-    const newBalanceDue = Math.max(0, invoice.grandTotal - newAmountPaid);
-    const newPaymentStatus = newBalanceDue <= 0 ? 'paid' : newAmountPaid > 0 ? 'partial' : 'pending';
+    // 1. Idempotency Check: prevent duplicate processing on retries or double-clicks
+    if (idempotencyKey) {
+      const existingPayment = await Payment.findOne({
+        invoiceId: invoice._id,
+        idempotencyKey
+      });
+      if (existingPayment) {
+        return res.json({
+          message: "Payment already recorded (idempotent duplicate)",
+          invoice,
+          payment: existingPayment,
+          isDuplicate: true
+        });
+      }
+    }
 
+    // 2. Handle Credit (Unpaid) or parse payment amount
+    const isCredit = Boolean(req.body.isCredit || String(paymentMethod || '').toLowerCase() === 'credit');
+    const grandTotal = Math.round((Number(invoice.grandTotal) || 0) * 100) / 100;
+    const currentPaid = Math.round((Number(invoice.amountPaid) || 0) * 100) / 100;
+
+    let payAmt = 0;
+    if (amount !== undefined && amount !== null && !isNaN(parseFloat(amount))) {
+      payAmt = parseFloat(amount);
+    } else if (amountPaid !== undefined && amountPaid !== null && !isNaN(parseFloat(amountPaid))) {
+      payAmt = parseFloat(amountPaid);
+    }
+    payAmt = Math.round(payAmt * 100) / 100;
+
+    // Only do a zero-payment credit reset if amount is explicitly 0 or not provided
+    if (isCredit && payAmt <= 0) {
+      invoice.amountPaid = 0;
+      invoice.balanceDue = grandTotal;
+      invoice.paymentStatus = 'pending';
+      invoice.status = 'sent';
+      invoice.paymentMethod = 'credit';
+      if (paymentDate) invoice.invoiceDate = new Date(paymentDate);
+      invoice.updatedAt = new Date();
+      await invoice.save();
+
+      if (invoice.userId && invoice.userId !== "000000000000000000000000") {
+        await removeAutomatedBookkeepingEntry({
+          userId: invoice.userId,
+          referenceId: `invoice_${invoice._id}`
+        });
+      }
+
+      return res.json({
+        message: "Invoice marked as Credit (Unpaid)",
+        invoice
+      });
+    }
+
+    if (isNaN(payAmt) || payAmt <= 0) {
+      return res.status(400).json({ message: "Invalid payment amount. Amount must be greater than 0." });
+    }
+
+    const currentBalance = Math.max(0, Math.round((grandTotal - currentPaid) * 100) / 100);
+
+    if (req.body.isCumulative) {
+      if (payAmt > grandTotal + 0.01) {
+        return res.status(400).json({
+          message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed invoice total (₹${grandTotal.toFixed(2)}).`,
+          grandTotal,
+          amountPaid: currentPaid,
+          balanceDue: currentBalance
+        });
+      }
+    } else {
+      if (payAmt > currentBalance + 0.01) {
+        return res.status(400).json({
+          message: `Payment amount (₹${payAmt.toFixed(2)}) cannot exceed remaining balance (₹${currentBalance.toFixed(2)}).`,
+          grandTotal,
+          amountPaid: currentPaid,
+          balanceDue: currentBalance
+        });
+      }
+    }
+
+    // Incremental payment towards remaining balance
+    let newAmountPaid;
+    if (req.body.isCumulative) {
+      newAmountPaid = Math.min(grandTotal, payAmt);
+    } else {
+      newAmountPaid = Math.min(grandTotal, Math.round((currentPaid + payAmt) * 100) / 100);
+    }
+
+    const newBalanceDue = Math.max(0, Math.round((grandTotal - newAmountPaid) * 100) / 100);
+    const newStatus = newBalanceDue <= 0 ? 'paid' : 'sent';
+    const newPaymentStatus = newBalanceDue <= 0 ? 'paid' : (newAmountPaid > 0 ? 'partial' : 'pending');
+
+    // 3. Persist Payment audit record
+    const pCount = await Payment.countDocuments({ invoiceId: invoice._id });
+    const paymentNumber = `PMT-${invoice.invoiceNumber || invoice._id}-${(pCount + 1).toString().padStart(2, '0')}`;
+    const paymentRecord = new Payment({
+      userId: invoice.userId || req.user?.id,
+      invoiceId: invoice._id,
+      paymentNumber,
+      amount: payAmt,
+      paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
+      paymentMethod: paymentMethod || invoice.paymentMethod || 'cash',
+      depositAccount: depositAccount || "Cash/Bank",
+      referenceNumber: referenceNumber || transactionReference || idempotencyKey || "",
+      notes: notes || `Payment received against invoice ${invoice.invoiceNumber}`,
+      idempotencyKey: idempotencyKey || ""
+    });
+    await paymentRecord.save();
+
+    // 4. Update Invoice
     invoice.amountPaid = newAmountPaid;
     invoice.balanceDue = newBalanceDue;
     invoice.paymentStatus = paymentStatus || newPaymentStatus;
-    if (newBalanceDue <= 0) {
-      invoice.status = 'paid';
-    }
+    invoice.status = newStatus;
     if (paymentMethod) invoice.paymentMethod = paymentMethod;
     if (paymentDate) invoice.paymentDate = new Date(paymentDate);
     invoice.updatedAt = new Date();
@@ -745,9 +1098,51 @@ router.all("/:id/payment", verifyToken, async (req, res) => {
       }
     }
 
+    // 5. Update Double-Entry Ledger (Debit Cash/Bank, Credit Accounts Receivable)
+    try {
+      const LedgerAccount = mongoose.models.LedgerAccount || mongoose.model("LedgerAccount");
+      if (LedgerAccount && invoice.userId) {
+        const [cashAcc, arAcc] = await Promise.all([
+          LedgerAccount.findOne({ userId: invoice.userId, name: "Cash/Bank" }),
+          LedgerAccount.findOne({ userId: invoice.userId, name: "Accounts Receivable" })
+        ]);
+        if (cashAcc) {
+          cashAcc.balance = Math.round((cashAcc.balance + payAmt) * 100) / 100;
+          await cashAcc.save();
+        }
+        if (arAcc) {
+          arAcc.balance = Math.round((arAcc.balance - payAmt) * 100) / 100;
+          await arAcc.save();
+        }
+      }
+    } catch (ledgerErr) {
+      console.warn("Ledger sync notice:", ledgerErr.message);
+    }
+
+    // 6. Sync automated Bookkeeping Entry with actual collected cash for this invoice
+    try {
+      const invUserId = invoice.userId || req.user?.id;
+      if (invUserId && invUserId !== "000000000000000000000000") {
+        if (newAmountPaid > 0) {
+          await upsertAutomatedBookkeepingEntry({
+            userId: invUserId,
+            date: paymentDate ? new Date(paymentDate) : (invoice.invoiceDate || new Date()),
+            description: `Sales Invoice ${invoice.invoiceNumber} to ${invoice.customerName}`,
+            category: "Sales",
+            amount: invoice.grandTotal,
+            type: "income",
+            referenceId: `invoice_${invoice._id}`
+          });
+        }
+      }
+    } catch (bkErr) {
+      console.warn("Bookkeeping payment sync notice:", bkErr.message);
+    }
+
     res.json({
-      message: "Payment status updated successfully!",
-      invoice
+      message: "Payment recorded successfully!",
+      invoice,
+      payment: paymentRecord
     });
   } catch (error) {
     console.error("Error updating payment status:", error);

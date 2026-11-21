@@ -170,7 +170,10 @@ const TaxGST = () => {
         console.error("Error saving data:", data);
       } else {
         // Refresh returns data after successful save
-        const response = await fetch(`${API_ENDPOINTS.TAX}/all`);
+        const token = localStorage.getItem("token");
+        const response = await fetch(`${API_ENDPOINTS.TAX}/all`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
         const newData = await response.json();
         setReturns(newData);
         setFilteredReturns(newData);

@@ -207,6 +207,35 @@ function calculateCPM(tasks) {
         });
     });
 
+    // Cycle detection to prevent infinite recursion / NaN propagation
+    const cycleVisiting = new Set();
+    const cycleVisited = new Set();
+    let hasCycle = false;
+
+    function detectCycle(nodeId) {
+        if (cycleVisiting.has(nodeId)) {
+            hasCycle = true;
+            return true;
+        }
+        if (cycleVisited.has(nodeId)) return false;
+
+        cycleVisiting.add(nodeId);
+        for (const pred of graph[nodeId]?.predecessors || []) {
+            if (detectCycle(pred)) return true;
+        }
+        cycleVisiting.delete(nodeId);
+        cycleVisited.add(nodeId);
+        return false;
+    }
+
+    for (const nodeId of Object.keys(graph)) {
+        if (detectCycle(nodeId)) break;
+    }
+
+    if (hasCycle) {
+        throw new Error("Circular dependency detected in project tasks. Please eliminate task loops.");
+    }
+
     // Forward Pass (ES, EF)
     const ES = {};
     const EF = {};

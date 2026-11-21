@@ -210,6 +210,13 @@ export const authenticateUser = async (req, res, next) => {
     if (error.name === "TokenExpiredError") {
       return res.status(401).json({ message: "Token expired. Please log in again." });
     }
+    if (error.name === "MongooseError" || error.name === "MongoServerSelectionError" || error.message?.includes("buffering timed out")) {
+      return res.status(503).json({
+        success: false,
+        code: "DATABASE_UNAVAILABLE",
+        message: "Database connection is temporarily unavailable. Please retry in a few moments."
+      });
+    }
     return res.status(401).json({ message: "Invalid authorization token." });
   }
 };
@@ -230,6 +237,20 @@ export const checkSubscription = async (req, res, next) => {
     logPerf(perf, "checkSubscription");
     req._t_sub_done = performance.now();
     return res.status(401).json({ message: "User not authenticated." });
+  }
+
+  // Admin users bypass subscription check
+  if (req.user.role === "admin") {
+    return next();
+  }
+
+  // Active or trial users bypass subscription check
+  if (
+    req.user.subscriptionStatus === "active" ||
+    req.user.subscriptionStatus === "trial" ||
+    (req.user.trialEndDate && new Date(req.user.trialEndDate) > new Date())
+  ) {
+    return next();
   }
 
   if (req.user.subscriptionStatus === "expired" || (req.user.subscriptionEndDate && new Date() > new Date(req.user.subscriptionEndDate))) {
