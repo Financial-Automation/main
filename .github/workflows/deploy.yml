@@ -11,8 +11,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    name: Continuous Integration & Regression Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Frontend Dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Install Backend Dependencies
+        run: |
+          cd backend
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+          cd ..
+
+      - name: TypeScript Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build Frontend
+        run: |
+          export NODE_OPTIONS="--max-old-space-size=2048"
+          npm run build
+          test -f dist/index.html
+
+      - name: Run Backend Unit Tests (In-Memory MongoDB)
+        run: |
+          cd backend
+          npm test
+          cd ..
+
+      - name: Run Security & Middleware Scenarios
+        run: |
+          node --test tests/auth_middleware.test.js tests/auth_security_scenarios.test.js tests/cashflow_payroll.test.js
+
+      - name: Run Golden-Flow Regression Suite (Isolated MongoMemoryServer)
+        env:
+          CI: "true"
+          USE_IN_MEMORY_DB: "true"
+          BLOCK_PROD_FALLBACK: "true"
+          DEV_MODE: "true"
+          NODE_ENV: "test"
+          TEST_PORT: "5098"
+        run: |
+          npm run test
+
   deploy:
     name: Deploy to Production
+    needs: ci
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
 
     steps:
@@ -146,9 +210,6 @@ jobs:
 
           test -f "$APP_DIR/dist/index.html"
 
-          echo "Running Permanent Regression Protection Suite..."
-          npm run test
-
           echo "Publishing frontend..."
           sudo mkdir -p "$WEB_DIR"
           sudo rsync -a --delete "$APP_DIR/dist/" "$WEB_DIR/"
@@ -191,6 +252,9 @@ jobs:
 
           echo "Checking live frontend..."
           curl -fsS https://software.saaiss.in/ > /dev/null
+
+          echo "Checking live backend health..."
+          curl -fsS http://localhost:5001/api/health > /dev/null
 
           echo "=========================================="
           echo "DEPLOYMENT SUCCESSFUL"

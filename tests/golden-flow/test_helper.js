@@ -1,11 +1,13 @@
 import http from "http";
 import assert from "assert";
 
-const API_BASE = process.env.TEST_API_URL || "http://localhost:5001/api";
+export function getApiBase() {
+  return process.env.TEST_API_URL || "http://localhost:5001/api";
+}
 
 export async function request(path, options = {}, body = null) {
   return new Promise((resolve, reject) => {
-    const url = new URL(API_BASE + path);
+    const url = new URL(getApiBase() + path);
     const reqOptions = {
       method: options.method || "GET",
       hostname: url.hostname,
@@ -41,17 +43,21 @@ export async function request(path, options = {}, body = null) {
   });
 }
 
-export async function ensureServerReady() {
-  try {
-    const res = await request("/health");
-    if (res.status === 200 && res.body?.status === "ok") {
-      return true;
+export async function ensureServerReady(retries = 30, delayMs = 500) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await request("/health");
+      if (res.status === 200 && res.body?.status === "ok") {
+        return true;
+      }
+    } catch (err) {
+      // Server not ready yet; wait and retry
     }
-  } catch (err) {
-    console.error(`⚠️ Server at ${API_BASE} is not reachable. Make sure backend is running.`);
-    throw new Error(`Backend server not reachable at ${API_BASE}. Run 'npm run dev' or 'node backend/server.js'.`);
+    await new Promise(r => setTimeout(r, delayMs));
   }
-  return true;
+  const api = getApiBase();
+  console.error(`⚠️ Server at ${api} is not reachable. Make sure backend is running.`);
+  throw new Error(`Backend server not reachable at ${api}. Run 'npm run dev' or 'node backend/server.js'.`);
 }
 
 export { assert };
