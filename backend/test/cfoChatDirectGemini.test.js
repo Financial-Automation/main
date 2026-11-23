@@ -14,9 +14,34 @@ let app;
 let server;
 let serverPort;
 let authToken;
+let originalGetGenerativeModel = null;
 const testUserId = new mongoose.Types.ObjectId();
 
 test.before(async () => {
+  const ai = getGenAI();
+  if (ai && !originalGetGenerativeModel) {
+    originalGetGenerativeModel = ai.getGenerativeModel.bind(ai);
+    ai.getGenerativeModel = (opts) => ({
+      generateContent: async (contents) => {
+        const str = JSON.stringify(contents);
+        let text = "I am SHREE ANDAL AI, your executive CFO copilot.";
+        if (/working capital/i.test(str)) {
+          text = "Working capital is the measure of available operational liquidity, calculated as current assets minus current liabilities.";
+        } else if (/total payables|payables/i.test(str)) {
+          text = "Your Total Payables for this month is ₹15,000.00.";
+        } else if (/invoice/i.test(str)) {
+          text = "To create a sales invoice, navigate to Invoices and select Create Invoice.";
+        }
+        return {
+          response: {
+            candidates: [{ finishReason: "STOP" }],
+            text: () => text
+          }
+        };
+      }
+    });
+  }
+
   mongod = await MongoMemoryServer.create();
   const uri = mongod.getUri();
   await mongoose.connect(uri);
@@ -63,7 +88,7 @@ test.before(async () => {
     billDate: thisMonthDate,
   });
 
-  const secret = process.env.JWT_SECRET || "0069cff5788a79456b669c22226ae865030898099c7b76467ae1cbdf12cdbea29a4fb839215600cb3af802cde900104e85ce421ff2a02a33920282359c3825c4";
+  const secret = process.env.JWT_SECRET || "fallback_jwt_secret_2024_finance_app";
   authToken = jwt.sign(
     { id: testUserId.toString(), email: "cfo_test@saaiss.in", role: "admin" },
     secret,
@@ -83,6 +108,10 @@ test.before(async () => {
 });
 
 test.after(async () => {
+  const ai = getGenAI();
+  if (ai && originalGetGenerativeModel) {
+    ai.getGenerativeModel = originalGetGenerativeModel;
+  }
   if (server) await new Promise((res) => server.close(res));
   await mongoose.disconnect();
   if (mongod) await mongod.stop();
